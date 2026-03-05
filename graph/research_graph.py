@@ -782,9 +782,15 @@ def archive_writer(state: ResearchState) -> ResearchState:
     # Write machine-readable signals.json for executor consumption (§A.1)
     new_candidates_for_signals = state.get("new_candidates", [])
     candidate_tickers_set = {c["symbol"] for c in new_candidates_for_signals}
+    # Enrich sector_ratings with modifier field so executor has all sizing inputs
+    _sector_modifiers = state.get("sector_modifiers", {})
+    _sector_ratings_enriched = {
+        sector: {**v, "modifier": round(_sector_modifiers.get(sector, 1.0), 3)}
+        for sector, v in state.get("sector_ratings", {}).items()
+    }
     signals_payload = {
         "market_regime": state.get("market_regime", "neutral"),
-        "sector_ratings": state.get("sector_ratings", {}),
+        "sector_ratings": _sector_ratings_enriched,
         "universe": [
             {
                 "ticker": t,
