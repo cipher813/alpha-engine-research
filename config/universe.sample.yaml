@@ -1,0 +1,81 @@
+universe:
+  - ticker: AAPL
+    sector: Technology
+  - ticker: MSFT
+    sector: Technology
+  - ticker: GOOGL
+    sector: Communication Services
+  - ticker: AMZN
+    sector: Consumer Discretionary
+  - ticker: NVDA
+    sector: Technology
+  - ticker: META
+    sector: Communication Services
+  - ticker: TSLA
+    sector: Consumer Discretionary
+
+scoring_weights:
+  technical: 0.40
+  news: 0.30
+  research: 0.30
+
+rating_thresholds:
+  buy: 65             # 12-month horizon: conviction holds should rate BUY by default
+  sell: 40
+
+scanner:
+  candidate_count: 3
+  candidate_universe: sp500_sp400    # sp500 | sp500_sp400 | russell1000
+  min_avg_volume: 500000
+  min_price: 10
+
+  # Tiered rotation thresholds (§6.3 Stage 5)
+  rotation_tiers:
+    - max_tenure_days: 3
+      min_score_diff: 12             # new entry: require large gap to prevent whipsaw
+    - max_tenure_days: 10
+      min_score_diff: 8              # early tenure
+    - max_tenure_days: 30
+      min_score_diff: 5              # established
+    - max_tenure_days: 99999
+      min_score_diff: 3              # long-held: low bar to rotate
+
+  # Override: weak long-held picks lose tenure protection
+  weak_pick_score_threshold: 60      # score below which tenure override applies
+  weak_pick_consecutive_runs: 5      # must score below threshold for this many consecutive runs
+  emergency_rotation_new_score: 70   # new candidate must score >= this for emergency override
+
+  # Deep value path
+  deep_value_path: true
+  deep_value_max_rsi: 35
+  deep_value_min_consensus: Buy
+  deep_value_max_candidates: 10
+
+archive:
+  retain_history: true
+  check_prior_candidate_records: true
+
+alerts:
+  enabled: true
+  price_move_threshold_pct: 5.0
+  cooldown_minutes: 60
+
+email:
+  recipients:
+    - you@example.com               # Add one or more recipient email addresses
+  sender: you@example.com           # Must be SES-verified (see DOCS.md)
+  send_time_pt: "06:15"
+
+schedule:
+  timezone: America/Los_Angeles
+  run_time: "06:15"
+  frequency: trading_days
+  holiday_calendar: XNYS
+  run_on_early_close: true
+
+llm:
+  per_stock_model: claude-haiku-4-5-20251001   # news + research agents
+  strategic_model: claude-sonnet-4-6            # scanner ranking, macro, consolidator
+  max_tokens_per_stock: 800
+  max_tokens_strategic: 4096
+  concurrent_agents: 10
