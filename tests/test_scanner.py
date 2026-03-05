@@ -32,7 +32,7 @@ class TestDeduplicator:
     def test_recurring_themes(self):
         articles = [
             {"headline": "Tariff fears hit markets"},
-            {"headline": "Tariffs could escalate further"},
+            {"headline": "Tariff concerns weigh on stocks"},
             {"headline": "Tariff impact on tech sector"},
         ]
         themes = compute_recurring_themes(articles, min_mentions=3)
@@ -58,9 +58,10 @@ class TestCandidateRotation:
         active = [
             self._make_candidate("A", 70, slot=1),
             self._make_candidate("B", 68, slot=2),
-            self._make_candidate("C", 65, slot=3),
+            self._make_candidate("C", 65, entry_date="2026-02-03", slot=3),
         ]
-        # Challenger only 3 points above weakest (65) — below 5pt threshold for 30+ day tenure
+        # C tenure = 30 days → hits the ≤30d tier requiring 5pt delta.
+        # Challenger delta is 3pt (68 - 65) — below the 5pt threshold.
         scanner = {"D": {"score": 68, "path": "momentum"}}
         new_active, rotations = evaluate_candidate_rotation(
             scanner_scores=scanner, active_candidates=active,

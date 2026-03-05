@@ -39,8 +39,9 @@ class TestTradingDayDetection:
 
 
 class TestHandlerHolidaySkip:
+    @patch("lambda.handler._is_scheduled_run_time", return_value=True)
     @patch("lambda.handler.is_trading_day", return_value=False)
-    def test_skips_on_holiday(self, mock_trading_day):
+    def test_skips_on_holiday(self, mock_trading_day, mock_time):
         handler = _lambda_handler.handler
         result = handler({}, {})
         assert result["status"] == "SKIPPED"

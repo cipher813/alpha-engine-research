@@ -11,7 +11,6 @@ and sector_ratings (overweight / market_weight / underweight + rationale).
 from __future__ import annotations
 
 import json
-import re
 from typing import Optional
 
 import anthropic
@@ -106,6 +105,42 @@ _OW_THRESHOLD = 1.08   # modifier >= this → overweight
 _UW_THRESHOLD = 0.92   # modifier <= this → underweight
 
 
+def _find_json_block(text: str, key: str = '"market_regime"') -> tuple[int, int]:
+    """
+    Find the start and end indices of the JSON object containing `key`.
+    Uses balanced-brace scanning — handles nested dicts correctly.
+    Returns (start, end) inclusive, or (-1, -1) if not found.
+    """
+    key_pos = text.find(key)
+    if key_pos == -1:
+        return -1, -1
+    brace_pos = text.rfind('{', 0, key_pos)
+    if brace_pos == -1:
+        return -1, -1
+    depth = 0
+    in_string = False
+    escape_next = False
+    for i, ch in enumerate(text[brace_pos:], brace_pos):
+        if escape_next:
+            escape_next = False
+            continue
+        if ch == '\\' and in_string:
+            escape_next = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == '{':
+            depth += 1
+        elif ch == '}':
+            depth -= 1
+            if depth == 0:
+                return brace_pos, i
+    return -1, -1
+
+
 def _derive_sector_ratings(sector_modifiers: dict[str, float]) -> dict[str, dict]:
     """Fallback: derive OW/MW/UW ratings from modifier values when agent JSON is missing."""
     ratings = {}
@@ -134,10 +169,12 @@ def _fmt(val, fmt=".1f", default="N/A") -> str:
 
 def _extract_macro_json(text: str) -> dict:
     """Extract the trailing JSON block with sector_modifiers and sector_ratings."""
-    match = re.search(r"\{[^{}]*\"market_regime\".*?\}", text, re.DOTALL)
-    if match:
+    start, end = _find_json_block(text)
+    match_text = text[start:end + 1] if start != -1 else None
+
+    if match_text:
         try:
-            data = json.loads(match.group())
+            data = json.loads(match_text)
             # Validate and clamp sector modifiers
             mods = data.get("sector_modifiers", {})
             for sector in ALL_SECTORS:
@@ -223,8 +260,12 @@ def run_macro_agent(
     full_text = response.content[0].text
     macro_json = _extract_macro_json(full_text)
 
-    # Strip JSON block from markdown
-    report_md = re.sub(r"\{[^{}]*\"market_regime\".*?\}", "", full_text, flags=re.DOTALL).strip()
+    # Strip JSON block from markdown using the same balanced-brace scanner
+    _start, _end = _find_json_block(full_text)
+    if _start != -1:
+        report_md = (full_text[:_start] + full_text[_end + 1:]).strip()
+    else:
+        report_md = full_text.strip()
 
     return {
         "report_md": report_md,
