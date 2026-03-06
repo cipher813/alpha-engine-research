@@ -50,10 +50,11 @@ RATING DEFINITIONS (12-month horizon):
 - HOLD: Expected flat to underperformance vs market over the next 12 months.
 - SELL: Expected to underperform the market over the next 12 months.
 
-TOP 3 BUY CANDIDATES:
+TOP 3 BUY CANDIDATES (from scanner pipeline — separate from tracked universe):
 {candidates}
 ← ticker | score | score_delta | 1-sentence thesis | catalyst | risk
    | status: CONTINUING | NEW_ENTRY | RETURNED(N tenures, last demoted DATE)
+   If "None active", omit section (e) entirely — do NOT substitute universe stocks.
 
 CONSISTENCY FLAGS (pre-computed):
 {consistency_flags}
@@ -97,7 +98,11 @@ Instructions:
    - Note macro sector impact where relevant (it explains why two stocks with similar
      fundamentals may have different ratings in the current environment)
 
-5. For the Top 3 Buy Candidates, synthesize the FULL reports (not summaries) —
+5. For section (e): ONLY include it if buy candidates are listed above.
+   If the candidates field says "None active", omit section (e) entirely.
+   Do NOT substitute universe stocks — the buy candidates come exclusively
+   from the scanner pipeline (stocks outside the tracked universe).
+   When candidates are present, synthesize the FULL reports (not summaries) —
    provide a richer 3–4 sentence thesis per candidate than you do for universe stocks.
 6. Flag any candidate that was newly promoted this run (NEW_ENTRY).
 7. Flag any candidate that is a re-promotion (RETURNED) with the number of prior
@@ -158,6 +163,8 @@ def _format_thesis_table(investment_theses: dict[str, dict]) -> str:
 
 def _format_candidates(candidates: list[dict]) -> str:
     """Format top 3 buy candidates for the prompt."""
+    if not candidates:
+        return "None active this run."
     lines = []
     for c in candidates:
         ticker = c.get("symbol", c.get("ticker", ""))

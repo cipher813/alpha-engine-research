@@ -77,17 +77,27 @@ def _build_candidates_table(candidates: list[dict]) -> str:
 
 
 def _extract_ranking(text: str) -> list[dict]:
-    """Extract JSON array from agent response."""
-    match = re.search(r"\[.*?\]", text, re.DOTALL)
+    """Extract JSON array of objects from agent response."""
+    # Find the first '[' that opens a JSON array of objects (greedy match)
+    match = re.search(r"\[\s*\{.*\}\s*\]", text, re.DOTALL)
     if match:
         try:
             data = json.loads(match.group())
             if isinstance(data, list):
                 return data[:10]
-        except json.JSONDecodeError:
-            pass
+        except json.JSONDecodeError as e:
+            print(f"[SCANNER] JSON decode error on regex match: {e}")
 
-    # Fallback: parse manually
+    # Fallback: strip markdown code fences and try parsing the whole text
+    stripped = re.sub(r"```(?:json)?", "", text).strip()
+    try:
+        data = json.loads(stripped)
+        if isinstance(data, list):
+            return data[:10]
+    except json.JSONDecodeError:
+        pass
+
+    print(f"[SCANNER] _extract_ranking failed. Raw response (first 500 chars):\n{text[:500]}")
     return []
 
 

@@ -19,8 +19,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from datetime import datetime, timezone
 from typing import Annotated, Any, Optional, TypedDict
+
+logger = logging.getLogger(__name__)
 
 import pandas as pd
 from langgraph.graph import END, StateGraph
@@ -334,7 +337,6 @@ def run_universe_agents(state: ResearchState) -> ResearchState:
             technical_scores[ticker]["technical_score"] = ts
 
     return {
-        **state,
         "technical_scores": technical_scores,
         "news_reports": news_reports,
         "news_scores": news_scores,
@@ -347,16 +349,22 @@ def run_universe_agents(state: ResearchState) -> ResearchState:
     }
 
 
-def run_scanner_pipeline(state: ResearchState) -> ResearchState:
+def run_scanner(
+    run_date: str,
+    scanner_universe: list[str],
+    price_data: dict,
+    archive: ArchiveManager,
+    technical_scores: Optional[dict] = None,
+    market_regime: str = "neutral",
+) -> dict:
     """
-    Branch B: Full scanner pipeline (Stages 1–4).
-    Stage 5 (rotation) happens after join in candidate_evaluator node.
+    Full scanner pipeline (Stages 1–4). Pure function — no LangGraph state.
+
+    Returns dict with keys:
+      scanner_filtered, scanner_ranked, scanner_news_reports,
+      scanner_research_reports, scanner_scores
     """
-    run_date = state["run_date"]
-    scanner_universe = state.get("_scanner_universe", [])
-    price_data = state.get("price_data", {})
-    technical_scores = state.get("technical_scores", {})
-    market_regime = state.get("market_regime", "neutral")
+    technical_scores = technical_scores or {}
 
     # Stage 1: Quant filter
     candidates = run_quant_filter(
@@ -365,8 +373,9 @@ def run_scanner_pipeline(state: ResearchState) -> ResearchState:
         technical_scores=technical_scores,
         market_regime=market_regime,
     )
+    logger.info("[scanner] stage=1 quant_filter candidates=%d universe=%d", len(candidates), len(scanner_universe))
 
-    # Stage 2: Data enrichment — fetch analyst data for all ~50 candidates
+    # Stage 2: Data enrichment
     analyst_data_scanner: dict[str, dict] = {}
     for c in candidates:
         ticker = c["ticker"]
@@ -378,68 +387,63 @@ def run_scanner_pipeline(state: ResearchState) -> ResearchState:
             c["analyst_rating"] = "Hold"
             c["upside_pct"] = None
 
-        # Add headlines
         try:
             news = fetch_all_news(ticker, hours=24)
-            headlines = [a.get("headline", "") for a in news["yahoo"][:2]]
-            c["headlines"] = headlines
+            c["headlines"] = [a.get("headline", "") for a in news["yahoo"][:2]]
+            c["articles"] = news["yahoo"]
+            c["sec_filings"] = news["edgar_8k"]
         except Exception:
             c["headlines"] = []
+            c["articles"] = []
+            c["sec_filings"] = []
 
-        # Add sector from SECTOR_MAP or guess
         c["sector"] = SECTOR_MAP.get(ticker, "Technology")
 
-    # Confirm deep value with analyst data
     candidates = confirm_deep_value_with_analyst(
         candidates,
         analyst_data=analyst_data_scanner,
         min_consensus=DEEP_VALUE_MIN_CONSENSUS,
     )
+    logger.info("[scanner] stage=2 confirmed_candidates=%d", len(candidates))
 
-    # Stage 3: Scanner ranking agent
+    # Stage 3: Ranking agent
     ranked_top10 = run_scanner_ranking_agent(
         candidates=candidates,
         market_regime=market_regime,
     )
+    logger.info("[scanner] stage=3 ranked=%d", len(ranked_top10))
 
     # Stage 4: Deep analysis for top 10
     scanner_news_reports: dict[str, str] = {}
     scanner_research_reports: dict[str, str] = {}
     scanner_scores: dict[str, dict] = {}
 
+    articles_by_ticker = {c["ticker"]: c.get("articles", []) for c in candidates}
+    sec_filings_by_ticker = {c["ticker"]: c.get("sec_filings", []) for c in candidates}
+
     for entry in ranked_top10:
         ticker = entry.get("ticker", "")
         if not ticker:
             continue
 
-        # Check for prior candidate records (re-promotion case)
-        archive: ArchiveManager = state["archive_manager"]
         prior_reports = archive.load_prior_reports(ticker, category="candidates")
         prior_news = prior_reports.get("news_report")
         prior_research = prior_reports.get("research_report")
-        prior_thesis = prior_reports.get("thesis") or {}
-        prior_date = prior_thesis.get("date", "NONE")
+        prior_date = (prior_reports.get("thesis") or {}).get("date", "NONE")
 
         adata = analyst_data_scanner.get(ticker, {})
-        current_price = price_data.get(ticker, pd.DataFrame())
-        if not current_price.empty:
-            current_price_val = float(current_price["Close"].iloc[-1])
-        else:
-            current_price_val = adata.get("current_price", 0) or 0
+        df = price_data.get(ticker, pd.DataFrame())
+        current_price_val = float(df["Close"].iloc[-1]) if not df.empty else adata.get("current_price", 0) or 0
 
-        # News agent (scanner)
         try:
             news_result = run_news_agent(
-                ticker=ticker,
-                company_name=ticker,
-                prior_report=prior_news,
-                prior_date=prior_date,
-                new_articles=[],  # fresh candidates: no pre-fetched articles
+                ticker=ticker, company_name=ticker,
+                prior_report=prior_news, prior_date=prior_date,
+                new_articles=articles_by_ticker.get(ticker, []),
                 recurring_themes=[],
-                sec_filings=[],
+                sec_filings=sec_filings_by_ticker.get(ticker, []),
                 current_price=current_price_val,
-                price_change_pct=0,
-                price_change_date=run_date,
+                price_change_pct=0, price_change_date=run_date,
             )
             scanner_news_reports[ticker] = news_result["report_md"]
             news_score = news_result["news_score"]
@@ -447,13 +451,10 @@ def run_scanner_pipeline(state: ResearchState) -> ResearchState:
             scanner_news_reports[ticker] = f"Error: {e}"
             news_score = 50.0
 
-        # Research agent (scanner)
         try:
             research_result = run_research_agent(
-                ticker=ticker,
-                company_name=ticker,
-                prior_report=prior_research,
-                prior_date=prior_date,
+                ticker=ticker, company_name=ticker,
+                prior_report=prior_research, prior_date=prior_date,
                 analyst_data=adata,
             )
             scanner_research_reports[ticker] = research_result["report_md"]
@@ -462,7 +463,6 @@ def run_scanner_pipeline(state: ResearchState) -> ResearchState:
             scanner_research_reports[ticker] = f"Error: {e}"
             research_score = 50.0
 
-        # Compute score for this scanner candidate
         tech = technical_scores.get(ticker) or {}
         tech_score = tech.get("technical_score", 50.0)
 
@@ -475,14 +475,27 @@ def run_scanner_pipeline(state: ResearchState) -> ResearchState:
             "path": entry.get("path", "momentum"),
         }
 
+    logger.info("[scanner] stage=4 scored=%d tickers=%s", len(scanner_scores), list(scanner_scores.keys()))
     return {
-        **state,
         "scanner_filtered": candidates,
         "scanner_ranked": ranked_top10,
         "scanner_news_reports": scanner_news_reports,
         "scanner_research_reports": scanner_research_reports,
         "scanner_scores": scanner_scores,
     }
+
+
+def run_scanner_pipeline(state: ResearchState) -> ResearchState:
+    """LangGraph node — unpacks state and delegates to run_scanner()."""
+    result = run_scanner(
+        run_date=state["run_date"],
+        scanner_universe=state.get("_scanner_universe", []),
+        price_data=state.get("price_data", {}),
+        archive=state["archive_manager"],
+        technical_scores=state.get("technical_scores", {}),
+        market_regime=state.get("market_regime", "neutral"),
+    )
+    return result
 
 
 def _compute_price_target_upside(
@@ -623,6 +636,8 @@ def candidate_evaluator(state: ResearchState) -> ResearchState:
         else:
             c["status"] = "CONTINUING"
 
+    logger.info("[scanner] stage=5 active_candidates=%s rotations=%d",
+                [c["symbol"] for c in new_active], len(rotations))
     return {**state, "new_candidates": new_active, "_rotation_events": rotations}
 
 

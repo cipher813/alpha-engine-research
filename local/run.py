@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import logging
 import os
 import sys
 
@@ -26,6 +27,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from dotenv import load_dotenv
 load_dotenv()
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s — %(message)s",
+    datefmt="%H:%M:%S",
+)
 
 
 def main():

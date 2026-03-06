@@ -110,6 +110,38 @@ def run_quant_filter(
 
     combined = momentum_top + deep_value_top
 
+    # Fallback: if fewer than 3 candidates passed, fill from all scored tickers
+    # sorted by tech_score so the scanner always has at least 3 names to work with.
+    if len(combined) < 3:
+        combined_symbols = {c["ticker"] for c in combined}
+        all_scored = []
+        for ticker in tickers:
+            df = price_data.get(ticker)
+            if df is None or df.empty:
+                continue
+            tech = technical_scores.get(ticker) or compute_technical_indicators(df)
+            if tech is None:
+                continue
+            price = tech.get("current_price", 0)
+            avg_vol = tech.get("avg_volume_20d", 0) or 0
+            if avg_vol < MIN_AVG_VOLUME or price < MIN_PRICE:
+                continue
+            if ticker not in combined_symbols:
+                all_scored.append({
+                    "ticker": ticker,
+                    "path": "momentum",
+                    "tech_score": compute_technical_score(tech, market_regime=market_regime),
+                    "rsi_14": tech.get("rsi_14", 50),
+                    "current_price": price,
+                    "avg_volume_20d": avg_vol,
+                    "price_vs_ma200": tech.get("price_vs_ma200"),
+                })
+        all_scored.sort(key=lambda x: x["tech_score"], reverse=True)
+        for c in all_scored:
+            if len(combined) >= 3:
+                break
+            combined.append(c)
+
     # Deduplicate (a ticker can't be in both paths)
     seen: set[str] = set()
     result = []
@@ -200,6 +232,29 @@ def evaluate_candidate_rotation(
     active = list(active_candidates)  # copy
     rotations = []
     rotations_this_run = 0
+
+    # Fill any empty slots first — no score delta required.
+    # Guarantees all 3 slots are populated as long as scanner has candidates.
+    if len(active) < 3 and scanner_sorted:
+        active_symbols = {c["symbol"] for c in active}
+        for challenger in scanner_sorted:
+            if len(active) >= 3:
+                break
+            if challenger["ticker"] not in active_symbols:
+                slot = len(active) + 1
+                active.append({
+                    "symbol": challenger["ticker"],
+                    "entry_date": run_date,
+                    "slot": slot,
+                    "score": challenger.get("score", 0),
+                    "consecutive_low_runs": 0,
+                })
+                active_symbols.add(challenger["ticker"])
+                rotations.append({
+                    "out_ticker": None,
+                    "in_ticker": challenger["ticker"],
+                    "reason": "fill_empty_slot",
+                })
 
     for challenger in scanner_sorted:
         if rotations_this_run >= 1:

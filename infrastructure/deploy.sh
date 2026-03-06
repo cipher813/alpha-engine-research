@@ -60,7 +60,8 @@ build_package() {
   # Strip test files, dist-info, and __pycache__ to reduce package size
   find "$BUILD_DIR" -type d -name "tests" -exec rm -rf {} + 2>/dev/null || true
   find "$BUILD_DIR" -type d -name "test" -exec rm -rf {} + 2>/dev/null || true
-  find "$BUILD_DIR" -type d -name "*.dist-info" -exec rm -rf {} + 2>/dev/null || true
+  # curl_cffi reads its own dist-info via importlib.metadata at import time; keep it
+  find "$BUILD_DIR" -type d -name "*.dist-info" ! -name "curl_cffi-*" -exec rm -rf {} + 2>/dev/null || true
   find "$BUILD_DIR" -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
 
   echo "Building $ZIP_MAIN..."

@@ -10,14 +10,14 @@ import yfinance as yf
 from typing import Optional
 
 
-def fetch_price_data(tickers: list[str], period: str = "1y") -> dict[str, pd.DataFrame]:
-    """
-    Download daily OHLCV for a list of tickers.
-    Returns dict of ticker → DataFrame with columns [Open, High, Low, Close, Volume].
-    Missing tickers are silently skipped (empty DataFrame).
-    """
+_BATCH_SIZE = 100
+
+
+def _download_batch(tickers: list[str], period: str) -> dict[str, pd.DataFrame]:
+    """Download one batch of tickers and return per-ticker DataFrames."""
+    result: dict[str, pd.DataFrame] = {}
     if not tickers:
-        return {}
+        return result
 
     raw = yf.download(
         tickers=tickers,
@@ -29,7 +29,6 @@ def fetch_price_data(tickers: list[str], period: str = "1y") -> dict[str, pd.Dat
         threads=True,
     )
 
-    result: dict[str, pd.DataFrame] = {}
     if len(tickers) == 1:
         ticker = tickers[0]
         df = raw.copy()
@@ -45,6 +44,23 @@ def fetch_price_data(tickers: list[str], period: str = "1y") -> dict[str, pd.Dat
                 result[ticker] = df
             except (KeyError, AttributeError):
                 result[ticker] = pd.DataFrame()
+
+    return result
+
+
+def fetch_price_data(tickers: list[str], period: str = "1y") -> dict[str, pd.DataFrame]:
+    """
+    Download daily OHLCV for a list of tickers in batches of 100.
+    Returns dict of ticker → DataFrame with columns [Open, High, Low, Close, Volume].
+    Missing tickers are silently skipped (empty DataFrame).
+    """
+    if not tickers:
+        return {}
+
+    result: dict[str, pd.DataFrame] = {}
+    batches = [tickers[i:i + _BATCH_SIZE] for i in range(0, len(tickers), _BATCH_SIZE)]
+    for batch in batches:
+        result.update(_download_batch(batch, period))
 
     return result
 
