@@ -94,9 +94,10 @@ def main():
     state["performance_summary"] = perf_summary
 
     if args.dry_run:
-        # Monkey-patch email sender to print instead
-        import emailer.sender as sender_mod
-        sender_mod.send_email = lambda **kwargs: (print("\n=== EMAIL BODY ===\n" + kwargs.get("plain_body", "")), True)[1]
+        # Monkey-patch send_email in the graph module (graph imports it directly via
+        # "from emailer.sender import send_email", so we must patch the reference there)
+        import graph.research_graph as graph_mod
+        graph_mod.send_email = lambda **kwargs: (print("\n=== EMAIL BODY ===\n" + kwargs.get("plain_body", "")), True)[1]
 
     if args.skip_scanner:
         # Monkey-patch scanner to return empty
@@ -104,7 +105,7 @@ def main():
         original_scanner = graph_mod.run_scanner_pipeline
         def _skip_scanner(state):
             print("  [scanner skipped]")
-            return {**state, "scanner_filtered": [], "scanner_ranked": [],
+            return {"scanner_filtered": [], "scanner_ranked": [],
                     "scanner_news_reports": {}, "scanner_research_reports": {},
                     "scanner_scores": {}}
         graph_mod.run_scanner_pipeline = _skip_scanner
