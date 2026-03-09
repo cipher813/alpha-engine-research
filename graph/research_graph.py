@@ -844,6 +844,21 @@ def archive_writer(state: ResearchState) -> ResearchState:
     }
     archive.write_signals_json(run_date, run_time, signals_payload)
 
+    # Write daily OHLCV price snapshot for backtester consumption
+    price_data = state.get("price_data", {})
+    prices_snapshot: dict[str, dict] = {}
+    for ticker in all_tickers:
+        df = price_data.get(ticker)
+        if df is not None and not df.empty:
+            row = df.iloc[-1]
+            prices_snapshot[ticker] = {
+                "open": round(float(row["Open"]), 4),
+                "close": round(float(row["Close"]), 4),
+                "high": round(float(row["High"]), 4),
+                "low": round(float(row["Low"]), 4),
+            }
+    archive.write_prices_json(run_date, prices_snapshot)
+
     archive.commit()
     archive.upload_db(run_date=run_date)
 
