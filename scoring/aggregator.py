@@ -19,6 +19,10 @@ Uses per-sector macro modifiers from the Macro Agent (§5.4), not a single globa
 
 from __future__ import annotations
 
+import json
+import logging
+import os
+
 from config import (
     WEIGHT_TECHNICAL,
     WEIGHT_NEWS,
@@ -30,8 +34,64 @@ from config import (
     MATERIAL_SCORE_CHANGE_MIN,
 )
 
+logger = logging.getLogger(__name__)
 
 DEFAULT_SECTOR_MODIFIER = 1.0   # fallback if sector or macro data unavailable
+
+# Module-level cache: populated once per Lambda cold-start by _get_weights().
+_weights_cache: dict | None = None
+
+
+def _load_weights_from_s3() -> dict | None:
+    """
+    Check S3 for backtester-updated scoring weights.
+
+    Reads s3://{RESEARCH_BUCKET}/config/scoring_weights.json, written by the
+    backtester's weight optimizer when it applies an update. Returns None if
+    the file doesn't exist or cannot be read — caller falls back to universe.yaml.
+    """
+    import boto3
+    from botocore.exceptions import ClientError
+
+    bucket = os.environ.get("RESEARCH_BUCKET", "alpha-engine-research")
+    key = "config/scoring_weights.json"
+    try:
+        s3 = boto3.client("s3")
+        obj = s3.get_object(Bucket=bucket, Key=key)
+        data = json.loads(obj["Body"].read())
+        weights = {k: float(data[k]) for k in ("technical", "news", "research") if k in data}
+        if len(weights) == 3:
+            logger.info(
+                "Scoring weights loaded from S3 (updated %s, n=%s): %s",
+                data.get("updated_at", "unknown"),
+                data.get("n_samples", "?"),
+                weights,
+            )
+            return weights
+    except ClientError as e:
+        if e.response["Error"]["Code"] != "NoSuchKey":
+            logger.warning("Could not read scoring weights from S3: %s", e)
+    except Exception as e:
+        logger.warning("Unexpected error loading S3 scoring weights: %s", e)
+    return None
+
+
+def _get_weights() -> tuple[float, float, float]:
+    """
+    Return current scoring weights, checking S3 override first.
+
+    Result is cached for the lifetime of the Lambda instance (one S3 call
+    per cold-start). Falls back to universe.yaml values if S3 file absent.
+    """
+    global _weights_cache
+    if _weights_cache is None:
+        s3_weights = _load_weights_from_s3()
+        _weights_cache = s3_weights or {
+            "technical": WEIGHT_TECHNICAL,
+            "news": WEIGHT_NEWS,
+            "research": WEIGHT_RESEARCH,
+        }
+    return _weights_cache["technical"], _weights_cache["news"], _weights_cache["research"]
 MACRO_MODIFIER_RANGE = 0.30     # distance from 1.0 to min/max (0.70 and 1.30)
 MACRO_MAX_SHIFT_POINTS = 10.0   # max pts added/subtracted by macro shift
 
@@ -56,10 +116,11 @@ def compute_attractiveness_score(
     macro_modifier = sector_modifiers.get(sector, DEFAULT_SECTOR_MODIFIER)
     macro_modifier = max(0.70, min(1.30, macro_modifier))  # clamp to valid range
 
+    w_tech, w_news, w_research = _get_weights()
     weighted_base = (
-        technical_score * WEIGHT_TECHNICAL
-        + news_score * WEIGHT_NEWS
-        + research_score * WEIGHT_RESEARCH
+        technical_score * w_tech
+        + news_score * w_news
+        + research_score * w_research
     )
 
     # Additive bounded shift: (modifier - 1.0) / 0.30 × 10 → range [-10, +10]
