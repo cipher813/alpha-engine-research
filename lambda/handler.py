@@ -1,7 +1,7 @@
 """
 Lambda entry point — main daily morning pipeline (§10.1).
 
-Triggered by EventBridge on NYSE trading days (Mon–Fri, 6:15am PT).
+Triggered by EventBridge on NYSE trading days (Mon–Fri, 5:45am PT).
 Checks for market holidays and skips if NYSE is closed.
 Invokes the full LangGraph research pipeline.
 """
@@ -46,20 +46,20 @@ def is_early_close(date: datetime.date | None = None) -> bool:
 
 def _is_scheduled_run_time() -> bool:
     """
-    Return True if current PT time is within the 6:10–6:25am run window.
-    Allows a single EventBridge rule to fire at both 13:15 and 14:15 UTC;
-    only the invocation that lands in 6:15am PT proceeds.
+    Return True if current PT time is within the 5:40–5:55am run window.
+    Allows a single EventBridge rule to fire at both 12:45 and 13:45 UTC;
+    only the invocation that lands in 5:45am PT proceeds.
     """
     pt = datetime.datetime.now(pytz.timezone("America/Los_Angeles"))
-    return pt.hour == 6 and 10 <= pt.minute <= 25
+    return pt.hour == 5 and 40 <= pt.minute <= 55
 
 
 def handler(event, context):
     """
     AWS Lambda handler for the daily morning research pipeline.
 
-    Triggered by EventBridge at 13:15 and 14:15 UTC (Mon–Fri). Only runs
-    when current PT time is 6:10–6:25am; the other invocation exits early.
+    Triggered by EventBridge at 12:45 and 13:45 UTC (Mon–Fri). Only runs
+    when current PT time is 5:40–5:55am; the other invocation exits early.
     No DST rule swap required.
 
     Returns:

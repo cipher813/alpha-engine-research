@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # setup-eventbridge.sh — EventBridge rules for main pipeline + alerts.
 #
-# Main pipeline: single rule that fires at 13:15 and 14:15 UTC. The Lambda
-# time-gates and only runs when it's 6:15am PT — DST handled automatically.
+# Main pipeline: single rule that fires at 12:45 and 13:45 UTC. The Lambda
+# time-gates and only runs when it's 5:45am PT — DST handled automatically.
 #
 # Run to migrate from old PDT/PST two-rule setup, or for fresh install.
 # Usage: ./infrastructure/setup-eventbridge.sh
@@ -26,12 +26,12 @@ for old in alpha-research-pdt alpha-research-pst; do
   fi
 done
 
-# Create main pipeline rule (fires 13:15 and 14:15 UTC; Lambda gates on 6:15am PT)
+# Create main pipeline rule (fires 12:45 and 13:45 UTC; Lambda gates on 5:45am PT)
 aws events put-rule \
   --name "$RULE_MAIN" \
-  --schedule-expression "cron(15 13,14 ? * MON-FRI *)" \
+  --schedule-expression "cron(45 12,13 ? * MON-FRI *)" \
   --state ENABLED \
-  --description "6:15am PT daily — Lambda time-gates for DST" \
+  --description "5:45am PT daily — Lambda time-gates for DST" \
   --region "$REGION"
 
 aws events put-targets \
