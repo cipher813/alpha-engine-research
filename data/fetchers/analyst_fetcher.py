@@ -7,10 +7,13 @@ Uses stable API endpoints (v3 legacy endpoints are no longer supported).
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import Optional
 
 import requests
+
+logger = logging.getLogger(__name__)
 
 _FMP_STABLE = "https://financialmodelingprep.com/stable"
 _TIMEOUT = 10
@@ -56,8 +59,8 @@ def fetch_analyst_consensus(ticker: str) -> dict:
             result["consensus_rating"] = g.get("consensus")
             total = sum(g.get(k, 0) or 0 for k in ("strongBuy", "buy", "hold", "sell", "strongSell"))
             result["num_analysts"] = total or None
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("FMP grades-consensus failed for %s: %s", ticker, e)
 
     # Price target consensus
     try:
@@ -65,8 +68,8 @@ def fetch_analyst_consensus(ticker: str) -> dict:
         if isinstance(data, list) and data:
             pt = data[0]
             result["mean_target"] = pt.get("targetConsensus")
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("FMP price-target-consensus failed for %s: %s", ticker, e)
 
     # Current price
     try:
@@ -78,7 +81,7 @@ def fetch_analyst_consensus(ticker: str) -> dict:
                 result["upside_pct"] = round(
                     (result["mean_target"] / result["current_price"] - 1) * 100, 1
                 )
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("FMP quote failed for %s: %s", ticker, e)
 
     return result
