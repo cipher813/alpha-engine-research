@@ -42,8 +42,12 @@ BUY CANDIDATE FULL REPORTS — read these carefully, these are the priority:
 
 UNIVERSE INVESTMENT THESES:
 {thesis_table}
-← ticker | rating | score | tech | news | research | Δ | thesis_summary
-  Rating = BUY (70+) / HOLD (40-69) / SELL (0-39). All represent expected relative return vs SPY over the next ~12 months.
+← ticker | rating | score | tech | news | research | Δ | signal | GBM | thesis_summary
+  Rating    = BUY (70+) / HOLD (40-69) / SELL (0-39). Expected relative return vs SPY over ~12 months.
+  Signal    = ENTER / HOLD / REDUCE / EXIT — actionable instruction for the executor.
+  GBM       = ML model 5-day directional prediction: ↑ UP  ↓ DOWN  ─ FLAT  ? no data
+              ✗ suffix = GBM DOWN prediction vetoed an ENTER signal → downgraded to HOLD.
+              (e.g. "↓✗" means model predicted DOWN with ≥60% confidence; ENTER blocked)
 
 RATING DEFINITIONS (12-month horizon):
 - BUY: Expected to match or outperform the market over the next 12 months.
@@ -93,10 +97,13 @@ Instructions:
    - The ▲/▼/● symbols must match the rating exactly.
 
 4. UNIVERSE RATINGS TABLE details:
-   - Include Ticker | Rating | Score | Rationale
+   - Include Ticker | Rating | Score | Signal | Rationale
+   - Include the Signal column (ENTER/HOLD/REDUCE/EXIT) alongside Rating and Score
    - Base rationale on tech/news/research scores and thesis_summary above
    - Note macro sector impact where relevant (it explains why two stocks with similar
      fundamentals may have different ratings in the current environment)
+   - If a ticker has a ✗ GBM veto (↓✗ in the GBM column), note it inline:
+     e.g. "ENTER blocked by GBM ↓ signal — monitoring for re-entry"
 
 5. For section (e): ONLY include it if buy candidates are listed above.
    If the candidates field says "None active", omit section (e) entirely.
@@ -115,6 +122,9 @@ Instructions:
     closes at 1pm ET and intraday volatility may be elevated on thin volume.
 12. If performance_summary shows recalibration_flag = true, add a note at the end:
     "⚠ Scoring recalibration may be needed — BUY signal accuracy has fallen below 55%."
+13. GBM veto reporting: if any ticker has a ✗ in the GBM column, include a brief note
+    in section (d) for that ticker indicating the ENTER was blocked by the ML model.
+    Do NOT add a separate GBM section — integrate the note into the ratings table rationale.
 
 Output the brief in clean markdown, suitable for email.
 """
@@ -142,9 +152,12 @@ def _format_universe_summaries(
     return "\n".join(news_lines) or "None.", "\n".join(research_lines) or "None."
 
 
+_GBM_SYMBOL = {"UP": "↑", "DOWN": "↓", "FLAT": "─"}
+
+
 def _format_thesis_table(investment_theses: dict[str, dict]) -> str:
     """Format the universe ratings table for the consolidator prompt."""
-    lines = ["Ticker | Rating | Score | Tech | News | Research | Δ | Thesis"]
+    lines = ["Ticker | Rating | Score | Tech | News | Research | Δ | Signal | GBM | Thesis"]
     for ticker in sorted(investment_theses):
         t = investment_theses[ticker]
         score = f"{t.get('final_score', 0):.0f}"
@@ -155,9 +168,20 @@ def _format_thesis_table(investment_theses: dict[str, dict]) -> str:
         delta_str = f"{delta:+.0f}" if delta is not None else "N/A"
         stale = "⚠stale" if t.get("stale_days", 0) >= 5 else ""
         consistency = "⚠inconsistent" if t.get("consistency_flag") else ""
-        status = " | ".join(filter(None, [stale, consistency]))
+        flags = " | ".join(filter(None, [stale, consistency]))
+        signal = t.get("signal", "HOLD")
+        # GBM column: direction symbol + veto marker if signal was downgraded
+        gbm_dir = t.get("predicted_direction")
+        gbm_sym = _GBM_SYMBOL.get(gbm_dir, "?") if gbm_dir else "?"
+        if t.get("gbm_veto"):
+            gbm_sym += "✗"   # ✗ = veto fired: ENTER downgraded to HOLD
         thesis = _truncate_report(t.get("thesis_summary", ""), 30)
-        lines.append(f"{ticker} | {t.get('rating', '?')} | {score} | {tech} | {news} | {research} | {delta_str} | {status} | {thesis}")
+        row = f"{ticker} | {t.get('rating', '?')} | {score} | {tech} | {news} | {research} | {delta_str} | {signal}"
+        row += f" | {gbm_sym}"
+        if flags:
+            row += f" | {flags}"
+        row += f" | {thesis}"
+        lines.append(row)
     return "\n".join(lines)
 
 

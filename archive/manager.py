@@ -195,6 +195,21 @@ class ArchiveManager:
             mention_count INTEGER NOT NULL DEFAULT 1,
             UNIQUE(symbol, article_hash)
         );
+
+        CREATE TABLE IF NOT EXISTS predictor_outcomes (
+            id                      INTEGER PRIMARY KEY,
+            symbol                  TEXT NOT NULL,
+            prediction_date         TEXT NOT NULL,
+            predicted_direction     TEXT,
+            prediction_confidence   REAL,
+            p_up                    REAL,
+            p_flat                  REAL,
+            p_down                  REAL,
+            score_modifier_applied  REAL DEFAULT 0.0,
+            actual_5d_return        REAL,
+            correct_5d              INTEGER,
+            UNIQUE(symbol, prediction_date)
+        );
         """)
         # ── Column migrations (existing DBs may lack newer columns) ──────────
         migrations = [
@@ -203,6 +218,8 @@ class ArchiveManager:
             "ALTER TABLE investment_thesis ADD COLUMN score_velocity_5d REAL",
             "ALTER TABLE investment_thesis ADD COLUMN price_target_upside REAL",
             "ALTER TABLE macro_snapshots ADD COLUMN sector_ratings TEXT",
+            "ALTER TABLE investment_thesis ADD COLUMN predicted_direction TEXT",
+            "ALTER TABLE investment_thesis ADD COLUMN prediction_confidence REAL",
         ]
         for stmt in migrations:
             try:
@@ -338,6 +355,50 @@ class ArchiveManager:
             json.dumps(payload, indent=2, default=str),
         )
 
+    def load_predictions_json(self) -> dict[str, dict]:
+        """
+        Load predictor/predictions/latest.json from S3.
+        Returns dict mapping ticker -> prediction dict. Returns {} on any failure.
+        """
+        from config import PREDICTOR_PREDICTIONS_KEY
+        try:
+            raw = self._s3_get(PREDICTOR_PREDICTIONS_KEY)
+            if not raw:
+                return {}
+            data = json.loads(raw)
+            predictions = data.get("predictions", [])
+            return {p["ticker"]: p for p in predictions if "ticker" in p}
+        except Exception:
+            return {}
+
+    def write_predictor_outcome(self, symbol: str, prediction_date: str, outcome: dict) -> None:
+        """
+        Insert or update a predictor_outcomes row.
+        Called by the backtester when 5-day outcomes are available.
+        """
+        if not self.db_conn:
+            return
+        self.db_conn.execute(
+            """INSERT INTO predictor_outcomes
+               (symbol, prediction_date, predicted_direction, prediction_confidence,
+                p_up, p_flat, p_down, score_modifier_applied, actual_5d_return, correct_5d)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(symbol, prediction_date) DO UPDATE SET
+                 actual_5d_return = excluded.actual_5d_return,
+                 correct_5d = excluded.correct_5d""",
+            (
+                symbol, prediction_date,
+                outcome.get("predicted_direction"),
+                outcome.get("prediction_confidence"),
+                outcome.get("p_up"),
+                outcome.get("p_flat"),
+                outcome.get("p_down"),
+                outcome.get("score_modifier_applied", 0.0),
+                outcome.get("actual_5d_return"),
+                outcome.get("correct_5d"),
+            ),
+        )
+
     def write_prices_json(self, run_date: str, prices: dict) -> None:
         """Write daily OHLCV price snapshot to S3 for backtester consumption.
 
@@ -358,8 +419,9 @@ class ArchiveManager:
                (symbol, date, run_time, rating, score, technical_score, news_score,
                 research_score, macro_modifier, thesis_summary, prev_rating, prev_score,
                 last_material_change_date, stale_days, consistency_flag,
-                conviction, signal, score_velocity_5d, price_target_upside)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                conviction, signal, score_velocity_5d, price_target_upside,
+                predicted_direction, prediction_confidence)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 thesis["ticker"], thesis["date"], run_time, thesis["rating"],
                 thesis["final_score"], thesis.get("technical_score"),
@@ -372,6 +434,8 @@ class ArchiveManager:
                 thesis.get("signal", "HOLD"),
                 thesis.get("score_velocity_5d"),
                 thesis.get("price_target_upside"),
+                thesis.get("predicted_direction"),
+                thesis.get("prediction_confidence"),
             ),
         )
 

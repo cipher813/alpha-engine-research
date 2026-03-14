@@ -230,18 +230,40 @@ def compute_signal(
     """
     Derive an actionable signal for the executor.
 
-    ENTER:  rating is now BUY and wasn't before (new buy signal)
+    ENTER:  rating is BUY (executor skips tickers already in portfolio)
     EXIT:   rating is SELL (regardless of prior)
     REDUCE: BUY → HOLD transition with declining conviction or material change
-    HOLD:   all other cases (stable BUY, new HOLD with no prior BUY, etc.)
+    HOLD:   all other cases
     """
-    if rating == "BUY" and prior_rating != "BUY":
+    if rating == "BUY":
         return "ENTER"
     if rating == "SELL":
         return "EXIT"
     if rating == "HOLD" and prior_rating == "BUY" and (conviction == "declining" or material_changes):
         return "REDUCE"
     return "HOLD"
+
+
+def compute_long_term_score(
+    news_score_lt: float,
+    research_score_lt: float,
+    sector_modifiers: dict[str, float],
+    sector: str,
+) -> tuple[float, str]:
+    """
+    Compute a long-term (12-month) composite score and rating.
+
+    Technical indicators are inherently short-term and excluded.
+    Weights: news_lt 50%, research_lt 50%, plus the same macro sector shift.
+
+    Returns (long_term_score, long_term_rating).
+    """
+    macro_modifier = sector_modifiers.get(sector, DEFAULT_SECTOR_MODIFIER)
+    macro_modifier = max(0.70, min(1.30, macro_modifier))
+    macro_shift = (macro_modifier - 1.0) / MACRO_MODIFIER_RANGE * MACRO_MAX_SHIFT_POINTS
+    base = news_score_lt * 0.50 + research_score_lt * 0.50
+    score = round(max(0.0, min(100.0, base + macro_shift)), 2)
+    return score, score_to_rating(score)
 
 
 def aggregate_all(
@@ -255,6 +277,8 @@ def aggregate_all(
     run_date: str | None = None,
     score_history: dict[str, list[float]] | None = None,
     price_target_upside: dict[str, float | None] | None = None,
+    news_scores_lt: dict[str, float] | None = None,
+    research_scores_lt: dict[str, float] | None = None,
 ) -> dict[str, dict]:
     """
     Run aggregation for all tickers in a single pass.
@@ -268,6 +292,8 @@ def aggregate_all(
     """
     _score_history = score_history or {}
     _pta = price_target_upside or {}
+    _news_lt = news_scores_lt or {}
+    _research_lt = research_scores_lt or {}
     results = {}
 
     for ticker in tickers:
@@ -283,6 +309,14 @@ def aggregate_all(
             research_score=research_score,
             sector_modifiers=sector_modifiers,
             sector_map=sector_map,
+        )
+
+        # Long-term composite (12-month horizon, no technical component)
+        lt_score, lt_rating = compute_long_term_score(
+            news_score_lt=_news_lt.get(ticker, 50.0),
+            research_score_lt=_research_lt.get(ticker, 50.0),
+            sector_modifiers=sector_modifiers,
+            sector=result["sector"],
         )
 
         # Prior data for change tracking
@@ -311,7 +345,7 @@ def aggregate_all(
         conviction = compute_conviction(history)
         velocity_5d = compute_score_velocity_5d(history)
 
-        # Actionable signal for executor (§A.3)
+        # Actionable signal for executor — driven by short-term final_score/rating (§A.3)
         signal = compute_signal(
             rating=result["rating"],
             prior_rating=prior_rating,
@@ -336,6 +370,8 @@ def aggregate_all(
             "score_velocity_5d": velocity_5d,
             "signal": signal,
             "price_target_upside": _pta.get(ticker),
+            "long_term_score": lt_score,
+            "long_term_rating": lt_rating,
         }
 
     return results

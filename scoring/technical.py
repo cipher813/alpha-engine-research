@@ -153,6 +153,18 @@ def compute_technical_score(
         + momentum_score * 0.15
     )
 
+    # ── Predictor enrichment (optional) ──────────────────────────────────────
+    # Keys present only when alpha-engine-predictor has run and written to S3.
+    # Falls through to existing composite unchanged if absent or below confidence gate.
+    p_up = indicators.get("p_up")
+    p_down = indicators.get("p_down")
+    confidence = indicators.get("prediction_confidence", 0.0)
+    if p_up is not None and p_down is not None and confidence >= 0.65:
+        # (p_up - p_down) in [-1, +1]; scale to max ±10 pts weighted by confidence.
+        direction_signal = (p_up - p_down) * 10.0 * confidence
+        composite = composite + direction_signal
+    # ─────────────────────────────────────────────────────────────────────────
+
     return round(max(0.0, min(100.0, composite)), 2)
 
 

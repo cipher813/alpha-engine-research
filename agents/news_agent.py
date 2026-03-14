@@ -55,11 +55,27 @@ THESIS DRAFTING PROTOCOL — FOLLOW IN ORDER:
 
 Keep the report to approximately 300 words.
 
-news_score (0-100): Expected relative attractiveness for the next ~12 months vs the market.
-  Higher = more likely to outperform SPY; lower = more likely to underperform.
+Provide two independent scores:
+
+news_score_short (0-100): Short-term attractiveness for the next 1-5 trading days.
+  Start from a baseline set by the overall news sentiment in this report:
+    Clearly positive tone  → baseline 60
+    Mildly positive        → baseline 55
+    Neutral / mixed        → baseline 50
+    Mildly negative        → baseline 45
+    Clearly negative       → baseline 40
+  Then adjust from that baseline (max ±15) for:
+    +: breaking catalyst, earnings surprise, surprise 8-K with positive news
+    -: negative surprise filing, guidance cut, product recall, regulatory action
+  Score 50 = market-neutral short-term.
+
+news_score_long (0-100): Long-term attractiveness for the next ~12 months vs the market.
+  Driven by: durable business momentum, multi-quarter narrative arc, structural themes.
+  Score 50 = expected to match SPY; >70 = likely to outperform; <30 = likely to underperform.
 
 End with a JSON block:
-{{"news_score": <0-100>, "sentiment": "<positive|neutral|negative>",
+{{"news_score_short": <0-100>, "news_score_long": <0-100>,
+ "sentiment": "<positive|neutral|negative>",
  "key_catalyst": "<one sentence>", "prior_date": "{prior_date}",
  "material_changes": <true|false>,
  "dominant_theme": "<recurring theme if any, else null>",
@@ -101,13 +117,13 @@ def _format_filings(filings: list[dict]) -> str:
 
 def _extract_json_from_response(text: str) -> dict:
     """Extract the trailing JSON block from agent response."""
-    match = re.search(r"\{[^{}]*\"news_score\"[^{}]*\}", text, re.DOTALL)
+    match = re.search(r"\{[^{}]*\"news_score_short\"[^{}]*\}", text, re.DOTALL)
     if match:
         try:
             return json.loads(match.group())
         except json.JSONDecodeError:
             pass
-    return {"news_score": 50, "sentiment": "neutral", "material_changes": False}
+    return {"news_score_short": 50, "news_score_long": 50, "sentiment": "neutral", "material_changes": False}
 
 
 def run_news_agent(
@@ -167,6 +183,7 @@ def run_news_agent(
         "ticker": ticker,
         "report_md": report_md,
         "news_json": news_json,
-        "news_score": float(news_json.get("news_score", 50)),
+        "news_score": float(news_json.get("news_score_short", 50)),
+        "news_score_lt": float(news_json.get("news_score_long", 50)),
         "material_changes": bool(news_json.get("material_changes", False)),
     }

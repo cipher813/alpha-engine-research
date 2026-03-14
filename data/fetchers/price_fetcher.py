@@ -11,6 +11,7 @@ from typing import Optional
 
 
 _BATCH_SIZE = 100
+_DOWNLOAD_WORKERS = 5
 
 
 def _download_batch(tickers: list[str], period: str) -> dict[str, pd.DataFrame]:
@@ -50,17 +51,34 @@ def _download_batch(tickers: list[str], period: str) -> dict[str, pd.DataFrame]:
 
 def fetch_price_data(tickers: list[str], period: str = "1y") -> dict[str, pd.DataFrame]:
     """
-    Download daily OHLCV for a list of tickers in batches of 100.
+    Download daily OHLCV for a list of tickers in parallel batches of 100.
     Returns dict of ticker → DataFrame with columns [Open, High, Low, Close, Volume].
     Missing tickers are silently skipped (empty DataFrame).
     """
+    import concurrent.futures
+
     if not tickers:
         return {}
 
-    result: dict[str, pd.DataFrame] = {}
     batches = [tickers[i:i + _BATCH_SIZE] for i in range(0, len(tickers), _BATCH_SIZE)]
-    for batch in batches:
-        result.update(_download_batch(batch, period))
+    result: dict[str, pd.DataFrame] = {}
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=_DOWNLOAD_WORKERS) as executor:
+        futures = {executor.submit(_download_batch, batch, period): batch for batch in batches}
+        failed_batches = []
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                result.update(future.result())
+            except Exception as e:
+                failed_batches.append(futures[future])
+                print(f"Batch download failed ({len(futures[future])} tickers), will retry: {e}")
+
+    # Retry failed batches sequentially (no parallelism to avoid yfinance race conditions)
+    for batch in failed_batches:
+        try:
+            result.update(_download_batch(batch, period))
+        except Exception as e:
+            print(f"Batch retry failed ({len(batch)} tickers), skipping: {e}")
 
     return result
 

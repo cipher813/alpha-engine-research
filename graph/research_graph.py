@@ -38,6 +38,7 @@ from config import (
     WEAK_PICK_CONSECUTIVE_RUNS,
     EMERGENCY_ROTATION_NEW_SCORE,
     DEEP_VALUE_MIN_CONSENSUS,
+    MIN_PREDICTION_CONFIDENCE,
 )
 from agents.news_agent import run_news_agent
 from agents.research_agent import run_research_agent
@@ -88,10 +89,15 @@ class ResearchState(TypedDict, total=False):
     active_candidates: Annotated[list[dict], _take_last]
     news_article_hashes: Annotated[dict[str, set], _take_last]
     technical_scores: Annotated[dict[str, dict], _take_last]
+    predictions: Annotated[dict[str, dict], _take_last]
     news_reports: Annotated[dict[str, str], _take_last]
     news_scores: Annotated[dict[str, float], _take_last]
+    news_scores_lt: Annotated[dict[str, float], _take_last]
+    news_jsons: Annotated[dict[str, dict], _take_last]
     research_reports: Annotated[dict[str, str], _take_last]
     research_scores: Annotated[dict[str, float], _take_last]
+    research_scores_lt: Annotated[dict[str, float], _take_last]
+    research_jsons: Annotated[dict[str, dict], _take_last]
     macro_report: Annotated[str, _take_last]
     sector_modifiers: Annotated[dict[str, float], _take_last]
     sector_ratings: Annotated[dict[str, dict], _take_last]
@@ -186,6 +192,12 @@ def fetch_data(state: ResearchState) -> ResearchState:
     # Load score history for conviction and velocity computation (§A.3, A.4)
     score_history = archive.load_score_history(all_tracked, n=6)
 
+    # Load predictor predictions from S3 (best-effort — {} if not yet available)
+    try:
+        predictions = archive.load_predictions_json()
+    except Exception:
+        predictions = {}
+
     return {
         **state,
         "universe_tickers": UNIVERSE_TICKERS,
@@ -203,6 +215,7 @@ def fetch_data(state: ResearchState) -> ResearchState:
         "score_history": score_history,
         "_scanner_universe": scanner_universe_sample,
         "_price_data_full": price_data,
+        "predictions": predictions,
     }
 
 
@@ -217,8 +230,12 @@ def run_universe_agents(state: ResearchState) -> ResearchState:
 
     news_reports: dict[str, str] = {}
     news_scores: dict[str, float] = {}
+    news_scores_lt: dict[str, float] = {}
+    news_jsons: dict[str, dict] = {}
     research_reports: dict[str, str] = {}
     research_scores: dict[str, float] = {}
+    research_scores_lt: dict[str, float] = {}
+    research_jsons: dict[str, dict] = {}
 
     # Compute technical scores
     price_data = state.get("price_data", {})
@@ -263,6 +280,16 @@ def run_universe_agents(state: ResearchState) -> ResearchState:
         prior_date = prior_thesis.get("date", prior_date_default)
 
         tech = technical_scores.get(ticker, {})
+        # Merge predictor values into indicators dict if available for this ticker
+        pred = state.get("predictions", {}).get(ticker, {})
+        if pred and tech:
+            tech.update({
+                "p_up": pred.get("p_up"),
+                "p_flat": pred.get("p_flat"),
+                "p_down": pred.get("p_down"),
+                "prediction_confidence": pred.get("prediction_confidence", 0.0),
+                "predicted_direction": pred.get("predicted_direction"),
+            })
         current_price = tech.get("current_price", 0)
 
         # News agent
@@ -281,9 +308,13 @@ def run_universe_agents(state: ResearchState) -> ResearchState:
             )
             news_reports[ticker] = news_result["report_md"]
             news_scores[ticker] = news_result["news_score"]
+            news_scores_lt[ticker] = news_result["news_score_lt"]
+            news_jsons[ticker] = news_result["news_json"]
         except Exception as e:
             news_reports[ticker] = f"Error: {e}"
             news_scores[ticker] = 50.0
+            news_scores_lt[ticker] = 50.0
+            news_jsons[ticker] = {}
 
         # Research agent
         try:
@@ -296,9 +327,13 @@ def run_universe_agents(state: ResearchState) -> ResearchState:
             )
             research_reports[ticker] = research_result["report_md"]
             research_scores[ticker] = research_result["research_score"]
+            research_scores_lt[ticker] = research_result["research_score_lt"]
+            research_jsons[ticker] = research_result["research_json"]
         except Exception as e:
             research_reports[ticker] = f"Error: {e}"
             research_scores[ticker] = 50.0
+            research_scores_lt[ticker] = 50.0
+            research_jsons[ticker] = {}
 
     # Run agents (simple sequential for now; can be made async for full parallelism)
     for ticker in all_tickers:
@@ -340,8 +375,12 @@ def run_universe_agents(state: ResearchState) -> ResearchState:
         "technical_scores": technical_scores,
         "news_reports": news_reports,
         "news_scores": news_scores,
+        "news_scores_lt": news_scores_lt,
+        "news_jsons": news_jsons,
         "research_reports": research_reports,
         "research_scores": research_scores,
+        "research_scores_lt": research_scores_lt,
+        "research_jsons": research_jsons,
         "macro_report": macro_report,
         "sector_modifiers": sector_modifiers,
         "sector_ratings": sector_ratings,
@@ -546,6 +585,8 @@ def score_aggregator(state: ResearchState) -> ResearchState:
         run_date=run_date,
         score_history=state.get("score_history", {}),
         price_target_upside=price_target_upside,
+        news_scores_lt=state.get("news_scores_lt", {}),
+        research_scores_lt=state.get("research_scores_lt", {}),
     )
 
     # Aggregate scanner candidate scores (sector modifiers applied)
@@ -574,17 +615,51 @@ def thesis_updater(state: ResearchState) -> ResearchState:
     investment_theses = state.get("investment_theses", {})
     full_theses: dict[str, dict] = {}
 
+    news_jsons = state.get("news_jsons", {})
+    research_jsons = state.get("research_jsons", {})
+    predictions = state.get("predictions", {})
+
     for ticker, aggregated in investment_theses.items():
-        news_json = {}
-        research_json = {}
-        # Try to extract JSON from agent reports
-        # (agents embed JSON at end of their reports; thesis updater extracts it)
-        full_theses[ticker] = build_thesis_record(
+        thesis = build_thesis_record(
             ticker=ticker,
             run_date=run_date,
             aggregated=aggregated,
-            agent_outputs={"news_json": news_json, "research_json": research_json},
+            agent_outputs={
+                "news_json": news_jsons.get(ticker, {}),
+                "research_json": research_jsons.get(ticker, {}),
+            },
         )
+        # Inject predictor fields if available
+        pred = predictions.get(ticker, {})
+        thesis["predicted_direction"] = pred.get("predicted_direction")
+        thesis["prediction_confidence"] = pred.get("prediction_confidence")
+        thesis["predicted_alpha"] = pred.get("predicted_alpha")
+
+        # ── Option A: GBM confirmation gate ──────────────────────────────────
+        # If the research signal is ENTER but the GBM model forecasts DOWN with
+        # sufficient confidence, downgrade the signal to HOLD.  This prevents
+        # entering a long position against a short-term bearish GBM signal.
+        # The veto only fires when:
+        #   1. signal == "ENTER"          (research wants to open a position)
+        #   2. predicted_direction == "DOWN"   (GBM 5-day forecast is bearish)
+        #   3. prediction_confidence >= MIN_PREDICTION_CONFIDENCE  (0.60 default)
+        gbm_dir = pred.get("predicted_direction")
+        gbm_conf = float(pred.get("prediction_confidence") or 0.0)
+        if (
+            thesis.get("signal") == "ENTER"
+            and gbm_dir == "DOWN"
+            and gbm_conf >= MIN_PREDICTION_CONFIDENCE
+        ):
+            thesis["signal"] = "HOLD"
+            thesis["gbm_veto"] = True
+            logger.info(
+                "[GBM gate] ENTER → HOLD for %s: predicted_direction=DOWN confidence=%.2f",
+                ticker, gbm_conf,
+            )
+        else:
+            thesis["gbm_veto"] = False
+
+        full_theses[ticker] = thesis
 
     return {**state, "investment_theses": full_theses}
 
@@ -818,6 +893,19 @@ def archive_writer(state: ResearchState) -> ResearchState:
                 "signal": thesis.get("signal", "HOLD"),
                 "price_target_upside": thesis.get("price_target_upside"),
                 "stale": bool(thesis.get("stale_days", 0) >= 5),
+                "long_term_score": thesis.get("long_term_score"),
+                "long_term_rating": thesis.get("long_term_rating"),
+                "sub_scores": {
+                    "technical": thesis.get("technical_score"),
+                    "news": thesis.get("news_score"),
+                    "news_lt": thesis.get("news_score_lt"),
+                    "research": thesis.get("research_score"),
+                    "research_lt": thesis.get("research_score_lt"),
+                },
+                "predicted_direction": thesis.get("predicted_direction"),
+                "prediction_confidence": thesis.get("prediction_confidence"),
+                "predicted_alpha": thesis.get("predicted_alpha"),
+                "gbm_veto": thesis.get("gbm_veto", False),
             }
             for t, thesis in investment_theses.items()
             if t not in candidate_tickers_set
@@ -838,6 +926,19 @@ def archive_writer(state: ResearchState) -> ResearchState:
                      - datetime.strptime(c["entry_date"], "%Y-%m-%d").date()).days
                     if c.get("entry_date") else None
                 ),
+                "long_term_score": investment_theses.get(c["symbol"], {}).get("long_term_score"),
+                "long_term_rating": investment_theses.get(c["symbol"], {}).get("long_term_rating"),
+                "sub_scores": {
+                    "technical": investment_theses.get(c["symbol"], {}).get("technical_score"),
+                    "news": investment_theses.get(c["symbol"], {}).get("news_score"),
+                    "news_lt": investment_theses.get(c["symbol"], {}).get("news_score_lt"),
+                    "research": investment_theses.get(c["symbol"], {}).get("research_score"),
+                    "research_lt": investment_theses.get(c["symbol"], {}).get("research_score_lt"),
+                },
+                "predicted_direction": investment_theses.get(c["symbol"], {}).get("predicted_direction"),
+                "prediction_confidence": investment_theses.get(c["symbol"], {}).get("prediction_confidence"),
+                "predicted_alpha": investment_theses.get(c["symbol"], {}).get("predicted_alpha"),
+                "gbm_veto": investment_theses.get(c["symbol"], {}).get("gbm_veto", False),
             }
             for c in new_candidates_for_signals
         ],
@@ -903,7 +1004,6 @@ def build_graph() -> StateGraph:
     graph.add_node("candidate_evaluator", candidate_evaluator)
     graph.add_node("consolidator_node", consolidator_node)
     graph.add_node("archive_writer", archive_writer)
-    graph.add_node("email_sender_node", email_sender_node)
 
     graph.set_entry_point("fetch_data")
 
@@ -920,8 +1020,9 @@ def build_graph() -> StateGraph:
     graph.add_edge("thesis_updater", "candidate_evaluator")
     graph.add_edge("candidate_evaluator", "consolidator_node")
     graph.add_edge("consolidator_node", "archive_writer")
-    graph.add_edge("archive_writer", "email_sender_node")
-    graph.add_edge("email_sender_node", END)
+    # Research email suppressed — predictor Lambda sends the combined morning briefing
+    # after consuming signals.json via S3 EventBridge trigger.
+    graph.add_edge("archive_writer", END)
 
     return graph.compile()
 

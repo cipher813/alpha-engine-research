@@ -65,8 +65,9 @@ def handler(event, context):
     Returns:
         dict with status: "OK" | "SKIPPED" | "ERROR"
     """
-    # Time gate: only run when it's 6:15am PT (handles DST automatically)
-    if not _is_scheduled_run_time():
+    # Time gate: only run when it's 5:45am PT (handles DST automatically)
+    # Pass {"force": true} in the event payload to bypass for manual runs.
+    if not event.get("force") and not _is_scheduled_run_time():
         return {"status": "SKIPPED", "reason": "wrong_time"}
 
     today = datetime.date.today()

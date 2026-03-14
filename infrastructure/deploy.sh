@@ -95,7 +95,7 @@ deploy_main() {
       --role "$ROLE_ARN" \
       --handler "handler.handler" \
       --code "S3Bucket=$BUCKET,S3Key=$S3_KEY" \
-      --timeout 600 \
+      --timeout 900 \
       --memory-size 1024 \
       --environment "Variables={S3_BUCKET=$BUCKET}" \
       --region "$REGION" > /dev/null

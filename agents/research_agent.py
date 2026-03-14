@@ -43,11 +43,28 @@ THESIS DRAFTING PROTOCOL — FOLLOW IN ORDER:
 
 Keep the report to approximately 300 words.
 
-research_score (0-100): Expected relative attractiveness for the next ~12 months vs the market.
-  Higher = more likely to outperform SPY; lower = more likely to underperform.
+Provide two independent scores:
+
+research_score_short (0-100): Short-term attractiveness for the next 1-5 trading days.
+  Start from a baseline set by Wall Street consensus:
+    Strong Buy consensus  → baseline 62
+    Buy consensus         → baseline 58
+    Hold/Neutral          → baseline 50
+    Underperform          → baseline 42
+    Sell                  → baseline 35
+  Then adjust from that baseline (max ±15) for:
+    +: earnings date within 2 weeks, recent upgrade, analyst day, pending FDA/M&A
+    -: recent downgrade, earnings miss still digesting, guidance cut, litigation risk
+  Score 50 = market-neutral short-term. Anchored to consensus; catalysts move it.
+
+research_score_long (0-100): Long-term attractiveness for the next ~12 months vs the market.
+  Driven by: analyst consensus rating and direction, price target upside, earnings growth
+  trend, competitive positioning. Score 50 = expected to match SPY; >70 = likely to
+  outperform; <30 = likely to underperform.
 
 End with a JSON block:
-{{"research_score": <0-100>, "consensus_direction": "<bullish|neutral|bearish>",
+{{"research_score_short": <0-100>, "research_score_long": <0-100>,
+ "consensus_direction": "<bullish|neutral|bearish>",
  "key_upside": "<one sentence>", "key_risk": "<one sentence>",
  "material_changes": <true|false>}}
 
@@ -82,13 +99,13 @@ def _format_earnings(surprises: list[dict]) -> str:
 
 
 def _extract_json_from_response(text: str) -> dict:
-    match = re.search(r"\{[^{}]*\"research_score\"[^{}]*\}", text, re.DOTALL)
+    match = re.search(r"\{[^{}]*\"research_score_short\"[^{}]*\}", text, re.DOTALL)
     if match:
         try:
             return json.loads(match.group())
         except json.JSONDecodeError:
             pass
-    return {"research_score": 50, "consensus_direction": "neutral", "material_changes": False}
+    return {"research_score_short": 50, "research_score_long": 50, "consensus_direction": "neutral", "material_changes": False}
 
 
 def run_research_agent(
@@ -139,6 +156,7 @@ def run_research_agent(
         "ticker": ticker,
         "report_md": report_md,
         "research_json": research_json,
-        "research_score": float(research_json.get("research_score", 50)),
+        "research_score": float(research_json.get("research_score_short", 50)),
+        "research_score_lt": float(research_json.get("research_score_long", 50)),
         "material_changes": bool(research_json.get("material_changes", False)),
     }

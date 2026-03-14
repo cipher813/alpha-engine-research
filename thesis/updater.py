@@ -66,6 +66,9 @@ def build_thesis_record(
         "signal": aggregated.get("signal", "HOLD"),
         "score_velocity_5d": aggregated.get("score_velocity_5d"),
         "price_target_upside": aggregated.get("price_target_upside"),
+        # Long-term (12-month) scores — informational, not used by executor
+        "long_term_score": aggregated.get("long_term_score"),
+        "long_term_rating": aggregated.get("long_term_rating"),
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
 

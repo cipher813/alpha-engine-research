@@ -64,6 +64,13 @@ EMAIL_SENDER: str = EMAIL_CFG["sender"]
 SCHEDULE_CFG: dict = _cfg["schedule"]
 HOLIDAY_CALENDAR: str = SCHEDULE_CFG["holiday_calendar"]
 
+# ── Predictor ─────────────────────────────────────────────────────────────────
+_pred_cfg: dict = _cfg.get("predictor", {})
+PREDICTOR_PREDICTIONS_KEY: str = _pred_cfg.get("s3_predictions_key", "predictor/predictions/latest.json")
+# Minimum GBM prediction_confidence required to apply the confirmation gate veto.
+# Below this threshold the prediction is treated as low-conviction and ignored.
+MIN_PREDICTION_CONFIDENCE: float = float(_pred_cfg.get("min_confidence", 0.60))
+
 # ── LLM ───────────────────────────────────────────────────────────────────────
 LLM_CFG: dict = _cfg["llm"]
 PER_STOCK_MODEL: str = LLM_CFG["per_stock_model"]
