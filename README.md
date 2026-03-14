@@ -112,6 +112,10 @@ The Macro Agent (claude-sonnet) outputs 11 sector-specific multipliers rather th
 
 Scores unchanged for ≥5 trading days receive a `⚠stale` flag in the email. This signals the next agent run should scrutinize this ticker for overlooked developments. Staleness does not change the score itself.
 
+### GBM Predictor Integration (activated 2026-03-14)
+
+The GBM predictor (alpha-engine-predictor) veto gate is now active. When the predictor outputs a DOWN prediction with confidence >= 0.65 for a ticker, the executor overrides the ENTER signal to HOLD, preventing entry into declining positions. This adds a quantitative ML filter on top of the LLM-based research signals. Configuration: `predictor.enabled: true` in `config/universe.yaml`.
+
 ### Score Performance Feedback Loop
 
 The system tracks whether BUY-rated stocks (score ≥65) actually outperform SPY over subsequent 10 and 30 trading day windows. If accuracy falls below 55% over a trailing 60-day window, a recalibration flag is set in the consolidated report.
