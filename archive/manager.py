@@ -210,6 +210,31 @@ class ArchiveManager:
             correct_5d              INTEGER,
             UNIQUE(symbol, prediction_date)
         );
+
+        CREATE TABLE IF NOT EXISTS population (
+            id                  INTEGER PRIMARY KEY,
+            symbol              TEXT NOT NULL UNIQUE,
+            sector              TEXT NOT NULL,
+            long_term_score     REAL,
+            long_term_rating    TEXT,
+            conviction          TEXT DEFAULT 'stable',
+            price_target_upside REAL,
+            thesis_summary      TEXT,
+            entry_date          TEXT,
+            tenure_weeks        INTEGER DEFAULT 0
+        );
+
+        CREATE TABLE IF NOT EXISTS population_history (
+            id          INTEGER PRIMARY KEY,
+            date        TEXT NOT NULL,
+            event_type  TEXT NOT NULL,
+            ticker_in   TEXT,
+            ticker_out  TEXT,
+            sector      TEXT,
+            reason      TEXT,
+            score_in    REAL,
+            score_out   REAL
+        );
         """)
         # ── Column migrations (existing DBs may lack newer columns) ──────────
         migrations = [
@@ -564,6 +589,106 @@ class ArchiveManager:
     def commit(self) -> None:
         if self.db_conn:
             self.db_conn.commit()
+
+    # ── Population persistence ─────────────────────────────────────────────────
+
+    def save_population(
+        self,
+        population: list[dict],
+        run_date: str,
+        market_regime: str = "neutral",
+        sector_ratings: dict | None = None,
+    ) -> None:
+        """
+        Persist current investment population to SQLite for next-run continuity.
+        Also writes population/latest.json and population/{date}.json to S3.
+
+        The S3 JSON includes market_regime and sector_ratings so the Executor's
+        population_reader.py can consume it directly.
+        """
+        if not self.db_conn:
+            return
+
+        # SQLite: clear and rewrite population table
+        self.db_conn.execute("DELETE FROM population")
+        for p in population:
+            self.db_conn.execute(
+                """INSERT INTO population
+                   (symbol, sector, long_term_score, long_term_rating,
+                    conviction, price_target_upside, thesis_summary, entry_date, tenure_weeks)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    p["ticker"], p.get("sector", "Unknown"),
+                    p.get("long_term_score", 50.0), p.get("long_term_rating", "HOLD"),
+                    p.get("conviction", "stable"), p.get("price_target_upside"),
+                    p.get("thesis_summary", ""), p.get("entry_date", run_date),
+                    p.get("tenure_weeks", 0),
+                ),
+            )
+        self.db_conn.commit()
+
+        # S3: write population JSON (includes regime + sector_ratings for Executor)
+        pop_json = json.dumps({
+            "date": run_date,
+            "market_regime": market_regime,
+            "sector_ratings": sector_ratings or {},
+            "population": population,
+        }, indent=2, default=str)
+        self._s3_put("population/latest.json", pop_json)
+        self._s3_put(f"population/{run_date}.json", pop_json)
+
+    def load_population(self) -> list[dict]:
+        """
+        Load current population from SQLite.
+        Returns [] on first run (before any population has been saved).
+        """
+        if not self.db_conn:
+            return []
+        try:
+            rows = self.db_conn.execute(
+                """SELECT symbol, sector, long_term_score, long_term_rating,
+                          conviction, price_target_upside, thesis_summary,
+                          entry_date, tenure_weeks
+                   FROM population ORDER BY long_term_score DESC"""
+            ).fetchall()
+            return [
+                {
+                    "ticker": r[0],
+                    "sector": r[1],
+                    "long_term_score": r[2],
+                    "long_term_rating": r[3],
+                    "conviction": r[4],
+                    "price_target_upside": r[5],
+                    "thesis_summary": r[6],
+                    "entry_date": r[7],
+                    "tenure_weeks": r[8],
+                }
+                for r in rows
+            ]
+        except sqlite3.OperationalError:
+            # Table doesn't exist yet
+            return []
+
+    def log_rotation_event(self, event: dict, run_date: str) -> None:
+        """Log a population rotation event to the population_history table."""
+        if not self.db_conn:
+            return
+        self.db_conn.execute(
+            """INSERT INTO population_history
+               (date, event_type, ticker_in, ticker_out, sector, reason,
+                score_in, score_out)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                run_date,
+                event.get("type", "UNKNOWN"),
+                event.get("ticker_in", event.get("ticker")),
+                event.get("ticker_out"),
+                event.get("sector", "Unknown"),
+                event.get("reason", ""),
+                event.get("score_in", event.get("long_term_score")),
+                event.get("score_out"),
+            ),
+        )
 
     def close(self) -> None:
         if self.db_conn:

@@ -1,10 +1,14 @@
 """
 Market scanner — Stage 1 quantitative filter.
 
-Scans S&P 500 + S&P 400 (~900 stocks) and reduces to ~50 candidates
+Scans S&P 500 + S&P 400 (~900 stocks) and reduces to ~60 candidates
 via momentum and deep-value paths (§6.1, §6.3).
 
 No LLM is used in this module.
+
+The scanner now drives all population selection — no hardcoded universe.
+All ~900 stocks are eligible; the exclude_tickers parameter allows the
+caller to exclude specific tickers if needed (e.g., recently removed stocks).
 """
 
 from __future__ import annotations
@@ -14,7 +18,6 @@ from typing import Optional
 import pandas as pd
 
 from config import (
-    UNIVERSE_TICKERS,
     MIN_AVG_VOLUME,
     MIN_PRICE,
     DEEP_VALUE_PATH_ENABLED,
@@ -31,11 +34,13 @@ from scoring.technical import compute_technical_score
 
 def get_scanner_universe(exclude_tickers: Optional[list[str]] = None) -> list[str]:
     """
-    Return the full scanner candidate universe (S&P 500 + S&P 400),
-    excluding any tickers already in the monitored universe.
+    Return the full scanner candidate universe (S&P 500 + S&P 400).
+
+    All ~900 stocks are eligible since there is no hardcoded static universe.
+    Optional exclude_tickers allows caller to filter specific tickers.
     """
     all_tickers = fetch_sp500_sp400_tickers()
-    exclude = set(exclude_tickers or []) | set(UNIVERSE_TICKERS)
+    exclude = set(exclude_tickers or [])
     return [t for t in all_tickers if t not in exclude]
 
 
@@ -100,9 +105,10 @@ def run_quant_filter(
             candidate["path"] = "deep_value_pending"  # confirmed after analyst data
             deep_value_candidates.append(candidate)
 
-    # Sort momentum candidates by tech_score descending; take top 40
+    # Sort momentum candidates by tech_score descending; take top 60
+    # (expanded from 40 to support full population selection of 25+ stocks)
     momentum_candidates.sort(key=lambda x: x["tech_score"], reverse=True)
-    momentum_top = momentum_candidates[:40]
+    momentum_top = momentum_candidates[:60]
 
     # Deep value: cap at DEEP_VALUE_MAX_CANDIDATES (default 10)
     deep_value_candidates.sort(key=lambda x: x["rsi_14"])  # most oversold first

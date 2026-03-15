@@ -1,9 +1,13 @@
 """
-Lambda entry point — main daily morning pipeline (§10.1).
+Lambda entry point — main research pipeline.
 
-Triggered by EventBridge on NYSE trading days (Mon–Fri, 5:45am PT).
-Checks for market holidays and skips if NYSE is closed.
-Invokes the full LangGraph research pipeline.
+Weekly (primary): triggered by EventBridge Monday 06:00 UTC (Sunday ~10-11pm PT).
+EventBridge passes {"weekly_run": true} — bypasses the 5:45am PT time gate.
+
+Weekday (disabled, available for rollback): EventBridge at 12:45+13:45 UTC
+(5:45am PT after DST time gate). Checks for market holidays.
+
+Pass {"force": true} to bypass all gates (manual testing).
 """
 
 from __future__ import annotations
@@ -47,8 +51,8 @@ def is_early_close(date: datetime.date | None = None) -> bool:
 def _is_scheduled_run_time() -> bool:
     """
     Return True if current PT time is within the 5:40–5:55am run window.
-    Allows a single EventBridge rule to fire at both 12:45 and 13:45 UTC;
-    only the invocation that lands in 5:45am PT proceeds.
+    Used by the weekday EventBridge rule (12:45+13:45 UTC).
+    Only the invocation that lands in 5:45am PT proceeds.
     """
     pt = datetime.datetime.now(pytz.timezone("America/Los_Angeles"))
     return pt.hour == 5 and 40 <= pt.minute <= 55
@@ -56,31 +60,39 @@ def _is_scheduled_run_time() -> bool:
 
 def handler(event, context):
     """
-    AWS Lambda handler for the daily morning research pipeline.
+    AWS Lambda handler for the research pipeline.
 
-    Triggered by EventBridge at 12:45 and 13:45 UTC (Mon–Fri). Only runs
-    when current PT time is 5:40–5:55am; the other invocation exits early.
-    No DST rule swap required.
+    Gate logic:
+      - force=True  → bypass all gates (manual testing)
+      - weekly_run=True → bypass time gate (Monday 06:00 UTC weekly schedule)
+      - Otherwise → require 5:40-5:55am PT time window AND NYSE trading day
 
     Returns:
         dict with status: "OK" | "SKIPPED" | "ERROR"
     """
-    # Time gate: only run when it's 5:45am PT (handles DST automatically)
-    # Pass {"force": true} in the event payload to bypass for manual runs.
-    if not event.get("force") and not _is_scheduled_run_time():
+    force = event.get("force", False)
+    weekly = event.get("weekly_run", False)
+
+    # Time gate: weekly runs and force bypass; weekday runs require 5:40-5:55am PT
+    if not force and not weekly and not _is_scheduled_run_time():
         return {"status": "SKIPPED", "reason": "wrong_time"}
 
     today = datetime.date.today()
 
-    # Check market holiday
-    if not is_trading_day(today):
-        print(f"Market holiday on {today} — skipping run.")
-        return {"status": "SKIPPED", "reason": "market_holiday", "date": str(today)}
+    # Trading day gate: force bypasses; weekly runs on Monday (always a trading day
+    # unless it's a rare Monday holiday like MLK Day or Presidents' Day)
+    if not force and not is_trading_day(today):
+        if weekly:
+            print(f"Monday holiday on {today} — running anyway (weekly population refresh).")
+        else:
+            print(f"Market holiday on {today} — skipping run.")
+            return {"status": "SKIPPED", "reason": "market_holiday", "date": str(today)}
 
-    early_close = is_early_close(today)
+    early_close = is_early_close(today) if not weekly else False
     run_date = str(today)
 
-    print(f"Starting alpha-engine-research run for {run_date}"
+    run_type = "weekly population refresh" if weekly else "weekday"
+    print(f"Starting alpha-engine-research run for {run_date} ({run_type})"
           + (" [early close]" if early_close else ""))
 
     # Import pipeline (deferred to reduce cold-start time)
@@ -114,6 +126,7 @@ def handler(event, context):
             "date": run_date,
             "email_sent": final_state.get("email_sent", False),
             "early_close": early_close,
+            "weekly_run": weekly,
         }
 
     except Exception as e:

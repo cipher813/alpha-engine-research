@@ -38,10 +38,11 @@ Instructions:
 2. Do NOT evaluate momentum and deep_value candidates by the same technical score standard —
    deep_value picks are admitted specifically because they are technically weak but
    fundamentally supported. Evaluate deep_value candidates on analyst conviction and upside.
-3. Rank the top 10 by investment attractiveness across both paths, weighing technical
+3. Rank the top {top_n} by investment attractiveness across both paths, weighing technical
    momentum, analyst conviction, upside to price target, news catalyst, and macro regime.
-4. For each of your top 10, provide:
-   - Rank (1–10)
+   Ensure sector diversity — no more than 5 stocks from any single sector in your ranking.
+4. For each of your top {top_n}, provide:
+   - Rank (1–{top_n})
    - Ticker
    - Path (momentum or deep_value)
    - 1-sentence rationale covering why it stands out vs. the field
@@ -76,7 +77,7 @@ def _build_candidates_table(candidates: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def _extract_ranking(text: str) -> list[dict]:
+def _extract_ranking(text: str, top_n: int = 10) -> list[dict]:
     """Extract JSON array of objects from agent response."""
     # Find the first '[' that opens a JSON array of objects (greedy match)
     match = re.search(r"\[\s*\{.*\}\s*\]", text, re.DOTALL)
@@ -84,7 +85,7 @@ def _extract_ranking(text: str) -> list[dict]:
         try:
             data = json.loads(match.group())
             if isinstance(data, list):
-                return data[:10]
+                return data[:top_n]
         except json.JSONDecodeError as e:
             print(f"[SCANNER] JSON decode error on regex match: {e}")
 
@@ -93,7 +94,7 @@ def _extract_ranking(text: str) -> list[dict]:
     try:
         data = json.loads(stripped)
         if isinstance(data, list):
-            return data[:10]
+            return data[:top_n]
     except json.JSONDecodeError:
         pass
 
@@ -105,6 +106,7 @@ def run_scanner_ranking_agent(
     candidates: list[dict],
     market_regime: str = "neutral",
     api_key: Optional[str] = None,
+    top_n: int = 10,
 ) -> list[dict]:
     """
     Run the Scanner Ranking Agent on ~50 quant-filtered candidates.
@@ -112,9 +114,10 @@ def run_scanner_ranking_agent(
     Args:
         candidates: list of candidate dicts (from Stage 1+2)
         market_regime: from Macro Agent output
+        top_n: number of top candidates to rank (default 10, expanded to 35 for population)
 
     Returns:
-        list of top-10 ranked dicts: {rank, ticker, path, rationale}
+        list of top-N ranked dicts: {rank, ticker, path, rationale}
     """
     if not candidates:
         return []
@@ -126,6 +129,7 @@ def run_scanner_ranking_agent(
         candidates_table=table,
         market_regime=market_regime,
         n=len(candidates),
+        top_n=top_n,
     )
 
     response = client.messages.create(
@@ -134,4 +138,4 @@ def run_scanner_ranking_agent(
         messages=[{"role": "user", "content": prompt}],
     )
 
-    return _extract_ranking(response.content[0].text)
+    return _extract_ranking(response.content[0].text, top_n=top_n)

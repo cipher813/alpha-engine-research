@@ -17,8 +17,14 @@ def _load() -> dict:
 
 _cfg = _load()
 
-# ── Universe ──────────────────────────────────────────────────────────────────
-UNIVERSE: list[dict] = _cfg["universe"]
+# ── Population (replaces static universe) ────────────────────────────────────
+# All stocks are derived from S&P 900 scanner — no hardcoded starting stocks.
+# UNIVERSE / UNIVERSE_TICKERS / SECTOR_MAP are loaded dynamically from
+# population/latest.json (S3) or SQLite at run time.
+# The static list below is kept empty — graph.research_graph loads the active
+# population from the archive manager at startup.
+POPULATION_CFG: dict = _cfg.get("population", {})
+UNIVERSE: list[dict] = _cfg.get("universe", [])  # backward compat (empty after migration)
 UNIVERSE_TICKERS: list[str] = [s["ticker"] for s in UNIVERSE]
 SECTOR_MAP: dict[str, str] = {s["ticker"]: s["sector"] for s in UNIVERSE}
 

@@ -22,7 +22,6 @@ from botocore.exceptions import ClientError
 from exchange_calendars import get_calendar
 
 from config import (
-    UNIVERSE_TICKERS,
     PRICE_MOVE_THRESHOLD_PCT,
     EMAIL_RECIPIENTS,
     EMAIL_SENDER,
@@ -90,6 +89,18 @@ def _get_active_candidates_from_db(db_path: str) -> list[str]:
     try:
         conn = sqlite3.connect(db_path)
         rows = conn.execute("SELECT symbol FROM active_candidates").fetchall()
+        conn.close()
+        return [r[0] for r in rows]
+    except Exception:
+        return []
+
+
+def _get_population_tickers_from_db(db_path: str) -> list[str]:
+    """Read population tickers from research.db (replaces hardcoded UNIVERSE_TICKERS)."""
+    import sqlite3
+    try:
+        conn = sqlite3.connect(db_path)
+        rows = conn.execute("SELECT symbol FROM population").fetchall()
         conn.close()
         return [r[0] for r in rows]
     except Exception:
@@ -178,7 +189,8 @@ def handler(event, context):
 
     prior_closes = _get_prior_closes(local_db)
     candidate_tickers = _get_active_candidates_from_db(local_db)
-    all_tickers = list(set(UNIVERSE_TICKERS + candidate_tickers))
+    population_tickers = _get_population_tickers_from_db(local_db)
+    all_tickers = list(set(population_tickers + candidate_tickers))
 
     # Fetch current prices
     current_prices = _get_current_prices(all_tickers)

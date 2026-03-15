@@ -83,11 +83,31 @@ def fetch_price_data(tickers: list[str], period: str = "1y") -> dict[str, pd.Dat
     return result
 
 
-def fetch_sp500_sp400_tickers() -> list[str]:
+# Wikipedia GICS sector names → internal sector names used throughout the system
+_GICS_SECTOR_MAP = {
+    "Information Technology": "Technology",
+    "Health Care": "Healthcare",
+    "Financials": "Financial",
+    "Consumer Discretionary": "Consumer Discretionary",
+    "Consumer Staples": "Consumer Staples",
+    "Energy": "Energy",
+    "Industrials": "Industrials",
+    "Materials": "Materials",
+    "Real Estate": "Real Estate",
+    "Utilities": "Utilities",
+    "Communication Services": "Communication Services",
+}
+
+
+def fetch_sp500_sp400_with_sectors() -> tuple[list[str], dict[str, str]]:
     """
-    Fetch S&P 500 and S&P 400 constituent lists from Wikipedia.
+    Fetch S&P 500 and S&P 400 constituent lists AND GICS sectors from Wikipedia.
     Falls back to cached static CSV if Wikipedia is unavailable.
-    Returns deduplicated list of tickers.
+
+    Returns:
+        (tickers, sector_map) where:
+        - tickers: deduplicated list of ticker symbols
+        - sector_map: {ticker: internal_sector_name} for all tickers
     """
     import requests
     from pathlib import Path
@@ -103,6 +123,7 @@ def fetch_sp500_sp400_tickers() -> list[str]:
     }
 
     tickers: list[str] = []
+    sector_map: dict[str, str] = {}
 
     try:
         for url in [sp500_url, sp400_url]:
@@ -113,28 +134,72 @@ def fetch_sp500_sp400_tickers() -> list[str]:
             # Flatten multi-level columns if present
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = [" ".join(str(c) for c in col).strip() for col in df.columns]
+
+            # Find ticker/symbol column
             col = next(
                 (c for c in df.columns if "symbol" in str(c).lower() or "ticker" in str(c).lower()),
                 df.columns[0],
             )
-            batch = df[col].astype(str).str.strip().str.replace(".", "-", regex=False).tolist()
-            batch = [t for t in batch if t and t != "nan" and len(t) <= 6]
-            tickers.extend(batch)
+
+            # Find GICS sector column
+            sector_col = next(
+                (c for c in df.columns if "gics" in str(c).lower() and "sector" in str(c).lower()),
+                None,
+            )
+            if sector_col is None:
+                # Broader match for tables without "GICS" prefix
+                sector_col = next(
+                    (c for c in df.columns if "sector" in str(c).lower()),
+                    None,
+                )
+
+            for _, row in df.iterrows():
+                raw_ticker = str(row[col]).strip().replace(".", "-")
+                if not raw_ticker or raw_ticker == "nan" or len(raw_ticker) > 6:
+                    continue
+                tickers.append(raw_ticker)
+
+                if sector_col is not None:
+                    raw_sector = str(row[sector_col]).strip()
+                    mapped = _GICS_SECTOR_MAP.get(raw_sector, raw_sector)
+                    sector_map[raw_ticker] = mapped
 
         tickers = list(dict.fromkeys(tickers))  # dedupe, preserve order
         if tickers:
-            pd.DataFrame({"ticker": tickers}).to_csv(cache_path, index=False)
-            print(f"  Fetched {len(tickers)} S&P 500+400 constituents from Wikipedia.")
-        return tickers
+            cache_df = pd.DataFrame({
+                "ticker": tickers,
+                "sector": [sector_map.get(t, "Unknown") for t in tickers],
+            })
+            cache_df.to_csv(cache_path, index=False)
+            print(f"  Fetched {len(tickers)} S&P 500+400 constituents with sectors from Wikipedia.")
+        return tickers, sector_map
 
     except Exception as e:
         print(f"  Wikipedia fetch failed ({e}); trying cache...")
         if cache_path.exists():
-            cached = pd.read_csv(cache_path)["ticker"].tolist()
-            print(f"  Loaded {len(cached)} tickers from cache.")
-            return cached
+            cached = pd.read_csv(cache_path)
+            ticker_list = cached["ticker"].tolist()
+            if "sector" in cached.columns:
+                sector_map = {
+                    str(t): str(s)
+                    for t, s in zip(cached["ticker"], cached["sector"])
+                    if s and str(s) != "nan"
+                }
+            has_sectors = "with" if sector_map else "without"
+            print(f"  Loaded {len(ticker_list)} tickers from cache ({has_sectors} sectors).")
+            return ticker_list, sector_map
         print("  No cache found. Scanner will have no universe.")
-        return []
+        return [], {}
+
+
+def fetch_sp500_sp400_tickers() -> list[str]:
+    """
+    Fetch S&P 500 and S&P 400 constituent lists from Wikipedia.
+    Falls back to cached static CSV if Wikipedia is unavailable.
+    Returns deduplicated list of tickers.
+    """
+    tickers, _ = fetch_sp500_sp400_with_sectors()
+    return tickers
 
 
 def compute_technical_indicators(df: pd.DataFrame) -> Optional[dict]:

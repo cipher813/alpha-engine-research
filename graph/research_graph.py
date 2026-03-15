@@ -1,18 +1,17 @@
 """
-LangGraph research graph — full pipeline state machine (§9).
+LangGraph research graph — scanner-driven population pipeline.
 
 Topology:
-  fetch_data
-    ├── BRANCH A: universe pipeline (fan-out per ticker, macro global)
-    └── BRANCH B: scanner pipeline (sequential stages within branch)
-  [fan-in join]
-  score_aggregator
-  thesis_updater + candidate_evaluator
-  consolidator_agent
-  archive_writer
-  email_sender
+  fetch_data                  (download macro + S&P 900 price data + load population)
+  run_scanner_pipeline        (quant filter 900→~50, ranking →30-35, deep analysis)
+  run_population_agents       (LLM agents: news + research for ~25 population stocks)
+  score_aggregator            (aggregate all scores)
+  population_evaluator        (sector-balanced population selection + rotation)
+  consolidator_node
+  archive_writer              (S3 + SQLite + population/latest.json)
 
-Parallelism via LangGraph Send nodes; semaphore limits concurrent LLM calls.
+All stocks derived from S&P 900 — no hardcoded universe.
+Sector allocation driven by macro agent's sector_modifiers.
 """
 
 from __future__ import annotations
@@ -32,6 +31,7 @@ from langgraph.types import Send
 from config import (
     UNIVERSE_TICKERS,
     SECTOR_MAP,
+    POPULATION_CFG,
     CONCURRENT_AGENTS,
     ROTATION_TIERS,
     WEAK_PICK_SCORE_THRESHOLD,
@@ -45,7 +45,11 @@ from agents.research_agent import run_research_agent
 from agents.macro_agent import run_macro_agent
 from agents.scanner_ranking_agent import run_scanner_ranking_agent
 from agents.consolidator import run_consolidator_agent
-from data.fetchers.price_fetcher import fetch_price_data, compute_technical_indicators
+from data.fetchers.price_fetcher import (
+    fetch_price_data,
+    compute_technical_indicators,
+    fetch_sp500_sp400_with_sectors,
+)
 from data.fetchers.news_fetcher import fetch_all_news
 from data.fetchers.analyst_fetcher import fetch_analyst_consensus
 from data.fetchers.macro_fetcher import fetch_macro_data
@@ -54,8 +58,8 @@ from data.scanner import (
     get_scanner_universe,
     run_quant_filter,
     confirm_deep_value_with_analyst,
-    evaluate_candidate_rotation,
 )
+from data.population_selector import select_population
 from scoring.technical import compute_technical_score, compute_momentum_percentiles
 from scoring.aggregator import aggregate_all
 from scoring.performance_tracker import run_performance_checks, record_new_buy_scores
@@ -117,6 +121,12 @@ class ResearchState(TypedDict, total=False):
     is_early_close: Annotated[bool, _take_last]
     _scanner_universe: Annotated[list[str], _take_last]  # internal: scanner ticker list
     _rotation_events: Annotated[list, _take_last]  # internal: rotation log
+    # ── Population-driven fields ──────────────────────────────────────────────
+    current_population: Annotated[list[dict], _take_last]  # from SQLite
+    population_tickers: Annotated[list[str], _take_last]   # tickers to analyze
+    new_population: Annotated[list[dict], _take_last]       # after selection
+    population_rotation_events: Annotated[list[dict], _take_last]
+    sector_map: Annotated[dict[str, str], _take_last]       # dynamic sector map
 
 
 # ── Semaphore for LLM concurrency ─────────────────────────────────────────────
@@ -127,58 +137,53 @@ _llm_semaphore = asyncio.Semaphore(CONCURRENT_AGENTS)
 
 def fetch_data(state: ResearchState) -> ResearchState:
     """
-    Node 1: Download all data needed for both branches.
-    - Price data for universe + candidates + S&P 500/400
-    - News headlines for universe + candidates
-    - Analyst data for universe + candidates
+    Node 1: Download all data needed for the scanner-driven pipeline.
+    - Load current population from SQLite (empty on first run)
+    - Price data for S&P 500/400 (~900 stocks)
     - Macro data from FRED + yfinance
-    - Prior reports from archive
+    - Prior reports from archive for population tickers
+    - Predictor predictions from S3
     """
     run_date = state["run_date"]
     archive: ArchiveManager = state["archive_manager"]
 
-    # Load active candidates from DB
+    # Load current population from SQLite (empty list on first run)
+    current_population = archive.load_population()
+    population_tickers = [p["ticker"] for p in current_population]
+    logger.info("[fetch_data] loaded %d stocks from current population", len(current_population))
+
+    # Also load legacy active candidates for backward compat during transition
     active_candidates = archive.load_active_candidates()
     candidate_tickers = [c["symbol"] for c in active_candidates]
-    all_tracked = list(set(UNIVERSE_TICKERS + candidate_tickers))
 
-    # Fetch price data for all tracked + S&P 500/400 universe
-    scanner_universe = get_scanner_universe(exclude_tickers=all_tracked)
-    scanner_universe_sample = scanner_universe
-    all_tickers_to_fetch = all_tracked + scanner_universe_sample
+    # Combine all known tickers for prior report loading
+    all_tracked = list(set(population_tickers + candidate_tickers + UNIVERSE_TICKERS))
+
+    # Fetch S&P 900 tickers WITH sector data from Wikipedia
+    # This builds the sector_map needed for scanner and population selection
+    scanner_universe, wikipedia_sector_map = fetch_sp500_sp400_with_sectors()
+    all_tickers_to_fetch = list(set(all_tracked + scanner_universe))
 
     price_data = fetch_price_data(all_tickers_to_fetch, period="1y")
 
-    # Fetch news for tracked tickers
-    news_headlines: dict[str, list] = {}
-    news_article_hashes: dict[str, set] = {}
-    for ticker in all_tracked:
-        raw = fetch_all_news(ticker, hours=48)
-        news_headlines[ticker] = raw["yahoo"] + raw.get("edgar_8k", [])
-        news_article_hashes[ticker] = archive.load_news_hashes(ticker)
-
-    # Fetch analyst data for tracked tickers
-    analyst_data: dict[str, dict] = {}
-    for ticker in all_tracked:
-        try:
-            analyst_data[ticker] = fetch_analyst_consensus(ticker)
-        except Exception as e:
-            analyst_data[ticker] = {"ticker": ticker, "error": str(e)}
-
-    # Fetch macro data
+    # Fetch macro data (needed before scanner for market_regime)
     try:
         macro_data = fetch_macro_data()
     except Exception as e:
         macro_data = {"error": str(e)}
 
-    # Load prior reports from archive
+    # Load prior reports and news for population tickers (they'll get LLM analysis)
+    # News/analyst data will be fetched later for scanner-selected candidates
     prior_news_reports: dict[str, str] = {}
     prior_research_reports: dict[str, str] = {}
     prior_theses: dict[str, dict] = {}
 
     for ticker in all_tracked:
-        category = "candidates" if ticker in candidate_tickers else "universe"
-        reports = archive.load_prior_reports(ticker, category=category)
+        # All population stocks are archived under "universe" category
+        reports = archive.load_prior_reports(ticker, category="universe")
+        if not reports["news_report"]:
+            # Also check candidates category (transition period)
+            reports = archive.load_prior_reports(ticker, category="candidates")
         if reports["news_report"]:
             prior_news_reports[ticker] = reports["news_report"]
         if reports["research_report"]:
@@ -189,7 +194,7 @@ def fetch_data(state: ResearchState) -> ResearchState:
     prior_macro_report_data = archive.load_prior_reports("macro_global", category="macro")
     prior_macro_report = prior_macro_report_data.get("news_report") or ""
 
-    # Load score history for conviction and velocity computation (§A.3, A.4)
+    # Load score history for conviction and velocity computation
     score_history = archive.load_score_history(all_tracked, n=6)
 
     # Load predictor predictions from S3 (best-effort — {} if not yet available)
@@ -198,35 +203,61 @@ def fetch_data(state: ResearchState) -> ResearchState:
     except Exception:
         predictions = {}
 
+    # Build dynamic sector map: Wikipedia sectors (primary) + population sectors (overlay)
+    sector_map: dict[str, str] = dict(SECTOR_MAP)  # start with any static entries (empty now)
+    sector_map.update(wikipedia_sector_map)          # add all ~900 sectors from Wikipedia
+    for p in current_population:
+        # Population sectors override Wikipedia (in case of manual corrections)
+        if p.get("sector") and p["sector"] != "Unknown":
+            sector_map[p["ticker"]] = p["sector"]
+
     return {
         **state,
-        "universe_tickers": UNIVERSE_TICKERS,
+        "current_population": current_population,
+        "population_tickers": population_tickers,
+        "universe_tickers": population_tickers,  # backward compat
         "candidate_tickers": candidate_tickers,
         "active_candidates": active_candidates,
         "price_data": price_data,
-        "news_headlines": news_headlines,
-        "news_article_hashes": news_article_hashes,
-        "analyst_data": analyst_data,
+        "news_headlines": {},   # fetched per-ticker in scanner/agent nodes
+        "news_article_hashes": {},
+        "analyst_data": {},
         "macro_data": macro_data,
         "prior_news_reports": prior_news_reports,
         "prior_research_reports": prior_research_reports,
         "prior_theses": prior_theses,
         "prior_macro_report": prior_macro_report,
         "score_history": score_history,
-        "_scanner_universe": scanner_universe_sample,
-        "_price_data_full": price_data,
+        "_scanner_universe": scanner_universe,
         "predictions": predictions,
+        "sector_map": sector_map,
     }
 
 
-def run_universe_agents(state: ResearchState) -> ResearchState:
+def run_population_agents(state: ResearchState) -> ResearchState:
     """
-    Branch A: Run all per-ticker universe agents (news + research, parallel).
-    Also runs the macro agent (global).
-    Uses asyncio for concurrency up to CONCURRENT_AGENTS.
+    Run LLM agents (news + research) on the population-candidate tickers
+    identified by the scanner.  Also runs the macro agent (global).
+
+    The scanner has already reduced S&P 900 → ~30-35 ranked candidates.
+    This node runs full LLM analysis on those candidates to produce
+    long_term_score / long_term_rating values for population selection.
     """
     run_date = state["run_date"]
-    all_tickers = list(set(state.get("universe_tickers", []) + state.get("candidate_tickers", [])))
+    archive: ArchiveManager = state["archive_manager"]
+
+    # Population tickers to analyze = scanner-ranked candidates (30-35 stocks).
+    # These include re-scored incumbents and potential new entries.
+    scanner_ranked = state.get("scanner_ranked", [])
+    population_tickers = state.get("population_tickers", [])
+
+    # Combine scanner-ranked + current population (incumbents must be re-scored)
+    tickers_to_analyze = list(set(
+        [e.get("ticker", "") for e in scanner_ranked if e.get("ticker")]
+        + population_tickers
+    ))
+    logger.info("[population_agents] analyzing %d tickers (scanner=%d + population=%d)",
+                len(tickers_to_analyze), len(scanner_ranked), len(population_tickers))
 
     news_reports: dict[str, str] = {}
     news_scores: dict[str, float] = {}
@@ -237,109 +268,25 @@ def run_universe_agents(state: ResearchState) -> ResearchState:
     research_scores_lt: dict[str, float] = {}
     research_jsons: dict[str, dict] = {}
 
-    # Compute technical scores
+    # Compute technical scores for analyzed tickers
     price_data = state.get("price_data", {})
-    technical_scores: dict[str, dict] = {}
+    technical_scores: dict[str, dict] = state.get("technical_scores", {})
     momentum_data: dict[str, Optional[float]] = {}
 
-    for ticker in all_tickers:
-        df = price_data.get(ticker)
-        if df is not None and not df.empty:
-            indicators = compute_technical_indicators(df)
-            if indicators:
-                technical_scores[ticker] = indicators
-                momentum_data[ticker] = indicators.get("momentum_20d")
+    for ticker in tickers_to_analyze:
+        if ticker not in technical_scores:
+            df = price_data.get(ticker)
+            if df is not None and not df.empty:
+                indicators = compute_technical_indicators(df)
+                if indicators:
+                    technical_scores[ticker] = indicators
+        if ticker in technical_scores:
+            momentum_data[ticker] = technical_scores[ticker].get("momentum_20d")
 
-    # Compute momentum percentiles across S&P 500 universe for context
+    # Compute momentum percentiles across all available tickers
     momentum_percentiles = compute_momentum_percentiles(momentum_data)
 
-    for ticker in all_tickers:
-        if ticker in technical_scores:
-            regime = state.get("market_regime", "neutral")
-            percentile = momentum_percentiles.get(ticker)
-            ts = compute_technical_score(
-                technical_scores[ticker],
-                market_regime=regime,
-                momentum_percentile=percentile,
-            )
-            technical_scores[ticker]["technical_score"] = ts
-
-    # Run news + research agents for each ticker
-    prior_date_default = "NONE"
-
-    def run_ticker_agents(ticker: str):
-        # Deduplicate articles
-        prior_hashes = state.get("news_article_hashes", {}).get(ticker, set())
-        all_articles = state.get("news_headlines", {}).get(ticker, [])
-        novel_articles, _ = deduplicate_articles(all_articles, prior_hashes)
-        recurring = compute_recurring_themes(novel_articles)
-
-        prior_news = state.get("prior_news_reports", {}).get(ticker)
-        prior_research = state.get("prior_research_reports", {}).get(ticker)
-        prior_thesis = state.get("prior_theses", {}).get(ticker, {})
-        prior_date = prior_thesis.get("date", prior_date_default)
-
-        tech = technical_scores.get(ticker, {})
-        # Merge predictor values into indicators dict if available for this ticker
-        pred = state.get("predictions", {}).get(ticker, {})
-        if pred and tech:
-            tech.update({
-                "p_up": pred.get("p_up"),
-                "p_flat": pred.get("p_flat"),
-                "p_down": pred.get("p_down"),
-                "prediction_confidence": pred.get("prediction_confidence", 0.0),
-                "predicted_direction": pred.get("predicted_direction"),
-            })
-        current_price = tech.get("current_price", 0)
-
-        # News agent
-        try:
-            news_result = run_news_agent(
-                ticker=ticker,
-                company_name=ticker,  # company name lookup can be added later
-                prior_report=prior_news,
-                prior_date=prior_date,
-                new_articles=novel_articles,
-                recurring_themes=recurring,
-                sec_filings=[a for a in all_articles if a.get("source") == "SEC EDGAR"],
-                current_price=current_price,
-                price_change_pct=tech.get("momentum_20d", 0) or 0,
-                price_change_date=run_date,
-            )
-            news_reports[ticker] = news_result["report_md"]
-            news_scores[ticker] = news_result["news_score"]
-            news_scores_lt[ticker] = news_result["news_score_lt"]
-            news_jsons[ticker] = news_result["news_json"]
-        except Exception as e:
-            news_reports[ticker] = f"Error: {e}"
-            news_scores[ticker] = 50.0
-            news_scores_lt[ticker] = 50.0
-            news_jsons[ticker] = {}
-
-        # Research agent
-        try:
-            research_result = run_research_agent(
-                ticker=ticker,
-                company_name=ticker,
-                prior_report=prior_research,
-                prior_date=prior_date,
-                analyst_data=state.get("analyst_data", {}).get(ticker, {}),
-            )
-            research_reports[ticker] = research_result["report_md"]
-            research_scores[ticker] = research_result["research_score"]
-            research_scores_lt[ticker] = research_result["research_score_lt"]
-            research_jsons[ticker] = research_result["research_json"]
-        except Exception as e:
-            research_reports[ticker] = f"Error: {e}"
-            research_scores[ticker] = 50.0
-            research_scores_lt[ticker] = 50.0
-            research_jsons[ticker] = {}
-
-    # Run agents (simple sequential for now; can be made async for full parallelism)
-    for ticker in all_tickers:
-        run_ticker_agents(ticker)
-
-    # Macro agent
+    # Macro agent — determines market regime and sector ratings
     _default_sectors = ["Technology", "Healthcare", "Financial", "Consumer Discretionary",
                         "Consumer Staples", "Energy", "Industrials", "Materials",
                         "Real Estate", "Utilities", "Communication Services"]
@@ -361,7 +308,7 @@ def run_universe_agents(state: ResearchState) -> ResearchState:
         market_regime = "neutral"
 
     # Recompute technical scores with correct regime
-    for ticker in all_tickers:
+    for ticker in tickers_to_analyze:
         if ticker in technical_scores:
             percentile = momentum_percentiles.get(ticker)
             ts = compute_technical_score(
@@ -371,12 +318,107 @@ def run_universe_agents(state: ResearchState) -> ResearchState:
             )
             technical_scores[ticker]["technical_score"] = ts
 
+    # Fetch news, analyst data, and run LLM agents for each ticker
+    news_headlines: dict[str, list] = {}
+    news_article_hashes: dict[str, set] = {}
+    analyst_data: dict[str, dict] = {}
+
+    prior_date_default = "NONE"
+
+    def run_ticker_agents(ticker: str):
+        # Fetch news
+        try:
+            raw = fetch_all_news(ticker, hours=48)
+            articles = raw["yahoo"] + raw.get("edgar_8k", [])
+        except Exception:
+            articles = []
+        news_headlines[ticker] = articles
+        news_article_hashes[ticker] = archive.load_news_hashes(ticker)
+
+        # Fetch analyst data
+        try:
+            analyst_data[ticker] = fetch_analyst_consensus(ticker)
+        except Exception as e:
+            analyst_data[ticker] = {"ticker": ticker, "error": str(e)}
+
+        # Deduplicate articles
+        prior_hashes = news_article_hashes.get(ticker, set())
+        novel_articles, _ = deduplicate_articles(articles, prior_hashes)
+        recurring = compute_recurring_themes(novel_articles)
+
+        prior_news = state.get("prior_news_reports", {}).get(ticker)
+        prior_research = state.get("prior_research_reports", {}).get(ticker)
+        prior_thesis = state.get("prior_theses", {}).get(ticker, {})
+        prior_date = prior_thesis.get("date", prior_date_default)
+
+        tech = technical_scores.get(ticker, {})
+        # Merge predictor values if available
+        pred = state.get("predictions", {}).get(ticker, {})
+        if pred and tech:
+            tech.update({
+                "p_up": pred.get("p_up"),
+                "p_flat": pred.get("p_flat"),
+                "p_down": pred.get("p_down"),
+                "prediction_confidence": pred.get("prediction_confidence", 0.0),
+                "predicted_direction": pred.get("predicted_direction"),
+            })
+        current_price = tech.get("current_price", 0)
+
+        # News agent
+        try:
+            news_result = run_news_agent(
+                ticker=ticker,
+                company_name=ticker,
+                prior_report=prior_news,
+                prior_date=prior_date,
+                new_articles=novel_articles,
+                recurring_themes=recurring,
+                sec_filings=[a for a in articles if a.get("source") == "SEC EDGAR"],
+                current_price=current_price,
+                price_change_pct=tech.get("momentum_20d", 0) or 0,
+                price_change_date=run_date,
+            )
+            news_reports[ticker] = news_result["report_md"]
+            news_scores[ticker] = news_result["news_score"]
+            news_scores_lt[ticker] = news_result["news_score_lt"]
+            news_jsons[ticker] = news_result["news_json"]
+        except Exception as e:
+            news_reports[ticker] = f"Error: {e}"
+            news_scores[ticker] = 50.0
+            news_scores_lt[ticker] = 50.0
+            news_jsons[ticker] = {}
+
+        # Research agent
+        try:
+            research_result = run_research_agent(
+                ticker=ticker,
+                company_name=ticker,
+                prior_report=prior_research,
+                prior_date=prior_date,
+                analyst_data=analyst_data.get(ticker, {}),
+            )
+            research_reports[ticker] = research_result["report_md"]
+            research_scores[ticker] = research_result["research_score"]
+            research_scores_lt[ticker] = research_result["research_score_lt"]
+            research_jsons[ticker] = research_result["research_json"]
+        except Exception as e:
+            research_reports[ticker] = f"Error: {e}"
+            research_scores[ticker] = 50.0
+            research_scores_lt[ticker] = 50.0
+            research_jsons[ticker] = {}
+
+    for ticker in tickers_to_analyze:
+        run_ticker_agents(ticker)
+
     return {
         "technical_scores": technical_scores,
         "news_reports": news_reports,
         "news_scores": news_scores,
         "news_scores_lt": news_scores_lt,
         "news_jsons": news_jsons,
+        "news_headlines": news_headlines,
+        "news_article_hashes": news_article_hashes,
+        "analyst_data": analyst_data,
         "research_reports": research_reports,
         "research_scores": research_scores,
         "research_scores_lt": research_scores_lt,
@@ -385,6 +427,7 @@ def run_universe_agents(state: ResearchState) -> ResearchState:
         "sector_modifiers": sector_modifiers,
         "sector_ratings": sector_ratings,
         "market_regime": market_regime,
+        "universe_tickers": tickers_to_analyze,  # all analyzed tickers
     }
 
 
@@ -395,15 +438,24 @@ def run_scanner(
     archive: ArchiveManager,
     technical_scores: Optional[dict] = None,
     market_regime: str = "neutral",
+    sector_map: Optional[dict] = None,
 ) -> dict:
     """
-    Full scanner pipeline (Stages 1–4). Pure function — no LangGraph state.
+    Scanner pipeline (Stages 1–3). Pure function — no LangGraph state.
+
+    Expanded for population-based architecture:
+    - Stage 1: Quant filter (900 → ~60)
+    - Stage 2: Data enrichment (analyst + headlines)
+    - Stage 3: Ranking agent (→ top 35 for population selection buffer)
+
+    LLM-based deep analysis (news + research agents) is now handled by
+    run_population_agents() AFTER this scanner stage, rather than here.
 
     Returns dict with keys:
-      scanner_filtered, scanner_ranked, scanner_news_reports,
-      scanner_research_reports, scanner_scores
+      scanner_filtered, scanner_ranked, scanner_scores
     """
     technical_scores = technical_scores or {}
+    sector_map = sector_map or SECTOR_MAP
 
     # Stage 1: Quant filter
     candidates = run_quant_filter(
@@ -414,7 +466,7 @@ def run_scanner(
     )
     logger.info("[scanner] stage=1 quant_filter candidates=%d universe=%d", len(candidates), len(scanner_universe))
 
-    # Stage 2: Data enrichment
+    # Stage 2: Data enrichment — fetch analyst + brief news for ranking
     analyst_data_scanner: dict[str, dict] = {}
     for c in candidates:
         ticker = c["ticker"]
@@ -429,14 +481,11 @@ def run_scanner(
         try:
             news = fetch_all_news(ticker, hours=24)
             c["headlines"] = [a.get("headline", "") for a in news["yahoo"][:2]]
-            c["articles"] = news["yahoo"]
-            c["sec_filings"] = news["edgar_8k"]
         except Exception:
             c["headlines"] = []
-            c["articles"] = []
-            c["sec_filings"] = []
 
-        c["sector"] = SECTOR_MAP.get(ticker, "Technology")
+        # Use dynamic sector map
+        c["sector"] = sector_map.get(ticker, "Unknown")
 
     candidates = confirm_deep_value_with_analyst(
         candidates,
@@ -445,81 +494,34 @@ def run_scanner(
     )
     logger.info("[scanner] stage=2 confirmed_candidates=%d", len(candidates))
 
-    # Stage 3: Ranking agent
-    ranked_top10 = run_scanner_ranking_agent(
+    # Stage 3: Ranking agent — expand from top 10 to top 35
+    # Need enough candidates to fill population (25) + buffer for sector balance
+    ranked = run_scanner_ranking_agent(
         candidates=candidates,
         market_regime=market_regime,
+        top_n=35,  # expanded from 10 for population coverage
     )
-    logger.info("[scanner] stage=3 ranked=%d", len(ranked_top10))
+    logger.info("[scanner] stage=3 ranked=%d", len(ranked))
 
-    # Stage 4: Deep analysis for top 10
-    scanner_news_reports: dict[str, str] = {}
-    scanner_research_reports: dict[str, str] = {}
+    # Build preliminary scanner scores (tech-only; LLM scores come after agents run)
     scanner_scores: dict[str, dict] = {}
-
-    articles_by_ticker = {c["ticker"]: c.get("articles", []) for c in candidates}
-    sec_filings_by_ticker = {c["ticker"]: c.get("sec_filings", []) for c in candidates}
-
-    for entry in ranked_top10:
+    for entry in ranked:
         ticker = entry.get("ticker", "")
         if not ticker:
             continue
-
-        prior_reports = archive.load_prior_reports(ticker, category="candidates")
-        prior_news = prior_reports.get("news_report")
-        prior_research = prior_reports.get("research_report")
-        prior_date = (prior_reports.get("thesis") or {}).get("date", "NONE")
-
-        adata = analyst_data_scanner.get(ticker, {})
-        df = price_data.get(ticker, pd.DataFrame())
-        current_price_val = float(df["Close"].iloc[-1]) if not df.empty else adata.get("current_price", 0) or 0
-
-        try:
-            news_result = run_news_agent(
-                ticker=ticker, company_name=ticker,
-                prior_report=prior_news, prior_date=prior_date,
-                new_articles=articles_by_ticker.get(ticker, []),
-                recurring_themes=[],
-                sec_filings=sec_filings_by_ticker.get(ticker, []),
-                current_price=current_price_val,
-                price_change_pct=0, price_change_date=run_date,
-            )
-            scanner_news_reports[ticker] = news_result["report_md"]
-            news_score = news_result["news_score"]
-        except Exception as e:
-            scanner_news_reports[ticker] = f"Error: {e}"
-            news_score = 50.0
-
-        try:
-            research_result = run_research_agent(
-                ticker=ticker, company_name=ticker,
-                prior_report=prior_research, prior_date=prior_date,
-                analyst_data=adata,
-            )
-            scanner_research_reports[ticker] = research_result["report_md"]
-            research_score = research_result["research_score"]
-        except Exception as e:
-            scanner_research_reports[ticker] = f"Error: {e}"
-            research_score = 50.0
-
         tech = technical_scores.get(ticker) or {}
-        tech_score = tech.get("technical_score", 50.0)
-
         scanner_scores[ticker] = {
             "ticker": ticker,
-            "tech_score": tech_score,
-            "news_score": news_score,
-            "research_score": research_score,
+            "tech_score": tech.get("technical_score", 50.0),
+            "sector": sector_map.get(ticker, "Unknown"),
             "rank": entry.get("rank"),
             "path": entry.get("path", "momentum"),
         }
 
-    logger.info("[scanner] stage=4 scored=%d tickers=%s", len(scanner_scores), list(scanner_scores.keys()))
+    logger.info("[scanner] stage=3 scored=%d tickers", len(scanner_scores))
     return {
         "scanner_filtered": candidates,
-        "scanner_ranked": ranked_top10,
-        "scanner_news_reports": scanner_news_reports,
-        "scanner_research_reports": scanner_research_reports,
+        "scanner_ranked": ranked,
         "scanner_scores": scanner_scores,
     }
 
@@ -533,6 +535,7 @@ def run_scanner_pipeline(state: ResearchState) -> ResearchState:
         archive=state["archive_manager"],
         technical_scores=state.get("technical_scores", {}),
         market_regime=state.get("market_regime", "neutral"),
+        sector_map=state.get("sector_map", {}),
     )
     return result
 
@@ -561,20 +564,18 @@ def _compute_price_target_upside(
 
 def score_aggregator(state: ResearchState) -> ResearchState:
     """
-    Fan-in join: aggregate scores for all stocks after both branches complete.
+    Aggregate scores for all analyzed tickers (population + scanner candidates).
     """
     run_date = state["run_date"]
-    all_tickers = list(set(
-        state.get("universe_tickers", []) + state.get("candidate_tickers", [])
-    ))
+    all_tickers = list(set(state.get("universe_tickers", [])))
 
-    # Precompute price target upside from analyst data (§A.1)
+    # Precompute price target upside from analyst data
     price_target_upside = _compute_price_target_upside(
         analyst_data=state.get("analyst_data", {}),
         technical_scores=state.get("technical_scores", {}),
     )
 
-    # Aggregate universe + candidate scores
+    # Aggregate all scores (same formula applies to all tickers now)
     aggregated = aggregate_all(
         tickers=all_tickers,
         technical_scores=state.get("technical_scores", {}),
@@ -582,6 +583,7 @@ def score_aggregator(state: ResearchState) -> ResearchState:
         research_scores=state.get("research_scores", {}),
         sector_modifiers=state.get("sector_modifiers", {}),
         prior_theses=state.get("prior_theses", {}),
+        sector_map=state.get("sector_map", {}),  # dynamic sector map from Wikipedia
         run_date=run_date,
         score_history=state.get("score_history", {}),
         price_target_upside=price_target_upside,
@@ -589,19 +591,12 @@ def score_aggregator(state: ResearchState) -> ResearchState:
         research_scores_lt=state.get("research_scores_lt", {}),
     )
 
-    # Aggregate scanner candidate scores (sector modifiers applied)
+    # Update scanner_scores with sector from dynamic map
     scanner_scores = state.get("scanner_scores", {})
+    sector_map = state.get("sector_map", {})
     sector_modifiers = state.get("sector_modifiers", {})
     for ticker, sdata in scanner_scores.items():
-        sector = SECTOR_MAP.get(ticker, "Technology")
-        modifier = sector_modifiers.get(sector, 1.0)
-        base = (
-            sdata["tech_score"] * 0.40
-            + sdata["news_score"] * 0.30
-            + sdata["research_score"] * 0.30
-        )
-        final = max(0.0, min(100.0, base * modifier))
-        sdata["score"] = round(final, 2)
+        sector = sector_map.get(ticker, sdata.get("sector", "Unknown"))
         sdata["sector"] = sector
 
     return {**state, "investment_theses": aggregated, "scanner_scores": scanner_scores}
@@ -664,56 +659,93 @@ def thesis_updater(state: ResearchState) -> ResearchState:
     return {**state, "investment_theses": full_theses}
 
 
-def candidate_evaluator(state: ResearchState) -> ResearchState:
+def population_evaluator(state: ResearchState) -> ResearchState:
     """
-    Stage 5: Determine candidate rotation using tiered rule-based logic.
-    At most 1 rotation per run.
+    Build the sector-balanced investment population using the population selector.
+
+    Takes scored candidates (from scanner + LLM agents) and the current
+    population, applies sector allocation rules from macro agent ratings,
+    and produces the new population with rotation events.
     """
     run_date = state["run_date"]
-    active_candidates = state.get("active_candidates", [])
-    scanner_scores = state.get("scanner_scores", {})
     investment_theses = state.get("investment_theses", {})
+    current_population = state.get("current_population", [])
+    sector_ratings = state.get("sector_ratings", {})
+    sector_modifiers = state.get("sector_modifiers", {})
+    sector_map = state.get("sector_map", {})
 
-    # Update active candidate scores from this run
-    for cand in active_candidates:
-        ticker = cand["symbol"]
-        thesis = investment_theses.get(ticker, {})
-        cand["score"] = thesis.get("final_score", cand.get("score", 50))
-        # Track consecutive low runs
-        if cand["score"] < WEAK_PICK_SCORE_THRESHOLD:
-            cand["consecutive_low_runs"] = cand.get("consecutive_low_runs", 0) + 1
-        else:
-            cand["consecutive_low_runs"] = 0
+    # Build scored candidates from investment_theses (all analyzed tickers)
+    scored_candidates: list[dict] = []
+    for ticker, thesis in investment_theses.items():
+        scored_candidates.append({
+            "ticker": ticker,
+            "sector": sector_map.get(ticker, thesis.get("sector", "Unknown")),
+            "long_term_score": thesis.get("long_term_score", 50.0),
+            "long_term_rating": thesis.get("long_term_rating", "HOLD"),
+            "conviction": thesis.get("conviction", "stable"),
+            "price_target_upside": thesis.get("price_target_upside"),
+            "thesis_summary": thesis.get("thesis_summary", ""),
+            "sub_scores": {
+                "news_lt": thesis.get("news_score_lt", 50.0),
+                "research_lt": thesis.get("research_score_lt", 50.0),
+            },
+            # Pass through all thesis fields for archive
+            "final_score": thesis.get("final_score"),
+            "news_score": thesis.get("news_score"),
+            "research_score": thesis.get("research_score"),
+            "technical_score": thesis.get("technical_score"),
+        })
 
-    new_active, rotations = evaluate_candidate_rotation(
-        scanner_scores=scanner_scores,
-        active_candidates=active_candidates,
-        rotation_tiers=ROTATION_TIERS,
-        weak_pick_score_threshold=WEAK_PICK_SCORE_THRESHOLD,
-        weak_pick_consecutive_runs=WEAK_PICK_CONSECUTIVE_RUNS,
-        emergency_rotation_new_score=EMERGENCY_ROTATION_NEW_SCORE,
+    # Enrich sector_ratings with modifier values for population selector
+    enriched_sector_ratings = {}
+    for sector, rating_data in sector_ratings.items():
+        enriched_sector_ratings[sector] = {
+            **rating_data,
+            "modifier": sector_modifiers.get(sector, 1.0),
+        }
+
+    # Run population selection
+    new_population, rotation_events = select_population(
+        scored_candidates=scored_candidates,
+        current_population=current_population,
+        sector_ratings=enriched_sector_ratings,
+        config=POPULATION_CFG,
         run_date=run_date,
     )
 
-    # Annotate new candidates with status for consolidator
-    new_tickers = {c["symbol"] for c in new_active}
-    old_tickers = {c["symbol"] for c in active_candidates}
+    # Update sector_map with any new tickers
+    for p in new_population:
+        sector_map[p["ticker"]] = p.get("sector", "Unknown")
 
-    for c in new_active:
-        if c["symbol"] not in old_tickers:
-            prior_tenures = state.get("archive_manager").db_conn.execute(
-                "SELECT COUNT(*) FROM candidate_tenures WHERE symbol = ?", (c["symbol"],)
-            ).fetchone()[0] if state.get("archive_manager") else 0
-            if prior_tenures > 0:
-                c["status"] = f"RETURNED({prior_tenures} prior tenures)"
-            else:
-                c["status"] = "NEW_ENTRY"
-        else:
-            c["status"] = "CONTINUING"
+    logger.info(
+        "[population_evaluator] population=%d rotations=%d events=%s",
+        len(new_population), len(rotation_events),
+        [e.get("type") for e in rotation_events],
+    )
 
-    logger.info("[scanner] stage=5 active_candidates=%s rotations=%d",
-                [c["symbol"] for c in new_active], len(rotations))
-    return {**state, "new_candidates": new_active, "_rotation_events": rotations}
+    # Build backward-compatible new_candidates for consolidator
+    new_candidates = []
+    for p in new_population:
+        thesis = investment_theses.get(p["ticker"], {})
+        new_candidates.append({
+            "symbol": p["ticker"],
+            "entry_date": p.get("entry_date", run_date),
+            "score": thesis.get("final_score", p.get("long_term_score", 50.0)),
+            "score_delta": thesis.get("score_delta"),
+            "thesis_summary": thesis.get("thesis_summary", ""),
+            "key_catalyst": thesis.get("key_catalyst", ""),
+            "key_risk": thesis.get("key_risk", ""),
+            "status": "CONTINUING" if p.get("tenure_weeks", 0) > 0 else "NEW_ENTRY",
+        })
+
+    return {
+        **state,
+        "new_population": new_population,
+        "population_rotation_events": rotation_events,
+        "new_candidates": new_candidates,
+        "_rotation_events": rotation_events,
+        "sector_map": sector_map,
+    }
 
 
 def consolidator_node(state: ResearchState) -> ResearchState:
@@ -765,18 +797,17 @@ def consolidator_node(state: ResearchState) -> ResearchState:
 
 
 def archive_writer(state: ResearchState) -> ResearchState:
-    """Write all outputs to S3 and SQLite."""
+    """Write all outputs to S3 and SQLite, including population data."""
     run_date = state["run_date"]
     run_time = state["run_time"]
     archive: ArchiveManager = state["archive_manager"]
     investment_theses = state.get("investment_theses", {})
-    all_tickers = list(set(
-        state.get("universe_tickers", []) + state.get("candidate_tickers", [])
-    ))
-    candidate_tickers = set(state.get("candidate_tickers", []))
+    new_population = state.get("new_population", [])
+    population_tickers = {p["ticker"] for p in new_population}
+    all_tickers = list(set(state.get("universe_tickers", [])))
 
+    # Save reports for all analyzed tickers (all under "universe" category now)
     for ticker in all_tickers:
-        category = "candidates" if ticker in candidate_tickers else "universe"
         thesis = investment_theses.get(ticker, {})
 
         archive.save_reports(
@@ -785,7 +816,7 @@ def archive_writer(state: ResearchState) -> ResearchState:
             news_report=state.get("news_reports", {}).get(ticker),
             research_report=state.get("research_reports", {}).get(ticker),
             thesis=thesis,
-            category=category,
+            category="universe",  # all stocks use "universe" category
         )
 
         archive.write_investment_thesis(thesis, run_time=run_time)
@@ -849,12 +880,44 @@ def archive_writer(state: ResearchState) -> ResearchState:
             "news_score": score_data.get("news_score"),
             "research_score": score_data.get("research_score"),
             "final_score": score_data.get("score"),
-            "selected": 1 if ticker in {c["symbol"] for c in state.get("new_candidates", [])} else 0,
+            "selected": 1 if ticker in population_tickers else 0,
         })
     archive.write_scanner_appearances(scanner_appearances)
 
-    # Active candidates
-    archive.save_active_candidates(state.get("new_candidates", []))
+    # Build enriched sector ratings (used by population JSON + signals.json)
+    _sector_modifiers = state.get("sector_modifiers", {})
+    _sector_ratings_enriched = {
+        sector: {**v, "modifier": round(_sector_modifiers.get(sector, 1.0), 3)}
+        for sector, v in state.get("sector_ratings", {}).items()
+    }
+
+    # ── Population persistence ──────────────────────────────────────────────
+    # Save population to SQLite + S3 (population/latest.json + population/{date}.json)
+    # Include market_regime + sector_ratings so Executor's population_reader can use them
+    population_for_save = _build_population_records(state, new_population)
+    archive.save_population(
+        population_for_save,
+        run_date,
+        market_regime=state.get("market_regime", "neutral"),
+        sector_ratings=_sector_ratings_enriched,
+    )
+
+    # Log rotation events
+    for event in state.get("population_rotation_events", []):
+        archive.log_rotation_event(event, run_date)
+
+    # Legacy: also save active_candidates for backward compatibility
+    legacy_candidates = [
+        {
+            "symbol": p["ticker"],
+            "entry_date": p.get("entry_date", run_date),
+            "slot": i + 1,
+            "score": investment_theses.get(p["ticker"], {}).get("final_score", 50.0),
+            "consecutive_low_runs": 0,
+        }
+        for i, p in enumerate(new_population[:3])  # first 3 for legacy compat
+    ]
+    archive.save_active_candidates(legacy_candidates)
 
     # Performance tracker — record new BUY scores
     prices = {
@@ -869,78 +932,22 @@ def archive_writer(state: ResearchState) -> ResearchState:
             price_data=prices,
         )
 
-    # Write machine-readable signals.json for executor consumption (§A.1)
-    new_candidates_for_signals = state.get("new_candidates", [])
-    candidate_tickers_set = {c["symbol"] for c in new_candidates_for_signals}
-    # Enrich sector_ratings with modifier field so executor has all sizing inputs
-    _sector_modifiers = state.get("sector_modifiers", {})
-    _sector_ratings_enriched = {
-        sector: {**v, "modifier": round(_sector_modifiers.get(sector, 1.0), 3)}
-        for sector, v in state.get("sector_ratings", {}).items()
-    }
+    # ── signals.json (backward compatible for Executor + Predictor) ────────
+
+    # In the new architecture, all population stocks go into "universe"
+    # and buy_candidates is populated from population with BUY ratings
     signals_payload = {
         "market_regime": state.get("market_regime", "neutral"),
         "sector_ratings": _sector_ratings_enriched,
         "universe": [
-            {
-                "ticker": t,
-                "sector": thesis.get("sector"),
-                "rating": thesis.get("rating"),
-                "score": thesis.get("final_score"),
-                "score_delta_1d": thesis.get("score_delta"),
-                "score_velocity_5d": thesis.get("score_velocity_5d"),
-                "conviction": thesis.get("conviction", "stable"),
-                "signal": thesis.get("signal", "HOLD"),
-                "price_target_upside": thesis.get("price_target_upside"),
-                "stale": bool(thesis.get("stale_days", 0) >= 5),
-                "long_term_score": thesis.get("long_term_score"),
-                "long_term_rating": thesis.get("long_term_rating"),
-                "sub_scores": {
-                    "technical": thesis.get("technical_score"),
-                    "news": thesis.get("news_score"),
-                    "news_lt": thesis.get("news_score_lt"),
-                    "research": thesis.get("research_score"),
-                    "research_lt": thesis.get("research_score_lt"),
-                },
-                "predicted_direction": thesis.get("predicted_direction"),
-                "prediction_confidence": thesis.get("prediction_confidence"),
-                "predicted_alpha": thesis.get("predicted_alpha"),
-                "gbm_veto": thesis.get("gbm_veto", False),
-            }
-            for t, thesis in investment_theses.items()
-            if t not in candidate_tickers_set
+            _build_signal_entry(ticker, investment_theses.get(ticker, {}), run_date=run_date)
+            for ticker in sorted(population_tickers)
+            if ticker in investment_theses
         ],
         "buy_candidates": [
-            {
-                "ticker": c["symbol"],
-                "sector": investment_theses.get(c["symbol"], {}).get("sector"),
-                "rating": investment_theses.get(c["symbol"], {}).get("rating"),
-                "score": investment_theses.get(c["symbol"], {}).get("final_score"),
-                "score_delta_1d": investment_theses.get(c["symbol"], {}).get("score_delta"),
-                "score_velocity_5d": investment_theses.get(c["symbol"], {}).get("score_velocity_5d"),
-                "conviction": investment_theses.get(c["symbol"], {}).get("conviction", "stable"),
-                "signal": investment_theses.get(c["symbol"], {}).get("signal", "HOLD"),
-                "price_target_upside": investment_theses.get(c["symbol"], {}).get("price_target_upside"),
-                "tenure_days": (
-                    (datetime.strptime(run_date, "%Y-%m-%d").date()
-                     - datetime.strptime(c["entry_date"], "%Y-%m-%d").date()).days
-                    if c.get("entry_date") else None
-                ),
-                "long_term_score": investment_theses.get(c["symbol"], {}).get("long_term_score"),
-                "long_term_rating": investment_theses.get(c["symbol"], {}).get("long_term_rating"),
-                "sub_scores": {
-                    "technical": investment_theses.get(c["symbol"], {}).get("technical_score"),
-                    "news": investment_theses.get(c["symbol"], {}).get("news_score"),
-                    "news_lt": investment_theses.get(c["symbol"], {}).get("news_score_lt"),
-                    "research": investment_theses.get(c["symbol"], {}).get("research_score"),
-                    "research_lt": investment_theses.get(c["symbol"], {}).get("research_score_lt"),
-                },
-                "predicted_direction": investment_theses.get(c["symbol"], {}).get("predicted_direction"),
-                "prediction_confidence": investment_theses.get(c["symbol"], {}).get("prediction_confidence"),
-                "predicted_alpha": investment_theses.get(c["symbol"], {}).get("predicted_alpha"),
-                "gbm_veto": investment_theses.get(c["symbol"], {}).get("gbm_veto", False),
-            }
-            for c in new_candidates_for_signals
+            _build_signal_entry(ticker, investment_theses.get(ticker, {}), run_date=run_date)
+            for ticker in sorted(population_tickers)
+            if investment_theses.get(ticker, {}).get("long_term_rating") == "BUY"
         ],
     }
     archive.write_signals_json(run_date, run_time, signals_payload)
@@ -948,7 +955,7 @@ def archive_writer(state: ResearchState) -> ResearchState:
     # Write daily OHLCV price snapshot for backtester consumption
     price_data = state.get("price_data", {})
     prices_snapshot: dict[str, dict] = {}
-    for ticker in all_tickers:
+    for ticker in population_tickers:
         df = price_data.get(ticker)
         if df is not None and not df.empty:
             row = df.iloc[-1]
@@ -964,6 +971,57 @@ def archive_writer(state: ResearchState) -> ResearchState:
     archive.upload_db(run_date=run_date)
 
     return state
+
+
+def _build_population_records(state: ResearchState, population: list[dict]) -> list[dict]:
+    """Build population records for SQLite + S3 persistence."""
+    investment_theses = state.get("investment_theses", {})
+    sector_map = state.get("sector_map", {})
+    records = []
+    for p in population:
+        ticker = p["ticker"]
+        thesis = investment_theses.get(ticker, {})
+        records.append({
+            "ticker": ticker,
+            "long_term_score": p.get("long_term_score", thesis.get("long_term_score", 50.0)),
+            "long_term_rating": p.get("long_term_rating", thesis.get("long_term_rating", "HOLD")),
+            "sector": p.get("sector", sector_map.get(ticker, "Unknown")),
+            "conviction": p.get("conviction", thesis.get("conviction", "stable")),
+            "price_target_upside": p.get("price_target_upside", thesis.get("price_target_upside")),
+            "thesis_summary": p.get("thesis_summary", thesis.get("thesis_summary", "")),
+            "entry_date": p.get("entry_date"),
+            "tenure_weeks": p.get("tenure_weeks", 0),
+        })
+    return records
+
+
+def _build_signal_entry(ticker: str, thesis: dict, run_date: str = "") -> dict:
+    """Build a single signal entry dict for signals.json."""
+    return {
+        "ticker": ticker,
+        "sector": thesis.get("sector"),
+        "rating": thesis.get("rating"),
+        "score": thesis.get("final_score"),
+        "score_delta_1d": thesis.get("score_delta"),
+        "score_velocity_5d": thesis.get("score_velocity_5d"),
+        "conviction": thesis.get("conviction", "stable"),
+        "signal": thesis.get("signal", "HOLD"),
+        "price_target_upside": thesis.get("price_target_upside"),
+        "stale": bool(thesis.get("stale_days", 0) >= 5),
+        "long_term_score": thesis.get("long_term_score"),
+        "long_term_rating": thesis.get("long_term_rating"),
+        "sub_scores": {
+            "technical": thesis.get("technical_score"),
+            "news": thesis.get("news_score"),
+            "news_lt": thesis.get("news_score_lt"),
+            "research": thesis.get("research_score"),
+            "research_lt": thesis.get("research_score_lt"),
+        },
+        "predicted_direction": thesis.get("predicted_direction"),
+        "prediction_confidence": thesis.get("prediction_confidence"),
+        "predicted_alpha": thesis.get("predicted_alpha"),
+        "gbm_veto": thesis.get("gbm_veto", False),
+    }
 
 
 def email_sender_node(state: ResearchState) -> ResearchState:
@@ -994,35 +1052,38 @@ def email_sender_node(state: ResearchState) -> ResearchState:
 # ── Graph assembly ────────────────────────────────────────────────────────────
 
 def build_graph() -> StateGraph:
+    """
+    Scanner-driven population pipeline:
+      fetch_data → run_scanner_pipeline → run_population_agents
+      → score_aggregator → thesis_updater → population_evaluator
+      → consolidator_node → archive_writer → email_sender_node → END
+    """
     graph = StateGraph(ResearchState)
 
     graph.add_node("fetch_data", fetch_data)
-    graph.add_node("run_universe_agents", run_universe_agents)
     graph.add_node("run_scanner_pipeline", run_scanner_pipeline)
+    graph.add_node("run_population_agents", run_population_agents)
     graph.add_node("score_aggregator", score_aggregator)
     graph.add_node("thesis_updater", thesis_updater)
-    graph.add_node("candidate_evaluator", candidate_evaluator)
+    graph.add_node("population_evaluator", population_evaluator)
     graph.add_node("consolidator_node", consolidator_node)
     graph.add_node("archive_writer", archive_writer)
+    graph.add_node("email_sender_node", email_sender_node)
 
     graph.set_entry_point("fetch_data")
 
-    # Both branches start after fetch_data
-    graph.add_edge("fetch_data", "run_universe_agents")
+    # Sequential pipeline: scan first, then run LLM agents on selected tickers
     graph.add_edge("fetch_data", "run_scanner_pipeline")
-
-    # Both branches feed into score_aggregator (fan-in)
-    graph.add_edge("run_universe_agents", "score_aggregator")
-    graph.add_edge("run_scanner_pipeline", "score_aggregator")
+    graph.add_edge("run_scanner_pipeline", "run_population_agents")
+    graph.add_edge("run_population_agents", "score_aggregator")
 
     # Sequential post-aggregation
     graph.add_edge("score_aggregator", "thesis_updater")
-    graph.add_edge("thesis_updater", "candidate_evaluator")
-    graph.add_edge("candidate_evaluator", "consolidator_node")
+    graph.add_edge("thesis_updater", "population_evaluator")
+    graph.add_edge("population_evaluator", "consolidator_node")
     graph.add_edge("consolidator_node", "archive_writer")
-    # Research email suppressed — predictor Lambda sends the combined morning briefing
-    # after consuming signals.json via S3 EventBridge trigger.
-    graph.add_edge("archive_writer", END)
+    graph.add_edge("archive_writer", "email_sender_node")
+    graph.add_edge("email_sender_node", END)
 
     return graph.compile()
 

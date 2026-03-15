@@ -1,17 +1,21 @@
 #!/usr/bin/env bash
 # setup-eventbridge.sh — EventBridge rules for main pipeline + alerts.
 #
-# Main pipeline: single rule that fires at 12:45 and 13:45 UTC. The Lambda
-# time-gates and only runs when it's 5:45am PT — DST handled automatically.
+# Weekly population refresh: Monday 06:00 UTC (Sunday ~10-11pm PT).
+# Lambda receives {"weekly_run": true} in event payload — bypasses
+# the 5:45am PT time gate but still runs the full pipeline.
 #
-# Run to migrate from old PDT/PST two-rule setup, or for fresh install.
+# Weekday rule (daily 5:45am PT) is kept but DISABLED by default.
+# Re-enable for transition back to daily if needed.
+#
 # Usage: ./infrastructure/setup-eventbridge.sh
 
 set -euo pipefail
 
 FUNCTION_MAIN="alpha-engine-research-runner"
 FUNCTION_ALERTS="alpha-engine-research-alerts"
-RULE_MAIN="alpha-research-daily"
+RULE_DAILY="alpha-research-daily"
+RULE_WEEKLY="alpha-research-weekly"
 RULE_ALERTS="alpha-research-alerts"
 REGION="${AWS_REGION:-us-east-1}"
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
@@ -19,23 +23,45 @@ ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 echo "Setting up EventBridge rules..."
 
 # Remove old rules if they exist (no-op if missing)
-for old in alpha-research-pdt alpha-research-pst; do
+for old in alpha-research-pdt alpha-research-pst alpha-research-sunday; do
   if aws events describe-rule --name "$old" --region "$REGION" &>/dev/null; then
-    echo "Disabling old rule: $old"
-    aws events disable-rule --name "$old" --region "$REGION" 2>/dev/null || true
+    echo "Removing old rule: $old"
+    aws events remove-targets --rule "$old" --ids "1" --region "$REGION" 2>/dev/null || true
+    aws events delete-rule --name "$old" --region "$REGION" 2>/dev/null || true
   fi
 done
 
-# Create main pipeline rule (fires 12:45 and 13:45 UTC; Lambda gates on 5:45am PT)
+# ── Weekly rule (Monday 06:00 UTC = Sunday ~10-11pm PT; population refresh) ──
 aws events put-rule \
-  --name "$RULE_MAIN" \
-  --schedule-expression "cron(45 12,13 ? * MON-FRI *)" \
+  --name "$RULE_WEEKLY" \
+  --schedule-expression "cron(0 6 ? * MON *)" \
   --state ENABLED \
-  --description "5:45am PT daily — Lambda time-gates for DST" \
+  --description "Monday 06:00 UTC (Sun night PT) — weekly population refresh" \
   --region "$REGION"
 
 aws events put-targets \
-  --rule "$RULE_MAIN" \
+  --rule "$RULE_WEEKLY" \
+  --targets "Id"="1","Arn"="arn:aws:lambda:${REGION}:${ACCOUNT_ID}:function:${FUNCTION_MAIN}","Input"="{\"weekly_run\": true}" \
+  --region "$REGION"
+
+aws lambda add-permission \
+  --function-name "$FUNCTION_MAIN" \
+  --statement-id "alpha-research-weekly" \
+  --action lambda:InvokeFunction \
+  --principal events.amazonaws.com \
+  --source-arn "arn:aws:events:${REGION}:${ACCOUNT_ID}:rule/${RULE_WEEKLY}" \
+  --region "$REGION" 2>/dev/null || true
+
+# ── Weekday rule (DISABLED — kept for rollback to daily if needed) ──
+aws events put-rule \
+  --name "$RULE_DAILY" \
+  --schedule-expression "cron(45 12,13 ? * MON-FRI *)" \
+  --state DISABLED \
+  --description "5:45am PT weekdays — DISABLED (using weekly schedule)" \
+  --region "$REGION"
+
+aws events put-targets \
+  --rule "$RULE_DAILY" \
   --targets "Id"="1","Arn"="arn:aws:lambda:${REGION}:${ACCOUNT_ID}:function:${FUNCTION_MAIN}" \
   --region "$REGION"
 
@@ -44,10 +70,10 @@ aws lambda add-permission \
   --statement-id "alpha-research-daily" \
   --action lambda:InvokeFunction \
   --principal events.amazonaws.com \
-  --source-arn "arn:aws:events:${REGION}:${ACCOUNT_ID}:rule/${RULE_MAIN}" \
+  --source-arn "arn:aws:events:${REGION}:${ACCOUNT_ID}:rule/${RULE_DAILY}" \
   --region "$REGION" 2>/dev/null || true
 
-# Create alerts rule (every 30 min, market hours)
+# ── Alerts rule (every 30 min, market hours, Mon–Fri) ──
 aws events put-rule \
   --name "$RULE_ALERTS" \
   --schedule-expression "cron(0/30 13-21 ? * MON-FRI *)" \
@@ -68,4 +94,7 @@ aws lambda add-permission \
   --source-arn "arn:aws:events:${REGION}:${ACCOUNT_ID}:rule/${RULE_ALERTS}" \
   --region "$REGION" 2>/dev/null || true
 
-echo "Done. Rules active: $RULE_MAIN, $RULE_ALERTS. No DST swap needed."
+echo ""
+echo "Done. Active rules: $RULE_WEEKLY, $RULE_ALERTS"
+echo "      Disabled:     $RULE_DAILY (re-enable for daily if needed)"
+echo ""
