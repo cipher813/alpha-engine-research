@@ -44,7 +44,6 @@ def build_thesis_record(
         "date": run_date,
         "rating": aggregated["rating"],
         "final_score": aggregated["final_score"],
-        "technical_score": aggregated["technical_score"],
         "news_score": aggregated["news_score"],
         "research_score": aggregated["research_score"],
         "macro_modifier": aggregated["macro_modifier"],

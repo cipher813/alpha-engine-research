@@ -578,7 +578,6 @@ def score_aggregator(state: ResearchState) -> ResearchState:
     # Aggregate all scores (same formula applies to all tickers now)
     aggregated = aggregate_all(
         tickers=all_tickers,
-        technical_scores=state.get("technical_scores", {}),
         news_scores=state.get("news_scores", {}),
         research_scores=state.get("research_scores", {}),
         sector_modifiers=state.get("sector_modifiers", {}),

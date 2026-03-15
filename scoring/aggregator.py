@@ -1,12 +1,16 @@
 """
 Score aggregator — computes weighted composite attractiveness score.
 
-Formula (§5):
-  Base  = tech × 0.40 + news × 0.30 + research × 0.30
+Formula:
+  Base  = news × w_news + research × w_research   (weights sum to 1.0)
   Score = Base + macro_shift   (clipped to [0, 100])
 
   macro_shift = (sector_modifier - 1.0) / 0.30 × MACRO_MAX_SHIFT_POINTS
   → modifier 0.70 → -10 pts  |  1.0 → 0 pts  |  1.30 → +10 pts
+
+Horizon separation: Research focuses on 6–12 month fundamental attractiveness
+using news sentiment and analyst research only. Technical analysis is handled
+by the Predictor (daily GBM inference) and Executor (ATR stops, time exits).
 
 Design rationale: additive bounded shift preserves conviction-level ratings.
 A caution regime (modifier ~0.85) nudges scores down ~5 pts rather than
@@ -14,7 +18,7 @@ multiplying by 0.85 which would suppress every stock in the universe uniformly.
 High-conviction stocks stay BUY through moderate headwinds; only truly marginal
 scores flip to HOLD/SELL, which is the desired analyst-aligned behavior.
 
-Uses per-sector macro modifiers from the Macro Agent (§5.4), not a single global shift.
+Uses per-sector macro modifiers from the Macro Agent, not a single global shift.
 """
 
 from __future__ import annotations
@@ -24,7 +28,6 @@ import logging
 import os
 
 from config import (
-    WEIGHT_TECHNICAL,
     WEIGHT_NEWS,
     WEIGHT_RESEARCH,
     RATING_BUY_THRESHOLD,
@@ -59,8 +62,8 @@ def _load_weights_from_s3() -> dict | None:
         s3 = boto3.client("s3")
         obj = s3.get_object(Bucket=bucket, Key=key)
         data = json.loads(obj["Body"].read())
-        weights = {k: float(data[k]) for k in ("technical", "news", "research") if k in data}
-        if len(weights) == 3:
+        weights = {k: float(data[k]) for k in ("news", "research") if k in data}
+        if len(weights) == 2:
             logger.info(
                 "Scoring weights loaded from S3 (updated %s, n=%s): %s",
                 data.get("updated_at", "unknown"),
@@ -76,9 +79,9 @@ def _load_weights_from_s3() -> dict | None:
     return None
 
 
-def _get_weights() -> tuple[float, float, float]:
+def _get_weights() -> tuple[float, float]:
     """
-    Return current scoring weights, checking S3 override first.
+    Return current scoring weights (news, research), checking S3 override first.
 
     Result is cached for the lifetime of the Lambda instance (one S3 call
     per cold-start). Falls back to universe.yaml values if S3 file absent.
@@ -87,18 +90,16 @@ def _get_weights() -> tuple[float, float, float]:
     if _weights_cache is None:
         s3_weights = _load_weights_from_s3()
         _weights_cache = s3_weights or {
-            "technical": WEIGHT_TECHNICAL,
             "news": WEIGHT_NEWS,
             "research": WEIGHT_RESEARCH,
         }
-    return _weights_cache["technical"], _weights_cache["news"], _weights_cache["research"]
+    return _weights_cache["news"], _weights_cache["research"]
 MACRO_MODIFIER_RANGE = 0.30     # distance from 1.0 to min/max (0.70 and 1.30)
 MACRO_MAX_SHIFT_POINTS = 10.0   # max pts added/subtracted by macro shift
 
 
 def compute_attractiveness_score(
     ticker: str,
-    technical_score: float,
     news_score: float,
     research_score: float,
     sector_modifiers: dict[str, float],
@@ -107,8 +108,11 @@ def compute_attractiveness_score(
     """
     Compute the final attractiveness score for a ticker.
 
+    Uses news + research only (6–12 month fundamental attractiveness).
+    Technical analysis is handled by Predictor and Executor.
+
     Returns dict with:
-      technical_score, news_score, research_score, macro_modifier,
+      news_score, research_score, macro_modifier,
       weighted_base, macro_shift, final_score, rating
     """
     sm = sector_map or SECTOR_MAP
@@ -116,10 +120,9 @@ def compute_attractiveness_score(
     macro_modifier = sector_modifiers.get(sector, DEFAULT_SECTOR_MODIFIER)
     macro_modifier = max(0.70, min(1.30, macro_modifier))  # clamp to valid range
 
-    w_tech, w_news, w_research = _get_weights()
+    w_news, w_research = _get_weights()
     weighted_base = (
-        technical_score * w_tech
-        + news_score * w_news
+        news_score * w_news
         + research_score * w_research
     )
 
@@ -130,7 +133,6 @@ def compute_attractiveness_score(
     return {
         "ticker": ticker,
         "sector": sector,
-        "technical_score": round(technical_score, 2),
         "news_score": round(news_score, 2),
         "research_score": round(research_score, 2),
         "macro_modifier": round(macro_modifier, 3),
@@ -268,7 +270,6 @@ def compute_long_term_score(
 
 def aggregate_all(
     tickers: list[str],
-    technical_scores: dict[str, dict],
     news_scores: dict[str, float],
     research_scores: dict[str, float],
     sector_modifiers: dict[str, float],
@@ -297,14 +298,11 @@ def aggregate_all(
     results = {}
 
     for ticker in tickers:
-        tech = technical_scores.get(ticker, {})
-        tech_score = tech.get("technical_score", 50.0)
         news_score = news_scores.get(ticker, 50.0)
         research_score = research_scores.get(ticker, 50.0)
 
         result = compute_attractiveness_score(
             ticker=ticker,
-            technical_score=tech_score,
             news_score=news_score,
             research_score=research_score,
             sector_modifiers=sector_modifiers,
