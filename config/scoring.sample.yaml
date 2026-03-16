@@ -1,0 +1,86 @@
+# Scoring parameters — controls how raw signals become attractiveness scores.
+# Copy to scoring.yaml and customise all values below.
+# These are intentionally naive defaults — tune them to your own research.
+
+technical:
+  rsi:
+    bull:
+      overbought: 70
+      oversold: 30
+      max_oversold_score: 100.0
+    bear:
+      overbought: 70
+      oversold: 30
+      max_oversold_score: 100.0
+    neutral:
+      overbought: 70
+      oversold: 30
+      max_oversold_score: 100.0
+
+  macd:
+    bullish_cross_above_zero: 100.0
+    bullish_cross_below_zero: 70.0
+    bearish_cross_above_zero: 30.0
+    bearish_cross_below_zero: 0.0
+    no_cross_above_zero: 60.0
+    no_cross_below_zero: 40.0
+
+  price_vs_ma:
+    upper_anchor_pct: 5
+    upper_anchor_score: 80.0
+    upper_max_score: 100.0
+    upper_scale_pct: 15.0
+    mid_score: 50.0
+    positive_scale: 6.0
+    lower_anchor_pct: -5
+    lower_anchor_score: 30.0
+    negative_scale: 4.0
+    lower_floor_score: 0.0
+    lower_decay: 1.5
+
+  momentum:
+    mid_score: 50.0
+    raw_scale: 3.0
+
+  composite_weights:
+    rsi: 0.20
+    macd: 0.20
+    ma50: 0.20
+    ma200: 0.20
+    momentum: 0.20
+
+  predictor_enrichment:
+    confidence_gate: 0.60
+    max_adjustment: 10.0
+
+aggregator:
+  macro_modifier_range: 0.30
+  macro_max_shift_points: 10.0
+  macro_modifier_clamp_min: 0.70
+  macro_modifier_clamp_max: 1.30
+
+  long_term_weights:
+    news: 0.50
+    research: 0.50
+
+  consistency_check:
+    bullish_terms:
+      - strong buy
+      - bullish
+      - upside
+      - outperform
+    bearish_terms:
+      - sell
+      - downside
+      - bearish
+      - underperform
+    bearish_score_threshold: 40
+    bullish_score_threshold: 70
+
+staleness:
+  threshold_days: 5
+  material_score_change_min: 3.0
+
+macro:
+  overweight_threshold: 1.10
+  underweight_threshold: 0.90
