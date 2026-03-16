@@ -1,38 +1,96 @@
-# alpha-engine-research
+# Alpha Engine Research
 
-Autonomous investment research system for US equities. Maintains rolling investment theses for a configurable universe of stocks, scans the broader S&P 500/400 for buy candidates, and delivers a consolidated morning research brief via email on NYSE trading days.
+Autonomous investment research pipeline for US equities. Maintains rolling investment theses for a configurable universe of stocks, scans the broader S&P 500/400 for buy candidates, and delivers a consolidated morning research brief via email.
 
-Each daily run builds on the prior day's reports rather than starting from scratch — LLM agents read the previous thesis, integrate new developments, and prune stale content. After a few weeks the reports compound into something substantially richer than day one.
+> Part of [Nous Ergon: Alpha Engine](https://github.com/cipher813/alpha-engine).
 
-Part of the [Alpha Engine](https://github.com/cipher813) autonomous trading system.
+---
+
+## Role in the System
+
+Research is the signal generator. It produces `signals/{date}/signals.json` — the file that the Predictor and Executor both depend on. Each weekly run builds on prior theses rather than starting from scratch, so reports compound into something substantially richer over time.
+
+---
+
+## ⚠ Proprietary Source Files
+
+This repo is open-source, but 13 files containing tuned parameters, prompt text, and scoring logic are **gitignored**. You must create these files yourself to run the pipeline. Sample configs and example prompts are provided as starting points.
+
+### Files You Must Create
+
+| File | Purpose | Key Inputs | Key Outputs |
+|------|---------|------------|-------------|
+| `config.py` | Centralized configuration loader | Config YAML files | Settings dict for all modules |
+| `graph/research_graph.py` | LangGraph state machine orchestrator | All agent outputs, config | Orchestrated pipeline execution |
+| `agents/news_agent.py` | News sentiment analysis per ticker | Headlines, SEC filings, prior report | News score (0–100), sentiment, catalysts |
+| `agents/research_agent.py` | Analyst research analysis per ticker | Analyst data, price data, prior report | Research score (0–100), thesis |
+| `agents/macro_agent.py` | Macro environment and sector analysis | FRED data, prior macro report | Market regime, sector modifiers |
+| `agents/scanner_ranking_agent.py` | Cross-stock candidate ranking | Quant-filtered candidates | Ranked top-N with path classification |
+| `agents/consolidator.py` | Synthesize all analyses into email brief | All agent outputs, scores | Formatted morning brief (markdown) |
+| `scoring/technical.py` | Deterministic technical scoring engine | OHLCV, indicators | Technical score (0–100) per ticker |
+| `scoring/aggregator.py` | Weighted composite + macro modifier | Sub-scores, sector modifiers | Final score (0–100) + rating |
+| `scoring/performance_tracker.py` | Signal accuracy tracking | Historical scores, price outcomes | Accuracy metrics, recalibration flags |
+| `data/scanner.py` | Multi-stage quant filter pipeline | S&P 500/400 universe, price data | Shortlisted candidates (~50) |
+| `data/population_selector.py` | Sector-balanced universe management | Current universe, candidates | Updated tracked population |
+| `thesis/updater.py` | Score → rating + thesis summary | Aggregated scores, prior thesis | Rating (BUY/HOLD/SELL), updated thesis |
+
+### What's Included (Infrastructure)
+
+These files are tracked in git and provide the framework:
+
+- `agents/prompt_loader.py` — Loads prompts from `config/prompts/`
+- `data/fetchers/` — Price, news, analyst, macro data fetchers (yfinance, Yahoo RSS, FMP, FRED, EDGAR)
+- `data/deduplicator.py` — Duplicate headline handling
+- `archive/manager.py` — S3 read/write + SQLite CRUD
+- `emailer/` — Markdown → HTML email + SES delivery
+- `lambda/` — AWS Lambda handlers (main pipeline + intraday alerts)
+- `infrastructure/` — Deploy scripts, IAM policies
+- `tests/` — Unit tests (no LLM/AWS required)
+- `main.py` — CLI entry point
+
+### Reference Materials
+
+- `config/universe.sample.yaml` — Universe config template with safe defaults
+- `config/scoring.sample.yaml` — Scoring config template with equal weights
+- `config/prompts.example/*.txt` — Generic prompt templates with placeholder scoring logic
+- `.env.example` — Required API keys and AWS config
 
 ---
 
 ## Quick Start
 
+### Prerequisites
+
+- Python 3.11+
+- API keys: `ANTHROPIC_API_KEY`, `FMP_API_KEY`, `FRED_API_KEY`
+- AWS credentials with S3 read/write and SES send permission
+
+### Setup
+
 ```bash
 git clone https://github.com/cipher813/alpha-engine-research.git
 cd alpha-engine-research
-
 python3 -m venv .venv
 source .venv/bin/activate
-
 pip install -r requirements.txt
 
-# Configure environment variables
+# 1. Environment variables
 cp .env.example .env
-# Edit .env — add ANTHROPIC_API_KEY, FMP_API_KEY, FRED_API_KEY
+# Edit .env — add API keys, AWS config, email settings
 
-# Configure stock universe, scoring params, and email
+# 2. Configuration files
 cp config/universe.sample.yaml config/universe.yaml
 cp config/scoring.sample.yaml config/scoring.yaml
 cp -r config/prompts.example config/prompts
 # Edit all config files — set your tickers, weights, thresholds, and prompts
 
-# Dry run — no email, no S3 write
+# 3. Create the 13 proprietary source files listed above
+#    Use the sample configs and example prompts as reference
+
+# 4. Dry run — no email, no S3 write
 python3 main.py --dry-run --skip-scanner
 
-# Full run
+# 5. Full run
 python3 main.py
 ```
 
@@ -73,32 +131,21 @@ Archive Writer (S3 + SQLite) → Email Sender (AWS SES)
 
 ---
 
-## Attractiveness Score (0–100)
+## How Scoring Works
 
-Each stock receives a composite attractiveness score blending sub-scores from multiple sources, adjusted by a per-sector macro modifier:
+Each stock receives a composite attractiveness score (0–100) blending sub-scores from multiple sources, adjusted by a per-sector macro modifier:
 
 ```
-Base  = weighted_sum(sub_scores)
-Score = Base + macro_shift   (clipped to [0, 100])
+Base  = weighted_sum(sub_scores)    — weights configurable in scoring.yaml
+Score = Base + macro_shift          — clipped to [0, 100]
 ```
 
-The macro modifier uses an **additive bounded shift** rather than a multiplier. This preserves conviction-level ratings through moderate macro headwinds — a caution regime nudges scores down a few points rather than compressing all scores uniformly, which would drop strong-conviction holdings from BUY to HOLD regardless of their individual fundamentals.
+The macro modifier uses an **additive bounded shift** rather than a multiplier — a caution regime nudges scores down a few points rather than compressing all scores uniformly.
 
-### Technical Score (no LLM)
-
-Deterministic technical scoring from price-derived indicators: RSI, MACD, price vs moving averages, and momentum. All thresholds and weights are configurable via `config/scoring.yaml`. The engine supports regime-aware thresholds (different parameters for bull/bear/neutral markets).
-
-### Per-Sector Macro Modifier
-
-The Macro Agent outputs sector-specific multipliers rather than a single global modifier. This matters because macro conditions affect sectors differently: rising rates hurt Real Estate and Utilities but help Financials; high oil benefits Energy but hurts Consumer Discretionary.
-
-### GBM Predictor Integration
-
-A GBM predictor (alpha-engine-predictor) veto gate can override BUY signals. When the model predicts DOWN with sufficient confidence, the executor overrides the ENTER signal to HOLD, preventing entry into declining positions. Configuration in `config/universe.yaml`.
-
-### Score Performance Feedback Loop
-
-The system tracks whether BUY-rated stocks actually outperform SPY over configurable time windows. If accuracy falls below a configured threshold, a recalibration flag is set in the consolidated report.
+- **Technical score** (no LLM): Deterministic scoring from RSI, MACD, price vs moving averages, momentum. Supports regime-aware thresholds.
+- **Per-sector macro modifier**: The Macro Agent outputs sector-specific multipliers because macro conditions affect sectors differently.
+- **Ratings**: BUY / HOLD / SELL based on configurable score thresholds.
+- **Predictor veto**: High-confidence DOWN predictions from the GBM predictor can override BUY signals.
 
 ---
 
@@ -106,86 +153,24 @@ The system tracks whether BUY-rated stocks actually outperform SPY over configur
 
 A multi-stage pipeline runs in parallel with the universe pipeline:
 
-1. **Quant Filter** (no LLM): S&P 500+400 → shortlist via configurable screening criteria (momentum path + deep value path)
-2. **Data Enrichment** (no LLM): fetch headlines + analyst data for shortlisted stocks
-3. **Scanner Ranking** (1 Sonnet call): rank all candidates simultaneously → top N with rationale
-4. **Deep Analysis** (Haiku fan-out): news + research agents for each top candidate
-5. **Candidate Evaluator** (rule-based, no LLM): tiered rotation logic
-
-### Rotation Logic
-
-Candidates are protected by tenure-based rotation thresholds (configurable in `config/universe.yaml`). Recent additions require a larger score gap to be replaced, preventing whipsaw rotation. Long-held picks use a lower bar since their scores have stabilized.
+1. **Quant Filter** (no LLM): S&P 500+400 → shortlist via configurable screening criteria
+2. **Data Enrichment** (no LLM): Fetch headlines + analyst data for shortlisted stocks
+3. **Scanner Ranking** (1 Sonnet call): Rank all candidates simultaneously → top N
+4. **Deep Analysis** (Haiku fan-out): News + research agents for each candidate
+5. **Candidate Evaluator** (rule-based): Tiered rotation logic with tenure-based thresholds
 
 ---
 
-## Archive Strategy
-
-Every agent report and investment thesis is **permanently retained** in S3. The system never overwrites prior data — it only appends. This enables:
-- Compounding institutional knowledge: each run updates from prior context, not scratch
-- Full lifecycle tracking of buy candidates (promotions, demotions, re-promotions)
-- Historical review of any thesis at any date
-
----
-
-## Three-Step Thesis Drafting Protocol
-
-All agents follow a mandatory protocol:
-
-1. **Start from existing**: Load archived prior report. Preserve every finding that remains valid.
-2. **Add new material findings**: Integrate only material new developments — skip minor noise.
-3. **Remove stale content**: Prune resolved events, superseded ratings, outdated commentary.
-
-This produces compounding institutional knowledge rather than daily amnesia.
-
----
-
-## Configuration
-
-All tunable parameters are in gitignored config files:
+## Configuration Reference
 
 | File | Contents |
 |------|----------|
 | `config/universe.yaml` | Universe size, rating thresholds, scanner settings, rotation tiers, LLM models |
 | `config/scoring.yaml` | Technical scoring thresholds, composite weights, macro modifier params |
 | `config/prompts/*.txt` | LLM agent prompts (scoring baselines, thesis protocol, output format) |
-| `.env` | API keys, AWS config |
+| `.env` | API keys (Anthropic, FMP, FRED), AWS config, email settings |
 
-Sample/example versions of each file are provided in the repo. Copy them, then tune all parameters to your own research.
-
----
-
-## Project Structure
-
-```
-alpha-engine-research/
-├── config/
-│   ├── universe.yaml              # Population, weights, thresholds (gitignored)
-│   ├── scoring.yaml               # Scoring engine params (gitignored)
-│   ├── prompts/                   # LLM agent prompts (gitignored)
-│   ├── universe.sample.yaml       # Template — safe defaults
-│   ├── scoring.sample.yaml        # Template — safe defaults
-│   └── prompts.example/           # Template prompts
-├── agents/                        # LLM agent orchestrators
-├── data/
-│   ├── fetchers/                  # Price, news, analyst, macro data fetchers
-│   ├── scanner.py                 # S&P 500/400 screener + candidate evaluator
-│   └── population_selector.py     # Sector-balanced universe management
-├── scoring/
-│   ├── technical.py               # Deterministic technical scoring engine
-│   ├── aggregator.py              # Weighted composite + macro modifier
-│   └── performance_tracker.py     # Signal accuracy tracking
-├── thesis/
-│   └── updater.py                 # Score → rating + thesis summary
-├── archive/
-│   └── manager.py                 # S3 read/write + SQLite CRUD
-├── emailer/                       # Markdown → HTML + SES delivery
-├── graph/
-│   └── research_graph.py          # LangGraph state machine orchestrator
-├── lambda/                        # AWS Lambda handlers
-├── infrastructure/                # Deploy scripts, IAM policies
-├── local/                         # Local test runners
-└── tests/                         # Unit tests (no LLM/AWS required)
-```
+Sample/example versions are provided in the repo. Copy them and tune all parameters to your own research.
 
 ---
 
@@ -193,7 +178,7 @@ alpha-engine-research/
 
 | Data Type | Source | Cost |
 |-----------|--------|------|
-| Price data (OHLCV) | `yfinance` | Free |
+| Price data (OHLCV) | yfinance | Free |
 | Technical indicators | Computed from price data | Free |
 | News headlines | Yahoo Finance RSS | Free |
 | SEC 8-K filings | EDGAR full-text search API | Free |
@@ -205,45 +190,46 @@ alpha-engine-research/
 
 ---
 
-## LLM Strategy
+## Key Files
 
-Per-stock agents (news, research) use Haiku for cost efficiency on structured, templated tasks. Strategic agents (ranking, macro, consolidation) use Sonnet for cross-stock comparative judgment and nuanced interpretation. This hybrid approach delivers quality where it matters at ~3.5× lower cost than all-Sonnet.
-
----
-
-## Design Decisions
-
-- **Archive-first, never-overwrite**: LLM research compounds over time — 30 days of incremental findings beats a daily-fresh report
-- **Per-sector macro modifiers**: Sector-specific rather than single global — macro affects sectors differently
-- **Multi-stage scanner**: Quant filter (free) → ranking (1 LLM call) → deep analysis (N calls) mirrors human analyst workflow
-- **Single ranking call**: Cross-stock comparison in one call beats N independent evaluations
-- **Rule-based rotation**: Math inequality, not judgment — deterministic and reliable
-- **Tiered rotation thresholds**: Protect recent entries from whipsaw, lower bar for stabilized holdings
-
----
-
-## Related Repos
-
-- [`alpha-engine`](https://github.com/cipher813/alpha-engine) — Executor (IB Gateway trade execution)
-- [`alpha-engine-predictor`](https://github.com/cipher813/alpha-engine-predictor) — GBM predictor (5-day alpha predictions)
-- [`alpha-engine-backtester`](https://github.com/cipher813/alpha-engine-backtester) — Signal quality analysis & autonomous parameter optimization
-- [`alpha-engine-dashboard`](https://github.com/cipher813/alpha-engine-dashboard) — Streamlit monitoring dashboard
+```
+alpha-engine-research/
+├── main.py                           # CLI entry point
+├── config/
+│   ├── universe.sample.yaml          # Template — safe defaults
+│   ├── scoring.sample.yaml           # Template — safe defaults
+│   └── prompts.example/              # Template prompts
+├── agents/
+│   └── prompt_loader.py              # Loads prompts from config/prompts/
+├── data/
+│   ├── fetchers/                     # Price, news, analyst, macro data fetchers
+│   └── deduplicator.py              # Duplicate headline handling
+├── archive/
+│   └── manager.py                    # S3 read/write + SQLite CRUD
+├── emailer/                          # Markdown → HTML + SES delivery
+├── lambda/                           # AWS Lambda handlers
+├── infrastructure/                   # Deploy scripts, IAM policies
+└── tests/                            # Unit tests (no LLM/AWS required)
+```
 
 ---
 
-## Setup
-
-See the sample config files and `.env.example` for all required configuration. Full AWS deployment docs are in `DOCS.md` (not tracked — generate from infrastructure scripts).
-
----
-
-## Running Tests
+## Testing
 
 ```bash
 pytest tests/ -v
 ```
 
-Tests cover scoring engine, agent JSON extraction, scanner rotation logic, archive CRUD operations, and scheduling logic. All tests run without LLM API calls or AWS access.
+Tests cover scoring engine, agent JSON extraction, scanner rotation logic, archive CRUD, and scheduling logic. All tests run without LLM API calls or AWS access.
+
+---
+
+## Related Modules
+
+- [`alpha-engine`](https://github.com/cipher813/alpha-engine) — Executor (trade execution + system overview)
+- [`alpha-engine-predictor`](https://github.com/cipher813/alpha-engine-predictor) — GBM predictor (5-day alpha predictions)
+- [`alpha-engine-backtester`](https://github.com/cipher813/alpha-engine-backtester) — Signal quality analysis and parameter optimization
+- [`alpha-engine-dashboard`](https://github.com/cipher813/alpha-engine-dashboard) — Streamlit monitoring dashboard
 
 ---
 
