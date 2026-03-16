@@ -1,81 +1,92 @@
-universe:
-  - ticker: AAPL
-    sector: Technology
-  - ticker: MSFT
-    sector: Technology
-  - ticker: GOOGL
-    sector: Communication Services
-  - ticker: AMZN
-    sector: Consumer Discretionary
-  - ticker: NVDA
-    sector: Technology
-  - ticker: META
-    sector: Communication Services
-  - ticker: TSLA
-    sector: Consumer Discretionary
+# Alpha Engine Research — main configuration.
+# Copy to universe.yaml and customise all values below.
+#
+# The static "universe" list is deprecated — all stocks are now sourced
+# dynamically from the S&P 900 scanner. Keep this list empty or remove it.
+# It exists only for backward compatibility during migration.
+
+universe: []    # deprecated — scanner drives all stock selection
 
 scoring_weights:
-  technical: 0.40
-  news: 0.30
-  research: 0.30
+  technical: 0.34                    # weight for technical score component
+  news: 0.33                        # weight for news sentiment component
+  research: 0.33                    # weight for analyst research component
 
 rating_thresholds:
-  buy: 65             # 12-month horizon: conviction holds should rate BUY by default
-  sell: 40
+  buy: 65                            # score >= this → BUY rating
+  sell: 40                           # score < this → SELL rating
 
 scanner:
-  candidate_count: 3
-  candidate_universe: sp500_sp400    # sp500 | sp500_sp400 | russell1000
-  min_avg_volume: 500000
-  min_price: 10
+  candidate_count: 3                 # number of buy candidates to track
+  candidate_universe: sp500          # sp500 | sp500_sp400 | russell1000
+  min_avg_volume: 500000             # min 20d avg daily volume
+  min_price: 10                      # min stock price ($)
 
-  # Tiered rotation thresholds (§6.3 Stage 5)
+  # Tiered rotation thresholds — controls how easily candidates are swapped.
+  # Newer candidates require larger score gaps to prevent whipsaw.
   rotation_tiers:
-    - max_tenure_days: 3
-      min_score_diff: 12             # new entry: require large gap to prevent whipsaw
-    - max_tenure_days: 10
-      min_score_diff: 8              # early tenure
+    - max_tenure_days: 5
+      min_score_diff: 15             # new entry: large gap required
+    - max_tenure_days: 14
+      min_score_diff: 10             # early tenure
     - max_tenure_days: 30
       min_score_diff: 5              # established
     - max_tenure_days: 99999
       min_score_diff: 3              # long-held: low bar to rotate
 
-  # Override: weak long-held picks lose tenure protection
-  weak_pick_score_threshold: 60      # score below which tenure override applies
-  weak_pick_consecutive_runs: 5      # must score below threshold for this many consecutive runs
-  emergency_rotation_new_score: 70   # new candidate must score >= this for emergency override
+  # Weak pick override — long-held low scorers lose tenure protection
+  weak_pick_score_threshold: 55      # score below which tenure override applies
+  weak_pick_consecutive_runs: 3      # must score below threshold for N consecutive runs
+  emergency_rotation_new_score: 75   # new candidate must score >= this for emergency override
 
-  # Deep value path
+  # Momentum path filters
+  momentum_min_tech_score: 55        # min tech score for momentum path
+  momentum_min_price_vs_ma200: -10   # max allowed distance below 200MA (%)
+  momentum_top_n: 50                 # top N momentum candidates to keep
+
+  # Fallback and emergency thresholds
+  min_candidates_fallback: 3         # minimum candidates before fallback fills
+  emergency_all_weak_threshold: 50   # score below which all candidates are "weak"
+  max_rotations_per_run: 1           # max candidate rotations per daily run
+
+  # Weak pick override params
+  weak_pick_min_tenure_days: 7       # min tenure before weak pick override applies
+  weak_pick_challenger_min_score: 60 # challenger must score >= this
+
+  # Deep value path — identifies oversold stocks with analyst conviction
   deep_value_path: true
-  deep_value_max_rsi: 35
-  deep_value_min_consensus: Buy
-  deep_value_max_candidates: 10
+  deep_value_max_rsi: 30             # RSI must be below this for deep value path
+  deep_value_min_consensus: Buy      # minimum analyst consensus rating
+  deep_value_max_candidates: 5       # max deep value candidates per scan
 
 archive:
   retain_history: true
   check_prior_candidate_records: true
 
 alerts:
-  enabled: true
-  price_move_threshold_pct: 5.0
-  cooldown_minutes: 60
+  enabled: false                     # set true to enable intraday price alerts
+  price_move_threshold_pct: 5.0      # alert on ±N% intraday moves
+  cooldown_minutes: 60               # min minutes between alerts per ticker
 
 email:
   recipients:
-    - you@example.com               # Add one or more recipient email addresses
-  sender: you@example.com           # Must be SES-verified (see DOCS.md)
-  send_time_pt: "06:15"
+    - you@example.com                # replace with your email address(es)
+  sender: noreply@example.com        # must be SES-verified or use Gmail SMTP
 
 schedule:
-  timezone: America/Los_Angeles
-  run_time: "06:15"
+  timezone: America/New_York
+  run_time: "09:00"
   frequency: trading_days
   holiday_calendar: XNYS
   run_on_early_close: true
 
+predictor:
+  s3_predictions_key: predictor/predictions/latest.json
+  min_confidence: 0.60               # min GBM confidence for veto gate
+
 llm:
-  per_stock_model: claude-haiku-4-5-20251001   # news + research agents
-  strategic_model: claude-sonnet-4-6            # scanner ranking, macro, consolidator
+  per_stock_model: claude-haiku-4-5-20251001    # per-ticker agents (news, research)
+  strategic_model: claude-sonnet-4-6             # macro, scanner ranking, consolidator
   max_tokens_per_stock: 800
   max_tokens_strategic: 4096
-  concurrent_agents: 10
+  concurrent_agents: 5

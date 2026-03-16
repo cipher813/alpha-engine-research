@@ -1,5 +1,7 @@
 .env
 config/universe.yaml
+config/prompts/
+config/scoring.yaml
 *.db
 alpha-engine-research/
 .venv/
@@ -23,4 +25,36 @@ run.log
 *-design-*.md
 *-design.md
 .ipynb_checkpoints/
-*.ipynb 
+*.ipynb
+
+# ── Proprietary source (secret sauce) ─────────────────────────────
+# Agent orchestration & LLM integration
+agents/prompt_loader.py
+agents/consolidator.py
+agents/macro_agent.py
+agents/news_agent.py
+agents/research_agent.py
+agents/scanner_ranking_agent.py
+
+# Scoring formulas
+scoring/technical.py
+scoring/aggregator.py
+scoring/performance_tracker.py
+
+# Screening & portfolio management
+data/scanner.py
+data/population_selector.py
+
+# Orchestration
+graph/research_graph.py
+
+# Rating/signal logic
+thesis/updater.py
+
+# Central config (thresholds & constants)
+config.py
+
+# Internal docs
+DOCS.md
+.coverage
+

@@ -1,0 +1,84 @@
+# Scoring parameters — controls how raw signals become attractiveness scores.
+# Copy to scoring.yaml and customise all values below.
+# These are intentionally naive defaults — tune them to your own research.
+
+technical:
+  rsi:
+    bull:
+      overbought: 70             # RSI level considered overbought in bull regime
+      oversold: 30               # RSI level considered oversold in bull regime
+      max_oversold_score: 80.0   # max score awarded when RSI is oversold
+    bear:
+      overbought: 70
+      oversold: 30
+      max_oversold_score: 80.0
+    neutral:
+      overbought: 70
+      oversold: 30
+      max_oversold_score: 80.0
+
+  macd:
+    bullish_cross_above_zero: 80.0    # score for bullish MACD cross above zero line
+    bullish_cross_below_zero: 60.0    # score for bullish MACD cross below zero line
+    bearish_cross_above_zero: 40.0    # score for bearish MACD cross above zero line
+    bearish_cross_below_zero: 20.0    # score for bearish MACD cross below zero line
+    no_cross_above_zero: 55.0         # score when no cross, MACD above zero
+    no_cross_below_zero: 45.0         # score when no cross, MACD below zero
+
+  price_vs_ma:
+    upper_anchor_pct: 5               # % above MA that starts upper scoring zone
+    upper_anchor_score: 75.0          # score at upper anchor
+    upper_max_score: 100.0            # max possible score
+    upper_scale_pct: 15.0             # pct range from anchor to max
+    mid_score: 50.0                   # score when price == MA
+    positive_scale: 5.0               # score points per 1% above MA (0% → anchor)
+    lower_anchor_pct: -5              # % below MA that starts lower scoring zone
+    lower_anchor_score: 25.0          # score at lower anchor
+    negative_scale: 5.0               # score points per 1% below MA (0% → anchor)
+    lower_floor_score: 0.0            # minimum possible score
+    lower_decay: 1.0                  # score points per 1% below lower anchor
+
+  momentum:
+    mid_score: 50.0                   # score when 20d momentum is 0%
+    raw_scale: 2.0                    # multiplier for raw 20d return → score
+
+  composite_weights:                  # must sum to 1.0
+    rsi: 0.20
+    macd: 0.20
+    ma50: 0.20
+    ma200: 0.20
+    momentum: 0.20
+
+  predictor_enrichment:
+    confidence_gate: 0.70             # min prediction confidence to apply enrichment
+    max_adjustment: 5.0               # max points added/subtracted by predictor
+
+aggregator:
+  macro_modifier_range: 0.20         # distance from 1.0 to min/max modifier
+  macro_max_shift_points: 5.0        # max pts added/subtracted by macro shift
+  macro_modifier_clamp_min: 0.80     # floor for sector macro modifier
+  macro_modifier_clamp_max: 1.20     # ceiling for sector macro modifier
+
+  long_term_weights:                  # must sum to 1.0
+    news: 0.50
+    research: 0.50
+
+  consistency_check:
+    bullish_terms:
+      - bullish
+      - buy
+      - upside
+    bearish_terms:
+      - bearish
+      - sell
+      - downside
+    bearish_score_threshold: 40       # bullish text + score below this = flag
+    bullish_score_threshold: 70       # bearish text + score above this = flag
+
+staleness:
+  threshold_days: 7                   # days without material change before stale flag
+  material_score_change_min: 5.0      # min score delta to count as material change
+
+macro:
+  overweight_threshold: 1.10          # modifier >= this → sector is overweight
+  underweight_threshold: 0.90         # modifier <= this → sector is underweight
