@@ -1,6 +1,10 @@
 .env
 config/universe.yaml
+config/prompts/
+config/scoring.yaml
 *.db
+.coverage
+DOCS.md
 alpha-engine-research/
 .venv/
 *.db-shm
