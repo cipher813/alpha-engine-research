@@ -27,4 +27,20 @@ run.log
 *-design-*.md
 *-design.md
 .ipynb_checkpoints/
-*.ipynb 
+*.ipynb
+
+# ── Proprietary source (prompts, scoring, orchestration) ──────────
+agents/consolidator.py
+agents/macro_agent.py
+agents/news_agent.py
+agents/research_agent.py
+agents/scanner_ranking_agent.py
+scoring/technical.py
+scoring/aggregator.py
+scoring/performance_tracker.py
+data/scanner.py
+data/population_selector.py
+graph/research_graph.py
+thesis/updater.py
+config.py
+
