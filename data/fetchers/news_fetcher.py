@@ -6,6 +6,7 @@ Fetches first ~500 chars of article body where available.
 from __future__ import annotations
 
 import hashlib
+import logging
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -13,6 +14,8 @@ from typing import Optional
 import feedparser
 import requests
 from bs4 import BeautifulSoup
+
+logger = logging.getLogger(__name__)
 
 
 _YAHOO_RSS_URL = "https://feeds.finance.yahoo.com/rss/2.0/headline?s={ticker}&region=US&lang=en-US"
@@ -48,7 +51,8 @@ def _fetch_article_excerpt(url: str, max_chars: int = 500) -> str:
         paragraphs = soup.find_all("p")
         text = " ".join(p.get_text(separator=" ", strip=True) for p in paragraphs)
         return text[:max_chars].strip()
-    except Exception:
+    except Exception as e:
+        logger.debug("Article excerpt fetch failed for %s: %s", url, e)
         return ""
 
 
@@ -67,7 +71,8 @@ def fetch_yahoo_news(
     url = _YAHOO_RSS_URL.format(ticker=ticker)
     try:
         feed = feedparser.parse(url)
-    except Exception:
+    except Exception as e:
+        logger.warning("Yahoo RSS parse failed for %s: %s", ticker, e)
         return []
 
     cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
@@ -101,7 +106,8 @@ def fetch_yahoo_news(
                 "article_excerpt": excerpt,
                 "article_hash": _article_hash(headline, source),
             })
-        except Exception:
+        except Exception as e:
+            logger.debug("Skipping news entry for %s: %s", ticker, e)
             continue
 
     return articles
@@ -120,7 +126,8 @@ def fetch_edgar_8k(ticker: str, days: int = 2) -> list[dict]:
         resp = requests.get(url, headers=_REQUEST_HEADERS, timeout=_FETCH_TIMEOUT)
         resp.raise_for_status()
         data = resp.json()
-    except Exception:
+    except Exception as e:
+        logger.warning("EDGAR 8-K fetch failed for %s: %s", ticker, e)
         return []
 
     filings = []

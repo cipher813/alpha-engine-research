@@ -5,9 +5,13 @@ Uses yfinance (free, no API key required).
 
 from __future__ import annotations
 
+import logging
+from typing import Optional
+
 import pandas as pd
 import yfinance as yf
-from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 
 _BATCH_SIZE = 100
@@ -71,14 +75,14 @@ def fetch_price_data(tickers: list[str], period: str = "1y") -> dict[str, pd.Dat
                 result.update(future.result())
             except Exception as e:
                 failed_batches.append(futures[future])
-                print(f"Batch download failed ({len(futures[future])} tickers), will retry: {e}")
+                logger.warning("Batch download failed (%d tickers), will retry: %s", len(futures[future]), e)
 
     # Retry failed batches sequentially (no parallelism to avoid yfinance race conditions)
     for batch in failed_batches:
         try:
             result.update(_download_batch(batch, period))
         except Exception as e:
-            print(f"Batch retry failed ({len(batch)} tickers), skipping: {e}")
+            logger.warning("Batch retry failed (%d tickers), skipping: %s", len(batch), e)
 
     return result
 
