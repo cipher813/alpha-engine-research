@@ -224,6 +224,61 @@ Tests cover scoring engine, agent JSON extraction, scanner rotation logic, archi
 
 ---
 
+## Opportunities for Improvement
+
+### Data Source Gaps
+
+| Data Source | Alpha Impact | Cost | Notes |
+|-------------|-------------|------|-------|
+| Options put/call ratio & IV skew | HIGH — validates/contradicts analyst sentiment | Free (yfinance options chain) | Orthogonal to current momentum-heavy signals |
+| Earnings revision trends (week-over-week EPS consensus) | HIGH — "revisions up" is strong bullish signal | Free (diff FMP weekly) | 4-week revision direction as feature |
+| SEC Form 4 insider transactions | MEDIUM — cluster buying is 6-12 month signal | Free (EdgarTools) | 3+ C-level buys within 30 days |
+| Short interest & borrow rates | MEDIUM — crowded trade risk flag | Free (finviz scrape) | |
+| Leading indicators (ISM PMI, jobless claims) | MEDIUM — leads equity drawdowns 3-6 months | Free (FRED) | |
+| Credit spreads (HY-Treasury OAS) | MEDIUM — risk-on/off indicator | Free (FRED) | |
+| Equity breadth (advance/decline, % above 50d MA) | MEDIUM — confirms/contradicts SPY price | Free (finviz scrape) | |
+| 13F institutional holdings changes | LOW — quarterly lag reduces timeliness | Free (SEC EDGAR) | |
+
+### LLM Agent Gaps
+
+1. **Market regime definition is subjective** — macro agent uses bull/neutral/caution/bear labels with no quantitative thresholds. Different runs may classify the same data differently. Plan: define regimes mathematically (e.g., Bull: VIX < 15 AND SPY 30d return > 0; Bear: VIX > 25 OR SPY 30d return < -5%). Supplement LLM judgment with a quantitative floor.
+
+2. **News sentiment quantification is keyword-only** — recurring themes use word frequency, not semantic analysis. "China tariffs" (bearish) and "China market expansion" (bullish) are indistinguishable. Plan: add LLM-based theme sentiment scoring before passing to the news agent — a single Haiku call per theme batch to classify sentiment direction and magnitude.
+
+3. **Prior report length unbounded** — if accumulated thesis is 5000 words, agent's output budget is consumed by context. Plan: truncate prior_report to most recent 500 words or last 3 months of content before injecting into agent prompts.
+
+4. **Consistency check uses regex, not semantics** — `check_consistency()` in aggregator.py uses keyword matching. "Bullish but headwinds may resurface" gets bullish_hits=1, bearish_hits=1, classified as consistent. Plan: use LLM-based consistency check (single Haiku call) or require keyword dominance ratio > 2:1.
+
+### Scanner Pipeline Gaps
+
+1. **No volatility screen** — high-volatility stocks pass if volume threshold met. Plan: add realized volatility filter (e.g., reject if 20d vol > 3x sector median) to prevent scanner from surfacing names with outsized risk.
+
+2. **No debt/balance sheet filter** — near-default companies can pass scanner. Plan: add debt-to-equity or interest coverage screen via FMP fundamentals data to filter out financially distressed names.
+
+3. **No sector concentration limit in candidates** — all 60 candidates could be Technology. Plan: add configurable per-sector candidate cap (e.g., max 30% from any single sector) in the quant filter stage.
+
+4. **Deep value path weak** — only checks RSI < 35 + single analyst "Buy" rating. Plan: strengthen with additional value signals — price-to-book, free cash flow yield, or distance from 52-week low — and require 2+ confirming signals.
+
+5. **No sub-sector (industry group) analysis** — semiconductors and SaaS treated identically as "Technology." Plan: use GICS sub-industry from Wikipedia tables (already fetched) to provide industry-level context to agents and apply sub-sector concentration limits.
+
+### Thesis Management
+
+1. **Stale thesis detection exists but is never surfaced** — `stale_days` counter runs but no visual "STALE" badge appears in output or email. Plan: add stale badge to the morning brief and signals.json output when `stale_days >= threshold`.
+
+2. **No forced thesis refresh trigger** — stale theses accumulate without action. Plan: when `stale_days >= 2 * threshold`, force a full thesis rewrite by clearing the prior report and running agents with a "fresh analysis" prompt override.
+
+3. **No archive expiration** — 6-month-old wrong theses remain in archive indefinitely. Plan: add TTL-based archive cleanup that moves theses older than a configurable max age (e.g., 6 months) to a cold archive prefix in S3.
+
+### Survivorship Bias
+
+1. **Wikipedia S&P constituents are current-only** — delisted stocks disappear from universe retroactively. Plan: maintain a local append-only constituents log that tracks additions and removals, so historical backtests use point-in-time membership.
+
+2. **No tracking of removed stocks** — stocks removed from S&P 500/400 and their subsequent performance are invisible. Plan: when a ticker drops off the constituents list, log the removal date and continue tracking price for 90 days to measure post-removal drift.
+
+3. **Price floor ($10) creates look-ahead bias** — recovered penny stocks are included only after recovery. Plan: apply the price floor at the point-in-time of each signal date rather than at scan time, or accept the bias as a feature (we genuinely don't want to trade sub-$10 names).
+
+---
+
 ## Related Modules
 
 - [`alpha-engine`](https://github.com/cipher813/alpha-engine) — Executor (trade execution + system overview)
