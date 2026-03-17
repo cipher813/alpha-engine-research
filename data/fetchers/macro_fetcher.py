@@ -6,6 +6,7 @@ OPEN ITEM: Set FRED_API_KEY environment variable before running.
 
 from __future__ import annotations
 
+import logging
 import os
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -13,6 +14,8 @@ from typing import Optional
 import pandas as pd
 import requests
 import yfinance as yf
+
+logger = logging.getLogger(__name__)
 
 _FRED_BASE = "https://api.stlouisfed.org/fred/series/observations"
 _FRED_TIMEOUT = 15
@@ -35,8 +38,8 @@ def _fred_latest(series_id: str, api_key: str) -> Optional[float]:
             val = o.get("value", ".")
             if val != ".":
                 return float(val)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("FRED fetch failed for %s: %s", series_id, e)
     return None
 
 
@@ -98,7 +101,8 @@ def fetch_macro_data() -> dict:
             try:
                 s = df[ticker]["Close"].dropna()
                 return float(s.iloc[-1]) if not s.empty else None
-            except Exception:
+            except Exception as e:
+                logger.debug("_last_close failed for %s: %s", ticker, e)
                 return None
 
         def _return_30d(ticker: str) -> Optional[float]:
@@ -106,8 +110,8 @@ def fetch_macro_data() -> dict:
                 s = df[ticker]["Close"].dropna()
                 if len(s) >= 20:
                     return round(((s.iloc[-1] / s.iloc[-20]) - 1) * 100, 2)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("_return_30d failed for %s: %s", ticker, e)
             return None
 
         macro["oil_wti"] = _last_close("CL=F")
@@ -118,7 +122,8 @@ def fetch_macro_data() -> dict:
         macro["qqq_30d_return"] = _return_30d("QQQ")
         macro["iwm_30d_return"] = _return_30d("IWM")
 
-    except Exception:
+    except Exception as e:
+        logger.warning("yfinance macro download failed: %s", e)
         for k in ["oil_wti", "gold", "copper", "sp500_close",
                   "sp500_30d_return", "qqq_30d_return", "iwm_30d_return"]:
             macro.setdefault(k, None)
@@ -145,5 +150,6 @@ def _fred_cpi_yoy(api_key: str) -> Optional[float]:
         latest = float(obs[0]["value"])
         year_ago = float(obs[12]["value"])
         return round((latest / year_ago - 1) * 100, 2)
-    except Exception:
+    except Exception as e:
+        logger.warning("CPI YoY computation failed: %s", e)
         return None
