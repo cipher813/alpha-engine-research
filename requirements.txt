@@ -28,3 +28,9 @@ pytz>=2024.1
 pytest>=8.2.0
 pytest-asyncio>=0.23.0
 python-dotenv>=1.0.1
+
+# SEC EDGAR insider trading data (O13)
+edgartools>=2.0.0
+
+# Error handling
+flow-doctor

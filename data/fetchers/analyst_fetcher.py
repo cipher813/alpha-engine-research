@@ -2,13 +2,15 @@
 Analyst consensus fetcher — Financial Modeling Prep (FMP) stable API.
 Free tier: 250 requests/day. Daily usage ~73 — within free tier (§15.4).
 
-Uses stable API endpoints (v3 legacy endpoints are no longer supported).
+Uses stable API endpoints for consensus data. Also fetches earnings
+surprises from the v3 API for PEAD scoring (O10).
 """
 
 from __future__ import annotations
 
 import logging
 import os
+from datetime import datetime
 from typing import Optional
 
 import requests
@@ -16,15 +18,16 @@ import requests
 logger = logging.getLogger(__name__)
 
 _FMP_STABLE = "https://financialmodelingprep.com/stable"
+_FMP_V3 = "https://financialmodelingprep.com/api/v3"
 _TIMEOUT = 10
 
 
-def _fmp_get(endpoint: str, params: Optional[dict] = None) -> dict | list:
+def _fmp_get(endpoint: str, params: Optional[dict] = None, base: str = _FMP_STABLE) -> dict | list:
     api_key = os.environ.get("FMP_API_KEY", "")
     if not api_key:
         raise RuntimeError("FMP_API_KEY environment variable not set.")
 
-    url = f"{_FMP_STABLE}/{endpoint}"
+    url = f"{base}/{endpoint}"
     p = {"apikey": api_key}
     if params:
         p.update(params)
@@ -83,5 +86,26 @@ def fetch_analyst_consensus(ticker: str) -> dict:
                 )
     except Exception as e:
         logger.warning("FMP quote failed for %s: %s", ticker, e)
+
+    # O10: Earnings surprises (uses v3 API)
+    try:
+        data = _fmp_get(f"earning_surprises/{ticker}", base=_FMP_V3)
+        if isinstance(data, list) and data:
+            surprises = []
+            for entry in data[:4]:  # last 4 quarters
+                actual = entry.get("actualEarningResult")
+                estimated = entry.get("estimatedEarning")
+                surprise_pct = None
+                if actual is not None and estimated is not None and estimated != 0:
+                    surprise_pct = round((actual - estimated) / abs(estimated) * 100, 2)
+                surprises.append({
+                    "date": entry.get("date", ""),
+                    "actual": actual,
+                    "estimated": estimated,
+                    "surprise_pct": surprise_pct,
+                })
+            result["earnings_surprises"] = surprises
+    except Exception as e:
+        logger.debug("FMP earnings surprises failed for %s: %s", ticker, e)
 
     return result
