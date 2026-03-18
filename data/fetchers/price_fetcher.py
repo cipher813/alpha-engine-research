@@ -14,6 +14,11 @@ import yfinance as yf
 logger = logging.getLogger(__name__)
 
 
+class PriceFetchError(RuntimeError):
+    """Raised when price data fetch returns insufficient results."""
+    pass
+
+
 _BATCH_SIZE = 100
 _DOWNLOAD_WORKERS = 5
 
@@ -84,6 +89,21 @@ def fetch_price_data(tickers: list[str], period: str = "1y") -> dict[str, pd.Dat
         except Exception as e:
             logger.warning("Batch retry failed (%d tickers), skipping: %s", len(batch), e)
 
+    # ── Catastrophic failure gate ──────────────────────────────────────────
+    n_requested = len(tickers)
+    n_fetched = sum(1 for df in result.values() if not df.empty)
+    if n_requested > 0 and n_fetched < max(n_requested * 0.10, 1):
+        msg = (f"Price fetch catastrophic failure: {n_fetched}/{n_requested} "
+               f"tickers with data ({n_fetched/n_requested*100:.0f}%)")
+        logger.error(msg)
+        raise PriceFetchError(msg)
+
+    if n_requested > 0 and n_fetched < n_requested * 0.50:
+        logger.warning(
+            "Price fetch degraded: %d/%d tickers with data (%.0f%%)",
+            n_fetched, n_requested, n_fetched / n_requested * 100,
+        )
+
     return result
 
 
@@ -107,6 +127,15 @@ def fetch_sp500_sp400_with_sectors() -> tuple[list[str], dict[str, str]]:
     """
     Fetch S&P 500 and S&P 400 constituent lists AND GICS sectors from Wikipedia.
     Falls back to cached static CSV if Wikipedia is unavailable.
+
+    Known limitation — survivorship bias:
+        Wikipedia provides current-only constituent lists. Stocks that were removed
+        from the index (delisted, acquired, or dropped due to market cap decline)
+        are not included. This means historical backtests using these lists will
+        overstate returns because they exclude stocks that performed poorly enough
+        to be removed. Impact is small for this system's weekly horizon: S&P indices
+        rebalance quarterly with ~20-30 changes/year. For historical constituent
+        data, paid sources (Compustat, Sharadar) would be needed.
 
     Returns:
         (tickers, sector_map) where:
@@ -204,6 +233,45 @@ def fetch_sp500_sp400_tickers() -> list[str]:
     """
     tickers, _ = fetch_sp500_sp400_with_sectors()
     return tickers
+
+
+def fetch_short_interest(tickers: list[str]) -> dict[str, dict]:
+    """
+    Fetch short interest data from yfinance for a list of tickers.
+
+    Uses Ticker.info fields: shortPercentOfFloat, shortRatio, sharesShort.
+    Only call for analyzed tickers (~35), not the full S&P 900.
+
+    Note: yfinance short interest data is delayed (bi-monthly FINRA reporting).
+    Best used as a supplementary signal, not for precise timing.
+
+    Returns {ticker: {short_pct_float, short_ratio, shares_short}}.
+    """
+    results: dict[str, dict] = {}
+    for ticker in tickers:
+        try:
+            info = yf.Ticker(ticker).info
+            short_pct = info.get("shortPercentOfFloat")  # e.g. 0.05 = 5%
+            short_ratio = info.get("shortRatio")          # days to cover
+            shares_short = info.get("sharesShort")
+
+            # Convert to percentage if present
+            if short_pct is not None:
+                short_pct = round(short_pct * 100, 2)
+
+            results[ticker] = {
+                "short_pct_float": short_pct,
+                "short_ratio": short_ratio,
+                "shares_short": shares_short,
+            }
+        except Exception as e:
+            logger.debug("Short interest fetch failed for %s: %s", ticker, e)
+            results[ticker] = {
+                "short_pct_float": None,
+                "short_ratio": None,
+                "shares_short": None,
+            }
+    return results
 
 
 def compute_technical_indicators(df: pd.DataFrame) -> Optional[dict]:
