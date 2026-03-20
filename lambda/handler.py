@@ -78,8 +78,10 @@ def handler(event, context):
         import flow_doctor
         fd = flow_doctor.init(config_path=os.path.join(
             os.path.dirname(os.path.dirname(__file__)), "flow-doctor.yaml"))
-    except Exception:
-        pass
+    except ImportError:
+        pass  # flow-doctor not installed — optional dependency
+    except Exception as e:
+        print(f"WARNING: flow-doctor init failed: {e}")
 
     # Time gate: weekly runs and force bypass; weekday runs require 5:40-5:55am PT
     if not force and not weekly and not _is_scheduled_run_time():
