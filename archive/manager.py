@@ -22,10 +22,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+import logging
+
 import boto3
 from botocore.exceptions import ClientError
 
 from config import S3_BUCKET, AWS_REGION
+
+log = logging.getLogger(__name__)
 
 _DB_S3_KEY = "research.db"
 _BACKUP_KEY_TPL = "backups/research_{date}.db"
@@ -40,12 +44,34 @@ class ArchiveManager:
         self.local_db_path = local_db_path or os.path.join(tempfile.gettempdir(), "research.db")
         self.db_conn: Optional[sqlite3.Connection] = None
 
+    def _retry_s3(self, operation, *args, max_attempts=3, **kwargs):
+        """Retry an S3 operation with exponential backoff."""
+        import time
+        for attempt in range(1, max_attempts + 1):
+            try:
+                return operation(*args, **kwargs)
+            except ClientError as e:
+                code = e.response["Error"]["Code"]
+                if code in ("NoSuchKey", "404"):
+                    raise  # Not transient — don't retry
+                if attempt == max_attempts:
+                    raise
+                delay = 2 ** attempt
+                log.warning("S3 retry %d/%d after %s (%.0fs delay)", attempt, max_attempts, code, delay)
+                time.sleep(delay)
+            except Exception as e:
+                if attempt == max_attempts:
+                    raise
+                delay = 2 ** attempt
+                log.warning("S3 retry %d/%d after %s (%.0fs delay)", attempt, max_attempts, type(e).__name__, delay)
+                time.sleep(delay)
+
     # ── Database lifecycle ────────────────────────────────────────────────────
 
     def download_db(self) -> sqlite3.Connection:
         """Download research.db from S3 and open connection. Creates schema if new."""
         try:
-            self.s3.download_file(self.bucket, _DB_S3_KEY, self.local_db_path)
+            self._retry_s3(self.s3.download_file, self.bucket, _DB_S3_KEY, self.local_db_path)
         except ClientError as e:
             if e.response["Error"]["Code"] == "404":
                 # First run — create fresh DB
@@ -62,9 +88,9 @@ class ArchiveManager:
         """Upload research.db to S3 and create a dated backup."""
         if self.db_conn:
             self.db_conn.commit()
-        self.s3.upload_file(self.local_db_path, self.bucket, _DB_S3_KEY)
+        self._retry_s3(self.s3.upload_file, self.local_db_path, self.bucket, _DB_S3_KEY)
         backup_key = _BACKUP_KEY_TPL.format(date=run_date.replace("-", ""))
-        self.s3.upload_file(self.local_db_path, self.bucket, backup_key)
+        self._retry_s3(self.s3.upload_file, self.local_db_path, self.bucket, backup_key)
 
     def _ensure_schema(self) -> None:
         """Create all tables if they don't exist (§7.2)."""
@@ -249,8 +275,13 @@ class ArchiveManager:
         for stmt in migrations:
             try:
                 conn.execute(stmt)
-            except Exception:
-                pass  # column already exists
+            except sqlite3.OperationalError as e:
+                msg = str(e).lower()
+                if "duplicate column" in msg or "already exists" in msg:
+                    pass  # column already exists — safe to ignore
+                else:
+                    log.error("Schema migration failed: %s — %s", stmt, e)
+                    raise
         conn.commit()
 
     # ── S3 object helpers ─────────────────────────────────────────────────────
@@ -258,7 +289,7 @@ class ArchiveManager:
     def _s3_get(self, key: str) -> Optional[str]:
         """Download S3 object and return as string. Returns None if not found."""
         try:
-            obj = self.s3.get_object(Bucket=self.bucket, Key=key)
+            obj = self._retry_s3(self.s3.get_object, Bucket=self.bucket, Key=key)
             return obj["Body"].read().decode("utf-8")
         except ClientError as e:
             if e.response["Error"]["Code"] in ("NoSuchKey", "404"):
@@ -266,7 +297,7 @@ class ArchiveManager:
             raise
 
     def _s3_put(self, key: str, body: str) -> None:
-        self.s3.put_object(Bucket=self.bucket, Key=key, Body=body.encode("utf-8"))
+        self._retry_s3(self.s3.put_object, Bucket=self.bucket, Key=key, Body=body.encode("utf-8"))
 
     # ── Universe archive read/write ───────────────────────────────────────────
 
