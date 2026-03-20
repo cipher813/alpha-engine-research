@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import datetime
 import os
+import time
+
 import pytz
 
 from exchange_calendars import get_calendar
@@ -105,6 +107,8 @@ def handler(event, context):
     print(f"Starting alpha-engine-research run for {run_date} ({run_type})"
           + (" [early close]" if early_close else ""))
 
+    _health_start = time.time()
+
     # Import pipeline (deferred to reduce cold-start time)
     try:
         from graph.research_graph import build_graph, create_initial_state
@@ -145,6 +149,26 @@ def handler(event, context):
 
         archive.close()
 
+        # Write health status on success
+        try:
+            from health_status import write_health
+            _universe = final_state.get("universe", [])
+            _candidates = final_state.get("buy_candidates", [])
+            write_health(
+                bucket="alpha-engine-research",
+                module_name="research",
+                status="ok",
+                run_date=run_date,
+                duration_seconds=time.time() - _health_start,
+                summary={
+                    "n_universe": len(_universe) if isinstance(_universe, list) else 0,
+                    "n_candidates": len(_candidates) if isinstance(_candidates, list) else 0,
+                    "market_regime": final_state.get("market_regime", "unknown"),
+                },
+            )
+        except Exception as he:
+            print(f"WARNING: health status write failed: {he}")
+
         print(f"Run complete. Email sent: {final_state.get('email_sent', False)}")
         return {
             "status": "OK",
@@ -158,6 +182,21 @@ def handler(event, context):
         import traceback
         tb = traceback.format_exc()
         print(f"Pipeline error: {e}\n{tb}")
+
+        # Write health status on failure
+        try:
+            from health_status import write_health
+            write_health(
+                bucket="alpha-engine-research",
+                module_name="research",
+                status="failed",
+                run_date=run_date,
+                duration_seconds=time.time() - _health_start,
+                error=str(e),
+            )
+        except Exception as he:
+            print(f"WARNING: health status write failed: {he}")
+
         if fd:
             fd.report(e, severity="critical", context={
                 "site": "research_pipeline_toplevel",

@@ -11,6 +11,8 @@ from typing import Optional
 import pandas as pd
 import yfinance as yf
 
+from retry import retry
+
 logger = logging.getLogger(__name__)
 
 
@@ -23,6 +25,7 @@ _BATCH_SIZE = 100
 _DOWNLOAD_WORKERS = 5
 
 
+@retry(max_attempts=2, retryable=(Exception,), label="yfinance")
 def _download_batch(tickers: list[str], period: str) -> dict[str, pd.DataFrame]:
     """Download one batch of tickers and return per-ticker DataFrames."""
     result: dict[str, pd.DataFrame] = {}
