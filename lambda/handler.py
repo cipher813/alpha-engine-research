@@ -108,6 +108,20 @@ def handler(event, context):
         from graph.research_graph import build_graph, create_initial_state
         from archive.manager import ArchiveManager
 
+        # ── Validate required env vars (fail fast, not 30 min in) ─────
+        from config import ANTHROPIC_API_KEY, FMP_API_KEY, FRED_API_KEY
+        _missing = []
+        if not ANTHROPIC_API_KEY:
+            _missing.append("ANTHROPIC_API_KEY")
+        if not FMP_API_KEY:
+            _missing.append("FMP_API_KEY")
+        if not FRED_API_KEY:
+            _missing.append("FRED_API_KEY")
+        if _missing:
+            msg = f"Missing required env vars: {', '.join(_missing)}"
+            print(f"FATAL: {msg}")
+            return {"statusCode": 500, "body": msg}
+
         archive = ArchiveManager()
         archive.download_db()
 
