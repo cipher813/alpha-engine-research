@@ -245,11 +245,34 @@ Tests cover scoring engine, agent JSON extraction, scanner rotation logic, archi
 
 All originally identified data source gaps have been implemented — see `data/fetchers/` for the full set (insider, institutional, options, revision, short interest, credit spreads, equity breadth).
 
+### Recent Fixes (2026-03-21 Audit)
+
+A full audit identified and fixed 20 issues across signal quality, performance, scoring logic, and documentation. Key fixes:
+
+- **Lambda SQLite compatibility** — replaced `ON CONFLICT DO UPDATE` with UPDATE-then-INSERT pattern for pre-3.24 compatibility
+- **Failed LLM scores** — now use `None` sentinel instead of defaulting to 50.0 (indistinguishable from neutral). Aggregator skips tickers with both scores failed, uses available sub-score at full weight if one failed.
+- **Parallel per-ticker agents** — refactored sequential for-loop to `ThreadPoolExecutor` with configurable `CONCURRENT_AGENTS` workers (3-5x speedup)
+- **Aggregate boost cap** — signal boosts (PEAD, revision, options, insider, short interest, institutional) now capped at ±10 points aggregate, preventing transient signal stacking from overriding the core LLM assessment
+- **Balance sheet filter** — changed from fail-open to fail-closed with circuit breaker warning at >50% fetch failures
+- **Staleness tracking** — now uses actual NYSE trading days via `exchange_calendars` instead of incrementing by 1 per run
+- **Consistency check** — replaced keyword-based bag-of-words with numeric sub-score divergence detection (flags when news > 70 and research < 40, or vice versa)
+- **Idempotency gate** — Lambda handler checks S3 for existing signals before re-running
+- **Config cache aging** — warns if research params cache is >24h old, falls back to YAML defaults if >7d old
+- **Analyst data caching** — scanner's analyst data passed through LangGraph state to avoid re-fetching in population agents
+
+### Performance Optimizations (Deferred)
+
+1. **S3 price data caching** — the quant filter fetches 1-year OHLCV for all ~900 S&P 500+400 tickers (required for MA200 computation). Plan: cache weekly price data in S3 (matching predictor's `price_cache/` pattern) to avoid re-downloading from yfinance every Monday.
+
+2. **Batch S3 report I/O** — report loading and saving makes 225+ individual S3 calls per run (3 GETs + 6 PUTs per ticker × 25+ tickers). Plan: add consolidated JSON per run alongside per-ticker files, with parallel S3 PUTs via ThreadPoolExecutor.
+
+3. **LangGraph state copying** — nodes return `{**state, ...new_fields}` which copies the full state dict including ~900 price DataFrames. Plan: return only changed keys from memory-intensive nodes (LangGraph reducers handle partial updates via `_take_last`).
+
 ### LLM Agent Gaps
 
 1. **News sentiment quantification is keyword-only** — recurring themes use word frequency, not semantic analysis. "China tariffs" (bearish) and "China market expansion" (bullish) are indistinguishable. Plan: add LLM-based theme sentiment scoring before passing to the news agent — a single Haiku call per theme batch to classify sentiment direction and magnitude.
 
-2. **Consistency check uses numeric divergence** — `check_consistency()` flags when news and research sub-scores diverge by >30 points (e.g., news > 70 and research < 40). This catches gross mismatches reliably. Plan: optionally add a single Haiku call for full semantic consistency check on flagged tickers.
+2. **Semantic consistency check** — `check_consistency()` uses numeric sub-score divergence (news vs research > 30 points). This catches gross mismatches reliably but not nuanced contradictions where both scores are moderate but thesis text contradicts. Plan: optionally add a single Haiku call for full semantic consistency check on flagged tickers.
 
 ### Scanner Pipeline Gaps
 
