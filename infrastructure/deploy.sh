@@ -20,10 +20,7 @@ FUNCTION_MAIN="alpha-engine-research-runner"
 FUNCTION_ALERTS="alpha-engine-research-alerts"
 REGION="${AWS_REGION:-us-east-1}"
 BUCKET="alpha-engine-research"
-RUNTIME="python3.12"
 BUILD_DIR="lambda/package"
-ZIP_ALERTS="lambda-alerts.zip"
-S3_PREFIX="deployments"
 
 # ECR repository for container image deployment
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text --region "$REGION" 2>/dev/null || echo "ACCOUNT_ID")
@@ -177,76 +174,88 @@ build_and_deploy_main() {
   echo "  $FUNCTION_MAIN deployed (container image)."
 }
 
-# ── Alerts function: zip deployment (lightweight) ────────────────────────────
+# ── Alerts function: container image deployment ───────────────────────────────
 
 build_and_deploy_alerts() {
-  echo "=== Building zip package for $FUNCTION_ALERTS ==="
+  echo "=== Building container image for $FUNCTION_ALERTS ==="
 
-  # Clean build dir
-  rm -rf "$BUILD_DIR"
-  mkdir -p "$BUILD_DIR"
+  ECR_REPO_ALERTS="${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com/${FUNCTION_ALERTS}"
 
-  echo "Installing dependencies (linux x86_64, python 3.12)..."
-  BUILD_VENV="/tmp/lambda-build-venv"
-  WHEEL_CACHE="/tmp/lambda-wheels"
-  python3 -m venv "$BUILD_VENV"
-  "$BUILD_VENV/bin/pip" install --upgrade pip --quiet
+  # Build Docker image
+  echo "Building Docker image..."
+  docker build --platform linux/amd64 --provenance=false \
+    -f Dockerfile.alerts \
+    -t "$FUNCTION_ALERTS:latest" .
 
-  # Pre-build pure-Python packages that lack platform-specific wheels
-  rm -rf "$WHEEL_CACHE" && mkdir -p "$WHEEL_CACHE"
-  "$BUILD_VENV/bin/pip" wheel sgmllib3k -w "$WHEEL_CACHE" --quiet
+  # Authenticate with ECR
+  echo "Authenticating with ECR..."
+  aws ecr get-login-password --region "$REGION" | \
+    docker login --username AWS --password-stdin "${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com"
 
-  # flow-doctor wheel
-  FLOW_DOCTOR_DIR="${FLOW_DOCTOR_DIR:-$(dirname "$(pwd)")/flow-doctor}"
-  if [ -d "$FLOW_DOCTOR_DIR" ]; then
-    "$BUILD_VENV/bin/pip" wheel "$FLOW_DOCTOR_DIR" --no-deps -w "$WHEEL_CACHE" --quiet
-  fi
+  # Ensure ECR repository exists
+  aws ecr describe-repositories --repository-names "$FUNCTION_ALERTS" --region "$REGION" &>/dev/null || \
+    aws ecr create-repository --repository-name "$FUNCTION_ALERTS" --region "$REGION" > /dev/null
 
-  grep -vE "^#|^pytest|^python-dotenv|^boto3|^botocore|^s3transfer" requirements.txt \
-    > /tmp/lambda-requirements.txt
-  "$BUILD_VENV/bin/pip" install -r /tmp/lambda-requirements.txt -t "$BUILD_DIR" \
-    --platform manylinux2014_x86_64 \
-    --implementation cp \
-    --python-version 312 \
-    --abi cp312 \
-    --only-binary=:all: \
-    --find-links "$WHEEL_CACHE" \
-    --quiet
-
-  # Strip to reduce size
-  find "$BUILD_DIR" -type d -name "tests" -exec rm -rf {} + 2>/dev/null || true
-  find "$BUILD_DIR" -type d -name "test" -exec rm -rf {} + 2>/dev/null || true
-  find "$BUILD_DIR" -type d -name "*.dist-info" ! -name "curl_cffi-*" -exec rm -rf {} + 2>/dev/null || true
-  find "$BUILD_DIR" -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
-
-  echo "Building $ZIP_ALERTS..."
-  cp lambda/alerts_handler.py "$BUILD_DIR/alerts_handler.py"
-  (cd "$BUILD_DIR" && zip -r "../../$ZIP_ALERTS" . -x "*.pyc" -x "*/__pycache__/*") > /dev/null
-  rm -f "$BUILD_DIR/alerts_handler.py"
-  echo "  Package: $ZIP_ALERTS ($( du -sh "$ZIP_ALERTS" | cut -f1 ))"
+  # Tag and push
+  echo "Pushing image to ECR..."
+  docker tag "$FUNCTION_ALERTS:latest" "$ECR_REPO_ALERTS:latest"
+  docker push "$ECR_REPO_ALERTS:latest"
+  IMAGE_URI="$ECR_REPO_ALERTS:latest"
 
   echo "Deploying $FUNCTION_ALERTS..."
-  S3_KEY="$S3_PREFIX/$ZIP_ALERTS"
-  aws s3 cp "$ZIP_ALERTS" "s3://$BUCKET/$S3_KEY" --region "$REGION" --quiet
+
+  # Build env var args
+  ENV_ARGS=()
+  if [ -n "$LAMBDA_ENV_JSON" ]; then
+    ENV_ARGS=(--environment "$LAMBDA_ENV_JSON")
+  fi
+
   if aws lambda get-function --function-name "$FUNCTION_ALERTS" --region "$REGION" &>/dev/null; then
-    aws lambda update-function-code \
-      --function-name "$FUNCTION_ALERTS" \
-      --s3-bucket "$BUCKET" \
-      --s3-key "$S3_KEY" \
-      --region "$REGION" > /dev/null
+    EXISTING_PKG=$(aws lambda get-function-configuration \
+      --function-name "$FUNCTION_ALERTS" --region "$REGION" \
+      --query "PackageType" --output text 2>/dev/null || echo "Zip")
+
+    if [ "$EXISTING_PKG" = "Image" ]; then
+      aws lambda update-function-code \
+        --function-name "$FUNCTION_ALERTS" \
+        --image-uri "$IMAGE_URI" \
+        --region "$REGION" > /dev/null
+      if [ -n "$LAMBDA_ENV_JSON" ]; then
+        echo "  Waiting for code update to complete..."
+        aws lambda wait function-updated --function-name "$FUNCTION_ALERTS" --region "$REGION" 2>/dev/null || sleep 5
+        aws lambda update-function-configuration \
+          --function-name "$FUNCTION_ALERTS" \
+          --environment "$LAMBDA_ENV_JSON" \
+          --region "$REGION" > /dev/null
+      fi
+    else
+      # Zip → Image migration
+      echo "  Migrating from zip to container image..."
+      aws lambda delete-function --function-name "$FUNCTION_ALERTS" --region "$REGION"
+      sleep 2
+      aws lambda create-function \
+        --function-name "$FUNCTION_ALERTS" \
+        --package-type Image \
+        --code "ImageUri=$IMAGE_URI" \
+        --role "$ROLE_ARN" \
+        --timeout 60 \
+        --memory-size 256 \
+        "${ENV_ARGS[@]}" \
+        --region "$REGION" > /dev/null
+      echo "  NOTE: EventBridge triggers were removed. Re-run setup-eventbridge.sh to restore."
+    fi
   else
     aws lambda create-function \
       --function-name "$FUNCTION_ALERTS" \
-      --runtime "$RUNTIME" \
+      --package-type Image \
+      --code "ImageUri=$IMAGE_URI" \
       --role "$ROLE_ARN" \
-      --handler "alerts_handler.handler" \
-      --code "S3Bucket=$BUCKET,S3Key=$S3_KEY" \
       --timeout 60 \
       --memory-size 256 \
-      --environment "Variables={S3_BUCKET=$BUCKET}" \
+      "${ENV_ARGS[@]}" \
       --region "$REGION" > /dev/null
   fi
-  echo "  $FUNCTION_ALERTS deployed (zip)."
+  echo "  $FUNCTION_ALERTS deployed (container image)."
 }
 
 # ── Dispatch ─────────────────────────────────────────────────────────────────
