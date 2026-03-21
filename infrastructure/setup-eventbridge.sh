@@ -41,7 +41,7 @@ aws events put-rule \
 
 aws events put-targets \
   --rule "$RULE_WEEKLY" \
-  --targets "Id"="1","Arn"="arn:aws:lambda:${REGION}:${ACCOUNT_ID}:function:${FUNCTION_MAIN}","Input"="{\"weekly_run\": true}" \
+  --targets '[{"Id":"1","Arn":"arn:aws:lambda:'"${REGION}"':'"${ACCOUNT_ID}"':function:'"${FUNCTION_MAIN}"'","Input":"{\"weekly_run\": true}"}]' \
   --region "$REGION"
 
 aws lambda add-permission \
@@ -62,7 +62,7 @@ aws events put-rule \
 
 aws events put-targets \
   --rule "$RULE_DAILY" \
-  --targets "Id"="1","Arn"="arn:aws:lambda:${REGION}:${ACCOUNT_ID}:function:${FUNCTION_MAIN}" \
+  --targets '[{"Id":"1","Arn":"arn:aws:lambda:'"${REGION}"':'"${ACCOUNT_ID}"':function:'"${FUNCTION_MAIN}"'"}]' \
   --region "$REGION"
 
 aws lambda add-permission \
@@ -83,7 +83,7 @@ aws events put-rule \
 
 aws events put-targets \
   --rule "$RULE_ALERTS" \
-  --targets "Id"="1","Arn"="arn:aws:lambda:${REGION}:${ACCOUNT_ID}:function:${FUNCTION_ALERTS}" \
+  --targets '[{"Id":"1","Arn":"arn:aws:lambda:'"${REGION}"':'"${ACCOUNT_ID}"':function:'"${FUNCTION_ALERTS}"'"}]' \
   --region "$REGION"
 
 aws lambda add-permission \

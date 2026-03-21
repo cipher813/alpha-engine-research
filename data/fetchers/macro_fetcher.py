@@ -1,7 +1,11 @@
 """
 Macro data fetcher — FRED CSV API (free) + commodity/index prices via yfinance.
 
-OPEN ITEM: Set FRED_API_KEY environment variable before running.
+Fetches:
+  - Core rates & indicators (Fed Funds, treasuries, VIX, unemployment, CPI)
+  - Leading indicators (ISM PMI, Initial Jobless Claims, HY Credit Spread OAS)
+  - Commodities (WTI oil, gold, copper) and index returns (SPY, QQQ, IWM)
+  - Equity breadth (% above 50d/200d MA, advance/decline) from scanner price data
 """
 
 from __future__ import annotations
@@ -11,6 +15,7 @@ import os
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+import numpy as np
 import pandas as pd
 import requests
 import yfinance as yf
@@ -43,14 +48,78 @@ def _fred_latest(series_id: str, api_key: str) -> Optional[float]:
     return None
 
 
+def compute_market_breadth(price_data: dict[str, pd.DataFrame]) -> dict:
+    """
+    Compute equity breadth metrics from ~900 S&P 500+400 stocks.
+
+    Returns dict with:
+      pct_above_50d_ma:  % of stocks trading above their 50-day MA
+      pct_above_200d_ma: % of stocks trading above their 200-day MA
+      advance_decline_ratio: advancers / decliners over last 5 trading days
+      n_stocks: number of stocks with valid data
+    """
+    above_50d = 0
+    total_50d = 0
+    above_200d = 0
+    total_200d = 0
+    advancers = 0
+    decliners = 0
+
+    for ticker, df in price_data.items():
+        if df is None or df.empty or len(df) < 10:
+            continue
+
+        close = df["Close"]
+        current = float(close.iloc[-1])
+
+        # 50-day MA breadth
+        if len(close) >= 50:
+            ma50 = float(close.rolling(50).mean().iloc[-1])
+            total_50d += 1
+            if current > ma50:
+                above_50d += 1
+
+        # 200-day MA breadth
+        if len(close) >= 200:
+            ma200 = float(close.rolling(200).mean().iloc[-1])
+            total_200d += 1
+            if current > ma200:
+                above_200d += 1
+
+        # 5-day advance/decline
+        if len(close) >= 6:
+            five_day_return = current / float(close.iloc[-6]) - 1
+            if five_day_return > 0:
+                advancers += 1
+            elif five_day_return < 0:
+                decliners += 1
+
+    result = {
+        "pct_above_50d_ma": round(above_50d / total_50d * 100, 1) if total_50d > 0 else None,
+        "pct_above_200d_ma": round(above_200d / total_200d * 100, 1) if total_200d > 0 else None,
+        "advance_decline_ratio": round(advancers / max(decliners, 1), 2),
+        "n_stocks": max(total_50d, total_200d),
+    }
+    logger.info(
+        "[breadth] above_50dMA=%.1f%% above_200dMA=%.1f%% A/D=%.2f n=%d",
+        result["pct_above_50d_ma"] or 0,
+        result["pct_above_200d_ma"] or 0,
+        result["advance_decline_ratio"],
+        result["n_stocks"],
+    )
+    return result
+
+
 def fetch_macro_data() -> dict:
     """
     Fetch current macro data from FRED and yfinance.
 
     Returns dict with:
       fed_funds_rate, treasury_2yr, treasury_10yr, yield_curve_slope,
-      vix, unemployment, cpi_yoy, sp500_close, sp500_30d_return,
-      qqq_30d_return, iwm_30d_return, oil_wti, gold, copper
+      vix, unemployment, cpi_yoy,
+      ism_pmi, initial_claims, hy_credit_spread_oas,
+      sp500_close, sp500_30d_return, qqq_30d_return, iwm_30d_return,
+      oil_wti, gold, copper
     """
     api_key = os.environ.get("FRED_API_KEY", "")
     if not api_key:
@@ -64,6 +133,10 @@ def fetch_macro_data() -> dict:
         "vix": "VIXCLS",
         "unemployment": "UNRATE",
         "cpi_yoy": "CPIAUCSL",  # we'll compute YoY below
+        # Leading indicators
+        "ism_pmi": "NAPM",                   # ISM Manufacturing PMI
+        "initial_claims": "ICSA",            # Initial Jobless Claims (weekly, thousands)
+        "hy_credit_spread_oas": "BAMLH0A0HYM2",  # ICE BofA HY OAS (bps)
     }
 
     macro = {}

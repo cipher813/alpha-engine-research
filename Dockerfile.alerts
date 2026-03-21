@@ -1,0 +1,15 @@
+FROM --platform=linux/amd64 public.ecr.aws/lambda/python:3.12
+
+# Minimal deps for alerts handler
+COPY requirements-alerts.txt ${LAMBDA_TASK_ROOT}/
+RUN pip install --no-cache-dir -r requirements-alerts.txt \
+    && rm -rf /root/.cache/pip
+
+# Application code needed by alerts handler
+COPY config/ ${LAMBDA_TASK_ROOT}/config/
+COPY config.py ${LAMBDA_TASK_ROOT}/
+
+# Alerts Lambda handler
+COPY lambda/alerts_handler.py ${LAMBDA_TASK_ROOT}/alerts_handler.py
+
+CMD ["alerts_handler.handler"]
