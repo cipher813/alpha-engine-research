@@ -103,6 +103,22 @@ def handler(event, context):
     early_close = is_early_close(today) if not weekly else False
     run_date = str(today)
 
+    # Idempotency gate: skip if signals already written for this date
+    if not force:
+        try:
+            import boto3
+            from botocore.exceptions import ClientError
+            s3 = boto3.client("s3")
+            s3.head_object(Bucket=os.environ.get("RESEARCH_BUCKET", "alpha-engine-research"),
+                           Key=f"signals/{run_date}/signals.json")
+            print(f"Signals already exist for {run_date} — skipping (use force=True to override)")
+            return {"status": "SKIPPED", "reason": "already_run", "date": run_date}
+        except ClientError as e:
+            if e.response["Error"]["Code"] != "404":
+                print(f"WARNING: S3 idempotency check failed: {e} — proceeding with run")
+        except Exception as e:
+            print(f"WARNING: S3 idempotency check failed: {e} — proceeding with run")
+
     run_type = "weekly population refresh" if weekly else "weekday"
     print(f"Starting alpha-engine-research run for {run_date} ({run_type})"
           + (" [early close]" if early_close else ""))
@@ -152,8 +168,8 @@ def handler(event, context):
         # Write health status on success
         try:
             from health_status import write_health
-            _universe = final_state.get("universe", [])
-            _candidates = final_state.get("buy_candidates", [])
+            _population = final_state.get("new_population", [])
+            _rotations = final_state.get("population_rotation_events", [])
             write_health(
                 bucket="alpha-engine-research",
                 module_name="research",
@@ -161,8 +177,8 @@ def handler(event, context):
                 run_date=run_date,
                 duration_seconds=time.time() - _health_start,
                 summary={
-                    "n_universe": len(_universe) if isinstance(_universe, list) else 0,
-                    "n_candidates": len(_candidates) if isinstance(_candidates, list) else 0,
+                    "n_population": len(_population) if isinstance(_population, list) else 0,
+                    "n_rotations": len(_rotations) if isinstance(_rotations, list) else 0,
                     "market_regime": final_state.get("market_regime", "unknown"),
                 },
             )

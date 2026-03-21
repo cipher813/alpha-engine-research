@@ -1,6 +1,6 @@
 # Alpha Engine Research
 
-Autonomous investment research pipeline for US equities. Maintains rolling investment theses for a configurable universe of stocks, scans the broader S&P 500/400 for buy candidates, and delivers a consolidated morning research brief via email.
+Autonomous investment research pipeline for US equities. Maintains rolling investment theses for a tracked population of ~25 stocks, scans the S&P 500/400 weekly for candidates to rotate in, and delivers a consolidated morning research brief via email.
 
 > Part of [Nous Ergon: Alpha Engine](https://github.com/cipher813/alpha-engine).
 
@@ -8,11 +8,13 @@ Autonomous investment research pipeline for US equities. Maintains rolling inves
 
 ## Role in the System
 
-Research is the signal generator. It produces `signals/{date}/signals.json` — the file that the Predictor and Executor both depend on. Each weekly run builds on prior theses rather than starting from scratch, so reports compound into something substantially richer over time.
+Research is the signal generator. It produces `signals/{date}/signals.json` — the file that the Predictor and Executor both depend on. Runs weekly on Monday (06:00 UTC via EventBridge). Each run builds on prior theses rather than starting from scratch, so reports compound into something substantially richer over time.
+
+The output `universe[]` array contains all tracked population stocks with scores, ratings, and signals. There is no separate buy_candidates category — all stocks are treated uniformly.
 
 ---
 
-## ⚠ Proprietary Source Files
+## Proprietary Source Files
 
 This repo is open-source, but 13 files containing tuned parameters, prompt text, and scoring logic are **gitignored**. You must create these files yourself to run the pipeline. Sample configs and example prompts are provided as starting points.
 
@@ -22,29 +24,32 @@ This repo is open-source, but 13 files containing tuned parameters, prompt text,
 |------|---------|------------|-------------|
 | `config.py` | Centralized configuration loader | Config YAML files | Settings dict for all modules |
 | `graph/research_graph.py` | LangGraph state machine orchestrator | All agent outputs, config | Orchestrated pipeline execution |
-| `agents/news_agent.py` | News sentiment analysis per ticker | Headlines, SEC filings, prior report | News score (0–100), sentiment, catalysts |
-| `agents/research_agent.py` | Analyst research analysis per ticker | Analyst data, price data, prior report | Research score (0–100), thesis |
+| `agents/news_agent.py` | News sentiment analysis per ticker | Headlines, SEC filings, prior report | News score (0-100), sentiment, catalysts |
+| `agents/research_agent.py` | Analyst research analysis per ticker | Analyst data, price data, prior report | Research score (0-100), thesis |
 | `agents/macro_agent.py` | Macro environment and sector analysis | FRED data, prior macro report | Market regime, sector modifiers |
 | `agents/scanner_ranking_agent.py` | Cross-stock candidate ranking | Quant-filtered candidates | Ranked top-N with path classification |
 | `agents/consolidator.py` | Synthesize all analyses into email brief | All agent outputs, scores | Formatted morning brief (markdown) |
-| `scoring/technical.py` | Deterministic technical scoring engine | OHLCV, indicators | Technical score (0–100) per ticker |
-| `scoring/aggregator.py` | Weighted composite + macro modifier | Sub-scores, sector modifiers | Final score (0–100) + rating |
+| `scoring/technical.py` | Deterministic technical scoring engine | OHLCV, indicators | Technical score (0-100) per ticker (feeds Predictor, not research composite) |
+| `scoring/aggregator.py` | Weighted composite + macro modifier | News + research sub-scores, sector modifiers | Final score (0-100) + rating |
 | `scoring/performance_tracker.py` | Signal accuracy tracking | Historical scores, price outcomes | Accuracy metrics, recalibration flags |
 | `data/scanner.py` | Multi-stage quant filter pipeline | S&P 500/400 universe, price data | Shortlisted candidates (~50) |
-| `data/population_selector.py` | Sector-balanced universe management | Current universe, candidates | Updated tracked population |
-| `thesis/updater.py` | Score → rating + thesis summary | Aggregated scores, prior thesis | Rating (BUY/HOLD/SELL), updated thesis |
+| `data/population_selector.py` | Sector-balanced population management | Current population, scored candidates | Updated population with rotation events |
+| `thesis/updater.py` | Score to rating + thesis summary | Aggregated scores, prior thesis | Rating (BUY/HOLD/SELL), updated thesis |
 
 ### What's Included (Infrastructure)
 
 These files are tracked in git and provide the framework:
 
 - `agents/prompt_loader.py` — Loads prompts from `config/prompts/`
-- `data/fetchers/` — Price, news, analyst, macro data fetchers (yfinance, Yahoo RSS, FMP, FRED, EDGAR)
+- `agents/token_guard.py` — Token budget validation before LLM calls
+- `data/fetchers/` — Price, news, analyst, macro, insider, institutional, options, revision data fetchers (yfinance, Yahoo RSS, FMP, FRED, EDGAR)
 - `data/deduplicator.py` — Duplicate headline handling
 - `archive/manager.py` — S3 read/write + SQLite CRUD
-- `emailer/` — Markdown → HTML email + SES delivery
+- `emailer/` — Markdown to HTML email + SES/Gmail delivery
 - `lambda/` — AWS Lambda handlers (main pipeline + intraday alerts)
 - `infrastructure/` — Deploy scripts, IAM policies
+- `health_status.py` — Health monitoring (write/read/check upstream module health)
+- `retry.py` — Exponential backoff retry decorator for resilient API calls
 - `tests/` — Unit tests (no LLM/AWS required)
 - `main.py` — CLI entry point
 
@@ -99,65 +104,68 @@ python3 main.py
 ## Architecture
 
 ```
-Config Universe + Active Buy Candidates
-         │
-         ▼
-Data Fetchers (price/news/analyst/macro — parallel)
-         │
-         ├── BRANCH A: Universe Pipeline (fan-out per ticker)
-         │      ├── Technical Score Engine (no LLM)
-         │      ├── News Agent (Haiku, per ticker)
-         │      ├── Research Agent (Haiku, per ticker)
-         │      └── Macro Agent (Sonnet, global)
-         │
-         └── BRANCH B: Scanner Pipeline
-                ├── Stage 1: Quant Filter (~900 → ~50, no LLM)
-                ├── Stage 2: Data Enrichment (no LLM)
-                ├── Stage 3: Scanner Ranking Agent (1 Sonnet call)
-                └── Stage 4: Deep Analysis (Haiku fan-out)
-         │
-         ▼ [fan-in join]
-Score Aggregator (weighted composite + per-sector macro modifier)
-         │
-         ▼
-Thesis Updater + Candidate Evaluator (rule-based rotation)
-         │
-         ▼
-Consolidator Agent (Sonnet, email body)
-         │
-         ▼
-Archive Writer (S3 + SQLite) → Email Sender (AWS SES)
+Data Fetchers (1y OHLCV for ~900 tickers, macro data — parallel batches)
+         |
+         v
+Scanner Pipeline (sequential stages)
+    Stage 1: Quant Filter (~900 → ~60, no LLM — RSI, MACD, MA200, ATR%)
+    Stage 2: Data Enrichment + Balance Sheet Filter (~60 → ~50, fail-closed)
+    Stage 3: Scanner Ranking Agent (1 Sonnet call, ~50 → 35)
+         |
+         v
+Population Agents (per-ticker, parallel via ThreadPoolExecutor)
+    +-- Macro Agent (1 Sonnet call, global regime + sector ratings)
+    +-- Per-ticker fan-out (35 tickers × 2 agents each):
+         +-- News Agent (Haiku) — sentiment, catalysts, thesis update
+         +-- Research Agent (Haiku) — analyst consensus, thesis update
+         |
+         v
+Score Aggregator (news + research weighted composite + macro shift + signal boosts ±10 cap)
+         |
+         v
+Thesis Updater → Population Evaluator (sector-balanced rotation, 10-40% weekly turnover)
+         |
+         v
+Consolidator Agent (Sonnet, email body) → Archive Writer (S3 + SQLite) → Email Sender
 ```
 
 ---
 
 ## How Scoring Works
 
-Each stock receives a composite attractiveness score (0–100) blending sub-scores from multiple sources, adjusted by a per-sector macro modifier:
+Each stock receives a composite attractiveness score (0-100) blending two sub-scores adjusted by a per-sector macro modifier:
 
 ```
-Base  = weighted_sum(sub_scores)    — weights configurable in scoring.yaml
-Score = Base + macro_shift          — clipped to [0, 100]
+Base   = (news_score * w_news) + (research_score * w_research)
+Shift  = macro_shift + signal_boosts
+Score  = Base + Shift    — signal_boosts capped at ±10 pts, final clipped to [0, 100]
+
+Signal boosts: PEAD (±5), analyst revisions (±3), options flow (±4),
+               insider activity (±5), short interest (±4), institutional (±3)
+               → individual caps preserved, aggregate capped at ±10 pts
 ```
 
-The macro modifier uses an **additive bounded shift** rather than a multiplier — a caution regime nudges scores down a few points rather than compressing all scores uniformly.
+Scoring weights are auto-tuned weekly by the backtester via `config/scoring_weights.json` on S3.
 
-- **Technical score** (no LLM): Deterministic scoring from RSI, MACD, price vs moving averages, momentum. Supports regime-aware thresholds.
+The macro modifier uses an **additive bounded shift** rather than a multiplier — a caution regime nudges scores down a few points rather than compressing all scores uniformly. Six additional signal boosts (PEAD, analyst revisions, options flow, insider activity, short interest, 13F institutional) are applied on top of the base composite, individually capped and aggregate-capped at ±10 points to prevent transient signal stacking from dominating the core LLM assessment.
+
 - **Per-sector macro modifier**: The Macro Agent outputs sector-specific multipliers because macro conditions affect sectors differently.
 - **Ratings**: BUY / HOLD / SELL based on configurable score thresholds.
 - **Predictor veto**: High-confidence DOWN predictions from the GBM predictor can override BUY signals.
+
+Technical analysis (RSI, MACD, momentum) is handled by the Predictor (GBM features) and Executor (ATR stops), not the research composite.
 
 ---
 
 ## Market Scanner
 
-A multi-stage pipeline runs in parallel with the universe pipeline:
+A multi-stage pipeline runs before the population analysis:
 
-1. **Quant Filter** (no LLM): S&P 500+400 → shortlist via configurable screening criteria
-2. **Data Enrichment** (no LLM): Fetch headlines + analyst data for shortlisted stocks
-3. **Scanner Ranking** (1 Sonnet call): Rank all candidates simultaneously → top N
+1. **Quant Filter** (no LLM): S&P 500+400 to shortlist via volume, volatility (ATR%), and balance sheet screens (D/E, current ratio — fail-closed: candidates with unavailable financial data are excluded)
+2. **Data Enrichment** (no LLM): Fetch headlines, analyst data, insider activity, options flow for shortlisted stocks
+3. **Scanner Ranking** (1 Sonnet call): Rank all candidates simultaneously via momentum and deep-value paths
 4. **Deep Analysis** (Haiku fan-out): News + research agents for each candidate
-5. **Candidate Evaluator** (rule-based): Tiered rotation logic with tenure-based thresholds
+5. **Population Evaluator** (rule-based): Sector-balanced rotation with min 10% / max ~40% weekly turnover, 2-week tenure protection, and immediate removal on thesis collapse (score < 40)
 
 ---
 
@@ -165,8 +173,8 @@ A multi-stage pipeline runs in parallel with the universe pipeline:
 
 | File | Contents |
 |------|----------|
-| `config/universe.yaml` | Universe size, rating thresholds, scanner settings, rotation tiers, LLM models |
-| `config/scoring.yaml` | Technical scoring thresholds, composite weights, macro modifier params |
+| `config/universe.yaml` | Population size, rating thresholds, scanner settings, rotation tiers, LLM models |
+| `config/scoring.yaml` | Composite weights (news/research), macro modifier params |
 | `config/prompts/*.txt` | LLM agent prompts (scoring baselines, thesis protocol, output format) |
 | `.env` | API keys (Anthropic, FMP, FRED), AWS config, email settings |
 
@@ -182,10 +190,14 @@ Sample/example versions are provided in the repo. Copy them and tune all paramet
 | Technical indicators | Computed from price data | Free |
 | News headlines | Yahoo Finance RSS | Free |
 | SEC 8-K filings | EDGAR full-text search API | Free |
+| SEC Form 4 insider transactions | EDGAR (EdgarTools) | Free |
+| 13F institutional holdings | SEC EDGAR | Free |
 | Analyst consensus | Financial Modeling Prep (FMP) | Free tier |
+| EPS revision trends | Financial Modeling Prep (FMP) | Free tier |
+| Options chain (IV, put/call) | yfinance | Free |
 | Macro data | FRED CSV API | Free |
 | LLM | Anthropic Claude API | ~$5/month |
-| Email | AWS SES | Free tier |
+| Email | AWS SES + Gmail SMTP | Free tier |
 | Storage | AWS S3 | ~$0.50/month |
 
 ---
@@ -194,22 +206,27 @@ Sample/example versions are provided in the repo. Copy them and tune all paramet
 
 ```
 alpha-engine-research/
-├── main.py                           # CLI entry point
-├── config/
-│   ├── universe.sample.yaml          # Template — safe defaults
-│   ├── scoring.sample.yaml           # Template — safe defaults
-│   └── prompts.example/              # Template prompts
-├── agents/
-│   └── prompt_loader.py              # Loads prompts from config/prompts/
-├── data/
-│   ├── fetchers/                     # Price, news, analyst, macro data fetchers
-│   └── deduplicator.py              # Duplicate headline handling
-├── archive/
-│   └── manager.py                    # S3 read/write + SQLite CRUD
-├── emailer/                          # Markdown → HTML + SES delivery
-├── lambda/                           # AWS Lambda handlers
-├── infrastructure/                   # Deploy scripts, IAM policies
-└── tests/                            # Unit tests (no LLM/AWS required)
++-- main.py                           # CLI entry point
++-- health_status.py                  # Health monitoring (write/read/check upstream)
++-- retry.py                          # Exponential backoff retry decorator
++-- config/
+|   +-- universe.sample.yaml          # Template — safe defaults
+|   +-- scoring.sample.yaml          # Template — safe defaults
+|   +-- prompts.example/              # Template prompts
++-- agents/
+|   +-- prompt_loader.py              # Loads prompts from config/prompts/
+|   +-- token_guard.py                # Token budget validation
++-- data/
+|   +-- fetchers/                     # price, news, analyst, macro, insider,
+|   |                                 # institutional, options, revision fetchers
+|   +-- deduplicator.py              # Duplicate headline handling
++-- scoring/                          # (proprietary) aggregator, technical, performance tracker
++-- archive/
+|   +-- manager.py                    # S3 read/write + SQLite CRUD
++-- emailer/                          # Markdown to HTML + SES/Gmail delivery
++-- lambda/                           # AWS Lambda handlers (main + alerts)
++-- infrastructure/                   # Deploy scripts, IAM policies
++-- tests/                            # Unit tests (no LLM/AWS required)
 ```
 
 ---
@@ -226,56 +243,33 @@ Tests cover scoring engine, agent JSON extraction, scanner rotation logic, archi
 
 ## Opportunities for Improvement
 
-### Data Source Gaps
-
-| Data Source | Alpha Impact | Cost | Notes |
-|-------------|-------------|------|-------|
-| Options put/call ratio & IV skew | HIGH — validates/contradicts analyst sentiment | Free (yfinance options chain) | Orthogonal to current momentum-heavy signals |
-| Earnings revision trends (week-over-week EPS consensus) | HIGH — "revisions up" is strong bullish signal | Free (diff FMP weekly) | 4-week revision direction as feature |
-| SEC Form 4 insider transactions | MEDIUM — cluster buying is 6-12 month signal | Free (EdgarTools) | 3+ C-level buys within 30 days |
-| Short interest & borrow rates | MEDIUM — crowded trade risk flag | Free (finviz scrape) | |
-| Leading indicators (ISM PMI, jobless claims) | MEDIUM — leads equity drawdowns 3-6 months | Free (FRED) | |
-| Credit spreads (HY-Treasury OAS) | MEDIUM — risk-on/off indicator | Free (FRED) | |
-| Equity breadth (advance/decline, % above 50d MA) | MEDIUM — confirms/contradicts SPY price | Free (finviz scrape) | |
-| 13F institutional holdings changes | LOW — quarterly lag reduces timeliness | Free (SEC EDGAR) | |
+All originally identified data source gaps have been implemented — see `data/fetchers/` for the full set (insider, institutional, options, revision, short interest, credit spreads, equity breadth).
 
 ### LLM Agent Gaps
 
-1. **Market regime definition is subjective** — macro agent uses bull/neutral/caution/bear labels with no quantitative thresholds. Different runs may classify the same data differently. Plan: define regimes mathematically (e.g., Bull: VIX < 15 AND SPY 30d return > 0; Bear: VIX > 25 OR SPY 30d return < -5%). Supplement LLM judgment with a quantitative floor.
+1. **News sentiment quantification is keyword-only** — recurring themes use word frequency, not semantic analysis. "China tariffs" (bearish) and "China market expansion" (bullish) are indistinguishable. Plan: add LLM-based theme sentiment scoring before passing to the news agent — a single Haiku call per theme batch to classify sentiment direction and magnitude.
 
-2. **News sentiment quantification is keyword-only** — recurring themes use word frequency, not semantic analysis. "China tariffs" (bearish) and "China market expansion" (bullish) are indistinguishable. Plan: add LLM-based theme sentiment scoring before passing to the news agent — a single Haiku call per theme batch to classify sentiment direction and magnitude.
-
-3. **Prior report length unbounded** — if accumulated thesis is 5000 words, agent's output budget is consumed by context. Plan: truncate prior_report to most recent 500 words or last 3 months of content before injecting into agent prompts.
-
-4. **Consistency check uses regex, not semantics** — `check_consistency()` in aggregator.py uses keyword matching. "Bullish but headwinds may resurface" gets bullish_hits=1, bearish_hits=1, classified as consistent. Plan: use LLM-based consistency check (single Haiku call) or require keyword dominance ratio > 2:1.
+2. **Consistency check uses numeric divergence** — `check_consistency()` flags when news and research sub-scores diverge by >30 points (e.g., news > 70 and research < 40). This catches gross mismatches reliably. Plan: optionally add a single Haiku call for full semantic consistency check on flagged tickers.
 
 ### Scanner Pipeline Gaps
 
-1. **No volatility screen** — high-volatility stocks pass if volume threshold met. Plan: add realized volatility filter (e.g., reject if 20d vol > 3x sector median) to prevent scanner from surfacing names with outsized risk.
+1. **No per-sector candidate cap in scanner** — the population evaluator enforces sector slots, but the scanner's quant filter could surface 50 Technology stocks. Plan: add configurable per-sector candidate cap (e.g., max 30% from any single sector) in the quant filter stage.
 
-2. **No debt/balance sheet filter** — near-default companies can pass scanner. Plan: add debt-to-equity or interest coverage screen via FMP fundamentals data to filter out financially distressed names.
+2. **Deep value path could be stronger** — currently checks RSI < 35 + analyst consensus + configurable ATR threshold. Plan: add price-to-book, free cash flow yield, or distance from 52-week low as confirming signals.
 
-3. **No sector concentration limit in candidates** — all 60 candidates could be Technology. Plan: add configurable per-sector candidate cap (e.g., max 30% from any single sector) in the quant filter stage.
-
-4. **Deep value path weak** — only checks RSI < 35 + single analyst "Buy" rating. Plan: strengthen with additional value signals — price-to-book, free cash flow yield, or distance from 52-week low — and require 2+ confirming signals.
-
-5. **No sub-sector (industry group) analysis** — semiconductors and SaaS treated identically as "Technology." Plan: use GICS sub-industry from Wikipedia tables (already fetched) to provide industry-level context to agents and apply sub-sector concentration limits.
+3. **No sub-sector (industry group) analysis** — semiconductors and SaaS treated identically as "Technology." Plan: use GICS sub-industry data to provide industry-level context to agents and apply sub-sector concentration limits. *Dependency: requires GICS sub-industry data source (Wikipedia tables or paid provider).*
 
 ### Thesis Management
 
-1. **Stale thesis detection exists but is never surfaced** — `stale_days` counter runs but no visual "STALE" badge appears in output or email. Plan: add stale badge to the morning brief and signals.json output when `stale_days >= threshold`.
-
-2. **No forced thesis refresh trigger** — stale theses accumulate without action. Plan: when `stale_days >= 2 * threshold`, force a full thesis rewrite by clearing the prior report and running agents with a "fresh analysis" prompt override.
-
-3. **No archive expiration** — 6-month-old wrong theses remain in archive indefinitely. Plan: add TTL-based archive cleanup that moves theses older than a configurable max age (e.g., 6 months) to a cold archive prefix in S3.
+1. **No archive expiration** — old wrong theses remain in archive indefinitely. Plan: add TTL-based archive cleanup that moves theses older than a configurable max age (e.g., 6 months) to a cold archive prefix in S3.
 
 ### Survivorship Bias
 
-1. **Wikipedia S&P constituents are current-only** — delisted stocks disappear from universe retroactively. Plan: maintain a local append-only constituents log that tracks additions and removals, so historical backtests use point-in-time membership.
+1. **Wikipedia S&P constituents are current-only** — delisted stocks disappear from universe retroactively. Plan: maintain a local append-only constituents log that tracks additions and removals, so historical backtests use point-in-time membership. *Dependency: no free authoritative source for historical S&P constituent changes — S&P Global charges for this data.*
 
 2. **No tracking of removed stocks** — stocks removed from S&P 500/400 and their subsequent performance are invisible. Plan: when a ticker drops off the constituents list, log the removal date and continue tracking price for 90 days to measure post-removal drift.
 
-3. **Price floor ($10) creates look-ahead bias** — recovered penny stocks are included only after recovery. Plan: apply the price floor at the point-in-time of each signal date rather than at scan time, or accept the bias as a feature (we genuinely don't want to trade sub-$10 names).
+3. **Price floor creates look-ahead bias** — recovered penny stocks are included only after recovery. Plan: apply the price floor at the point-in-time of each signal date rather than at scan time, or accept the bias as a feature (we genuinely don't want to trade sub-$10 names).
 
 ---
 

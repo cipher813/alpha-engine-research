@@ -199,8 +199,14 @@ class TestAggregator:
         assert score_to_rating(39) == "SELL"
         assert score_to_rating(35) == "SELL"
 
-    def test_consistency_flag_bullish_text_low_score(self):
-        assert check_consistency("This is a strong buy with huge upside bullish catalyst", 30) is True
+    def test_consistency_flag_divergent_scores(self):
+        # News bullish (80), research bearish (30) → flag inconsistency
+        assert check_consistency(80, 30, 55) is True
 
-    def test_consistency_flag_no_flag_aligned(self):
-        assert check_consistency("Stock has strong buy rating with upside", 75) is False
+    def test_consistency_flag_aligned_scores(self):
+        # Both scores similar → no flag
+        assert check_consistency(70, 65, 67) is False
+
+    def test_consistency_flag_none_scores(self):
+        # One score missing → no flag (can't detect inconsistency)
+        assert check_consistency(None, 65, 65) is False

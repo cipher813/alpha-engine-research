@@ -426,26 +426,32 @@ class ArchiveManager:
         """
         if not self.db_conn:
             return
-        self.db_conn.execute(
-            """INSERT INTO predictor_outcomes
-               (symbol, prediction_date, predicted_direction, prediction_confidence,
-                p_up, p_flat, p_down, score_modifier_applied, actual_5d_return, correct_5d)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-               ON CONFLICT(symbol, prediction_date) DO UPDATE SET
-                 actual_5d_return = excluded.actual_5d_return,
-                 correct_5d = excluded.correct_5d""",
-            (
-                symbol, prediction_date,
-                outcome.get("predicted_direction"),
-                outcome.get("prediction_confidence"),
-                outcome.get("p_up"),
-                outcome.get("p_flat"),
-                outcome.get("p_down"),
-                outcome.get("score_modifier_applied", 0.0),
-                outcome.get("actual_5d_return"),
-                outcome.get("correct_5d"),
-            ),
+        # UPDATE-then-INSERT pattern (Lambda SQLite is pre-3.24, no ON CONFLICT DO UPDATE)
+        cur = self.db_conn.execute(
+            """UPDATE predictor_outcomes
+               SET actual_5d_return = ?, correct_5d = ?
+               WHERE symbol = ? AND prediction_date = ?""",
+            (outcome.get("actual_5d_return"), outcome.get("correct_5d"),
+             symbol, prediction_date),
         )
+        if cur.rowcount == 0:
+            self.db_conn.execute(
+                """INSERT INTO predictor_outcomes
+                   (symbol, prediction_date, predicted_direction, prediction_confidence,
+                    p_up, p_flat, p_down, score_modifier_applied, actual_5d_return, correct_5d)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    symbol, prediction_date,
+                    outcome.get("predicted_direction"),
+                    outcome.get("prediction_confidence"),
+                    outcome.get("p_up"),
+                    outcome.get("p_flat"),
+                    outcome.get("p_down"),
+                    outcome.get("score_modifier_applied", 0.0),
+                    outcome.get("actual_5d_return"),
+                    outcome.get("correct_5d"),
+                ),
+            )
 
     def write_prices_json(self, run_date: str, prices: dict) -> None:
         """Write daily OHLCV price snapshot to S3 for backtester consumption.
@@ -578,13 +584,19 @@ class ArchiveManager:
     def upsert_news_hashes(self, ticker: str, new_hashes: list[str], today: str) -> None:
         if not self.db_conn:
             return
+        # UPDATE-then-INSERT pattern (Lambda SQLite is pre-3.24, no ON CONFLICT DO UPDATE)
         for h in new_hashes:
-            self.db_conn.execute(
-                """INSERT INTO news_article_hashes (symbol, article_hash, first_seen, mention_count)
-                   VALUES (?, ?, ?, 1)
-                   ON CONFLICT(symbol, article_hash) DO UPDATE SET mention_count = mention_count + 1""",
-                (ticker, h, today),
+            cur = self.db_conn.execute(
+                """UPDATE news_article_hashes SET mention_count = mention_count + 1
+                   WHERE symbol = ? AND article_hash = ?""",
+                (ticker, h),
             )
+            if cur.rowcount == 0:
+                self.db_conn.execute(
+                    """INSERT INTO news_article_hashes (symbol, article_hash, first_seen, mention_count)
+                       VALUES (?, ?, ?, 1)""",
+                    (ticker, h, today),
+                )
 
     def load_news_hashes(self, ticker: str) -> set[str]:
         if not self.db_conn:
