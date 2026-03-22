@@ -127,8 +127,13 @@ def handler(event, context):
 
     # Import pipeline (deferred to reduce cold-start time)
     try:
-        from graph.research_graph import build_graph, create_initial_state
+        from config import ARCHITECTURE_VERSION
         from archive.manager import ArchiveManager
+
+        if ARCHITECTURE_VERSION == "v2_sector_teams":
+            from graph.research_graph_v2 import build_graph_v2 as build_graph, create_initial_state_v2 as create_initial_state
+        else:
+            from graph.research_graph import build_graph, create_initial_state
 
         # ── Validate required env vars (fail fast, not 30 min in) ─────
         from config import ANTHROPIC_API_KEY, FMP_API_KEY, FRED_API_KEY

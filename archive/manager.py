@@ -248,6 +248,42 @@ class ArchiveManager:
             score_in    REAL,
             score_out   REAL
         );
+
+        CREATE TABLE IF NOT EXISTS stock_archive (
+            id              INTEGER PRIMARY KEY,
+            ticker          TEXT NOT NULL UNIQUE,
+            sector          TEXT NOT NULL,
+            sector_team     TEXT NOT NULL,
+            first_analyzed  TEXT NOT NULL,
+            last_analyzed   TEXT NOT NULL,
+            times_in_population INTEGER DEFAULT 0,
+            current_status  TEXT DEFAULT 'inactive'
+        );
+
+        CREATE TABLE IF NOT EXISTS thesis_history (
+            id              INTEGER PRIMARY KEY,
+            ticker          TEXT NOT NULL,
+            run_date        TEXT NOT NULL,
+            author          TEXT NOT NULL,
+            thesis_type     TEXT NOT NULL,
+            bull_case       TEXT,
+            bear_case       TEXT,
+            catalysts       TEXT,
+            risks           TEXT,
+            conviction      INTEGER,
+            score           REAL,
+            rationale       TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS analyst_resources (
+            id              INTEGER PRIMARY KEY,
+            ticker          TEXT NOT NULL,
+            run_date        TEXT NOT NULL,
+            agent           TEXT NOT NULL,
+            resource_type   TEXT NOT NULL,
+            resource_detail TEXT,
+            influence       TEXT DEFAULT 'supporting'
+        );
         """)
         # ── Column migrations (existing DBs may lack newer columns) ──────────
         migrations = [
@@ -724,6 +760,111 @@ class ArchiveManager:
                 event.get("score_out"),
             ),
         )
+
+    # ── Stock Archive + Thesis History + Analyst Resources ─────────────────────
+
+    def save_stock_archive(
+        self, ticker: str, sector: str, team_id: str, run_date: str,
+        status: str = "active",
+    ) -> None:
+        """Upsert the stock_archive record (UPDATE-then-INSERT for Lambda compat)."""
+        conn = self.db_conn
+        cur = conn.execute(
+            "UPDATE stock_archive SET last_analyzed=?, current_status=? WHERE ticker=?",
+            (run_date, status, ticker),
+        )
+        if cur.rowcount == 0:
+            conn.execute(
+                """INSERT INTO stock_archive
+                   (ticker, sector, sector_team, first_analyzed, last_analyzed,
+                    times_in_population, current_status)
+                   VALUES (?, ?, ?, ?, ?, 0, ?)""",
+                (ticker, sector, team_id, run_date, run_date, status),
+            )
+        conn.commit()
+
+    def increment_population_count(self, ticker: str) -> None:
+        """Increment times_in_population for a stock entering the population."""
+        self.db_conn.execute(
+            "UPDATE stock_archive SET times_in_population = times_in_population + 1 WHERE ticker=?",
+            (ticker,),
+        )
+        self.db_conn.commit()
+
+    def save_thesis_history(
+        self,
+        ticker: str,
+        run_date: str,
+        author: str,
+        thesis_type: str,
+        thesis: dict,
+    ) -> None:
+        """Save a thesis history record. Author format: 'team:technology', 'ic:cio', etc."""
+        self.db_conn.execute(
+            """INSERT INTO thesis_history
+               (ticker, run_date, author, thesis_type, bull_case, bear_case,
+                catalysts, risks, conviction, score, rationale)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                ticker,
+                run_date,
+                author,
+                thesis_type,
+                thesis.get("bull_case", ""),
+                thesis.get("bear_case", ""),
+                json.dumps(thesis.get("catalysts", [])),
+                json.dumps(thesis.get("risks", [])),
+                thesis.get("conviction"),
+                thesis.get("score"),
+                thesis.get("rationale", ""),
+            ),
+        )
+        self.db_conn.commit()
+
+    def save_ic_decision(self, run_date: str, decision: dict) -> None:
+        """Save an IC decision as a thesis_history record."""
+        self.save_thesis_history(
+            ticker=decision["ticker"],
+            run_date=run_date,
+            author="ic:cio",
+            thesis_type=f"ic_{decision.get('decision', 'unknown').lower()}",
+            thesis={
+                "bull_case": decision.get("team_recommendation", ""),
+                "bear_case": "",
+                "catalysts": [],
+                "risks": [],
+                "conviction": decision.get("conviction"),
+                "score": decision.get("score"),
+                "rationale": decision.get("cio_rationale", ""),
+            },
+        )
+
+    def load_stock_history(self, ticker: str) -> list[dict]:
+        """Load all thesis_history records for a ticker (for re-entry context)."""
+        cur = self.db_conn.execute(
+            "SELECT * FROM thesis_history WHERE ticker=? ORDER BY run_date DESC",
+            (ticker,),
+        )
+        cols = [d[0] for d in cur.description]
+        return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+    def save_analyst_resource(
+        self,
+        ticker: str,
+        run_date: str,
+        agent: str,
+        resource_type: str,
+        resource_detail: str = "",
+        influence: str = "supporting",
+    ) -> None:
+        """Track which data sources an agent used for a given ticker."""
+        self.db_conn.execute(
+            """INSERT INTO analyst_resources
+               (ticker, run_date, agent, resource_type, resource_detail, influence)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (ticker, run_date, agent, resource_type, resource_detail, influence),
+        )
+        self.db_conn.commit()
 
     def close(self) -> None:
         if self.db_conn:
