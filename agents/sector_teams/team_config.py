@@ -5,6 +5,8 @@ Sector team configuration — GICS-to-team mapping, slot allocation, and team pa
 Each team has a Quant Analyst and Qualitative Analyst.
 """
 
+from __future__ import annotations
+
 import math
 from typing import Optional
 
@@ -13,32 +15,36 @@ from typing import Optional
 # Keys must match the sector names produced by price_fetcher.fetch_sp500_sp400_with_sectors().
 
 SECTOR_TEAM_MAP: dict[str, str] = {
-    "Information Technology": "technology",
-    "Technology": "technology",  # alternate label
-    "Health Care": "healthcare",
-    "Healthcare": "healthcare",  # alternate label
-    "Financials": "financials",
-    "Financial Services": "financials",  # alternate label
+    # Wikipedia labels (primary — what fetch_sp500_sp400_with_sectors returns)
+    "Technology": "technology",
+    "Healthcare": "healthcare",
+    "Financial": "financials",
     "Industrials": "industrials",
-    "Materials": "industrials",  # merged with Industrials
-    "Basic Materials": "industrials",  # alternate label
-    "Consumer Cyclical": "consumer",  # yfinance label for Consumer Discretionary
+    "Materials": "industrials",
     "Consumer Discretionary": "consumer",
-    "Consumer Defensive": "consumer",  # yfinance label for Consumer Staples
     "Consumer Staples": "consumer",
     "Communication Services": "consumer",
     "Energy": "defensives",
     "Utilities": "defensives",
     "Real Estate": "defensives",
+    # Alternate labels (yfinance, GICS official, etc.)
+    "Information Technology": "technology",
+    "Health Care": "healthcare",
+    "Financials": "financials",
+    "Financial Services": "financials",
+    "Basic Materials": "industrials",
+    "Consumer Cyclical": "consumer",
+    "Consumer Defensive": "consumer",
 }
 
-# Inverse mapping: team_id → list of GICS sector names (canonical names only)
+# Inverse mapping: team_id → list of sector names (include all known variants)
 TEAM_SECTORS: dict[str, list[str]] = {
-    "technology": ["Information Technology"],
-    "healthcare": ["Health Care"],
-    "financials": ["Financials"],
-    "industrials": ["Industrials", "Materials"],
-    "consumer": ["Consumer Discretionary", "Consumer Staples", "Communication Services"],
+    "technology": ["Technology", "Information Technology"],
+    "healthcare": ["Healthcare", "Health Care"],
+    "financials": ["Financial", "Financials", "Financial Services"],
+    "industrials": ["Industrials", "Materials", "Basic Materials"],
+    "consumer": ["Consumer Discretionary", "Consumer Staples", "Communication Services",
+                  "Consumer Cyclical", "Consumer Defensive"],
     "defensives": ["Energy", "Utilities", "Real Estate"],
 }
 

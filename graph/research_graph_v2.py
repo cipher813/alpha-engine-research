@@ -27,7 +27,8 @@ import logging
 from datetime import datetime, timezone
 from typing import Annotated, Any, Optional, TypedDict
 
-from langgraph.graph import END, StateGraph, Send
+from langgraph.graph import END, StateGraph
+from langgraph.types import Send
 
 from config import (
     POPULATION_CFG,
@@ -553,7 +554,7 @@ def archive_writer_v2(state: ResearchStateV2) -> dict:
     # Save rotation events
     for event in state.get("population_rotation_events", []):
         try:
-            am.save_population_history(run_date, event)
+            am.log_rotation_event(event, run_date)
         except Exception as e:
             logger.warning("Failed to save rotation event: %s", e)
 
@@ -577,6 +578,7 @@ def archive_writer_v2(state: ResearchStateV2) -> dict:
 def email_sender_v2(state: ResearchStateV2) -> dict:
     """Send the morning email."""
     from emailer.sender import send_email
+    from config import EMAIL_RECIPIENTS, EMAIL_SENDER
 
     logger.info("[v2:email_sender] starting")
     consolidated = state.get("consolidated_report", "")
@@ -585,7 +587,13 @@ def email_sender_v2(state: ResearchStateV2) -> dict:
     if consolidated:
         try:
             subject = f"Alpha Engine Research — {run_date} (v2)"
-            send_email(subject=subject, body_md=consolidated, run_date=run_date)
+            send_email(
+                subject=subject,
+                html_body=f"<pre>{consolidated}</pre>",
+                plain_body=consolidated,
+                recipients=EMAIL_RECIPIENTS,
+                sender=EMAIL_SENDER,
+            )
             return {"email_sent": True}
         except Exception as e:
             logger.error("Email send failed: %s", e)

@@ -26,7 +26,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from dotenv import load_dotenv
-load_dotenv()
+load_dotenv(override=True)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -83,26 +83,35 @@ def main():
     perf_summary = run_performance_checks(archive.db_conn, run_date)
     print(f"Performance summary: {perf_summary}")
 
-    # Build and run graph
-    from graph.research_graph import build_graph, create_initial_state
+    # Build and run graph — respects architecture_version in universe.yaml
+    from config import ARCHITECTURE_VERSION
+    print(f"Architecture version: {ARCHITECTURE_VERSION}")
+
+    if ARCHITECTURE_VERSION == "v2_sector_teams":
+        from graph.research_graph_v2 import build_graph_v2 as build_graph, create_initial_state_v2 as create_initial_state
+    else:
+        from graph.research_graph import build_graph, create_initial_state
+
     graph = build_graph()
     state = create_initial_state(
         run_date=run_date,
         archive_manager=archive,
         is_early_close=early_close,
     )
-    state["performance_summary"] = perf_summary
+
+    if ARCHITECTURE_VERSION != "v2_sector_teams":
+        state["performance_summary"] = perf_summary
 
     if args.dry_run:
-        # Monkey-patch send_email in the graph module (graph imports it directly via
-        # "from emailer.sender import send_email", so we must patch the reference there)
-        import graph.research_graph as graph_mod
-        graph_mod.send_email = lambda **kwargs: (print("\n=== EMAIL BODY ===\n" + kwargs.get("plain_body", "")), True)[1]
+        if ARCHITECTURE_VERSION == "v2_sector_teams":
+            import graph.research_graph_v2 as graph_mod
+            graph_mod.email_sender_v2 = lambda state: {"email_sent": False}
+        else:
+            import graph.research_graph as graph_mod
+            graph_mod.send_email = lambda **kwargs: (print("\n=== EMAIL BODY ===\n" + kwargs.get("plain_body", "")), True)[1]
 
-    if args.skip_scanner:
-        # Monkey-patch scanner to return empty
+    if args.skip_scanner and ARCHITECTURE_VERSION != "v2_sector_teams":
         import graph.research_graph as graph_mod
-        original_scanner = graph_mod.run_scanner_pipeline
         def _skip_scanner(state):
             print("  [scanner skipped]")
             return {"scanner_filtered": [], "scanner_ranked": [],
