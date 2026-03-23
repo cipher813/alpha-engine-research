@@ -52,7 +52,14 @@ def fetch_revisions(
 
     # Fetch current estimates
     current_estimates: dict[str, float] = {}
+    from data.fetchers.analyst_fetcher import fmp_budget_exhausted
     for ticker in tickers:
+        if fmp_budget_exhausted():
+            log.info("FMP budget exhausted — skipping remaining EPS estimates (%d/%d done)",
+                     len(current_estimates), len(tickers))
+            for t in tickers:
+                current_estimates.setdefault(t, 0.0)
+            break
         try:
             data = _fmp_get(f"analyst-estimates/{ticker}", params={"limit": 1})
             if isinstance(data, list) and data:

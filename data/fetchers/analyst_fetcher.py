@@ -39,6 +39,11 @@ class FMPDailyLimitError(RuntimeError):
     pass
 
 
+def fmp_budget_exhausted() -> bool:
+    """Check if the FMP daily budget has been used up."""
+    return _fmp_daily_count >= _FMP_DAILY_LIMIT
+
+
 def _fmp_get(endpoint: str, params: Optional[dict] = None, base: str = _FMP_STABLE) -> dict | list:
     global _fmp_last_call, _fmp_daily_count
     api_key = os.environ.get("FMP_API_KEY", "")
@@ -84,6 +89,7 @@ def _fmp_get(endpoint: str, params: Optional[dict] = None, base: str = _FMP_STAB
 def fetch_analyst_consensus(ticker: str) -> dict:
     """
     Fetch analyst consensus rating, mean price target, and number of analysts.
+    Returns empty result immediately if FMP daily budget is exhausted.
     Returns dict with keys: consensus_rating, mean_target, num_analysts,
     current_price, upside_pct.
     """
@@ -97,6 +103,10 @@ def fetch_analyst_consensus(ticker: str) -> dict:
         "rating_changes": [],
         "earnings_surprises": [],
     }
+
+    if fmp_budget_exhausted():
+        logger.debug("FMP budget exhausted — skipping analyst data for %s", ticker)
+        return result
 
     # Analyst grades consensus (strongBuy/buy/hold/sell counts + pre-computed consensus)
     try:
