@@ -551,6 +551,14 @@ def consolidator_v2(state: ResearchStateV2) -> dict:
 
         rows.append((ticker, status, rating, score, rationale))
 
+    # BUY recommendations not in portfolio (candidates that didn't get a slot)
+    buy_candidates = []
+    for ticker, thesis in theses.items():
+        if thesis.get("rating") == "BUY" and ticker not in new_tickers and ticker not in exit_tickers:
+            score = thesis.get("final_score", 0)
+            rationale = thesis.get("bull_case", "Buy recommendation — no open slot")
+            buy_candidates.append((ticker, "BUY REC", "BUY", score, rationale))
+
     # Exited stocks
     for e in exit_list:
         ticker = e.get("ticker_out", "?")
@@ -558,11 +566,15 @@ def consolidator_v2(state: ResearchStateV2) -> dict:
         reason = e.get("reason", "Exited from population")
         rows.append((ticker, "EXIT", "SELL", score, reason))
 
-    # Sort: NEW first, then UPDATED, then HOLD by score desc, then EXIT
-    status_order = {"NEW": 0, "UPDATED": 1, "HOLD": 2, "EXIT": 3}
+    # Combine: portfolio + buy recs + exits
+    rows.extend(buy_candidates)
+
+    # Sort: NEW first, then BUY REC, then UPDATED, then HOLD by score desc, then EXIT
+    status_order = {"NEW": 0, "BUY REC": 1, "UPDATED": 2, "HOLD": 3, "EXIT": 4}
     rows.sort(key=lambda r: (status_order.get(r[1], 9), -(r[3] or 0)))
 
-    sections.append(f"*{len(new_pop)} stocks in portfolio | {len(entrant_tickers)} new | {len(exit_list)} exited*\n")
+    n_buy_recs = len(buy_candidates)
+    sections.append(f"*{len(new_pop)} stocks in portfolio | {len(entrant_tickers)} new | {len(exit_list)} exited | {n_buy_recs} buy candidates*\n")
     sections.append("| Ticker | Status | Rating | Score | Rationale |")
     sections.append("|--------|--------|--------|-------|-----------|")
     for ticker, status, rating, score, rationale in rows:
@@ -720,15 +732,37 @@ def _build_signals_payload(state: ResearchStateV2) -> dict:
     sector_ratings = state.get("sector_ratings", {})
     entry_theses = state.get("entry_theses", {})
 
-    # v2 signals dict (keyed by ticker) — includes new theses AND population carryovers
+    # v2 signals dict (keyed by ticker)
+    # Signal logic:
+    #   ENTER  = BUY-rated AND in population (new entry or reaffirmed hold)
+    #   HOLD   = held in population, not BUY-rated (maintain position)
+    #   EXIT   = dropped from population (sell)
+    #   Stocks not in population and not BUY-rated are excluded (irrelevant to executor)
+    advanced_tickers = set(state.get("advanced_tickers", []))
     signals = {}
+
     # First: tickers with fresh theses from this run
     for ticker, thesis in theses.items():
+        rating = thesis.get("rating", "HOLD")
+        in_pop = ticker in pop_tickers
+
+        # Determine signal
+        if rating == "BUY" and ticker in advanced_tickers:
+            signal = "ENTER"  # CIO approved new entry
+        elif rating == "BUY" and in_pop:
+            signal = "ENTER"  # Reaffirm existing BUY position
+        elif in_pop:
+            signal = "HOLD"   # Held, not BUY-rated
+        elif rating == "BUY":
+            signal = "ENTER"  # BUY recommendation (candidate, not yet held)
+        else:
+            continue  # Not held, not recommended — skip
+
         signals[ticker] = {
             "ticker": ticker,
             "score": thesis.get("final_score"),
-            "rating": thesis.get("rating", "HOLD"),
-            "signal": "ENTER" if thesis.get("rating") == "BUY" and ticker in pop_tickers else "HOLD",
+            "rating": rating,
+            "signal": signal,
             "conviction": thesis.get("conviction", "stable"),
             "thesis_summary": thesis.get("bull_case", ""),
             "sector": thesis.get("sector", "Unknown"),
@@ -736,17 +770,19 @@ def _build_signals_payload(state: ResearchStateV2) -> dict:
             "quant_score": thesis.get("quant_score"),
             "qual_score": thesis.get("qual_score"),
         }
+
     # Second: population tickers without fresh theses — carry over from prior week
     for p in pop:
         ticker = p["ticker"]
         if ticker not in signals:
             prior = prior_theses.get(ticker, {})
             sector = sector_map.get(ticker, p.get("sector", "Unknown"))
+            prior_rating = prior.get("rating") or p.get("long_term_rating", "HOLD")
             signals[ticker] = {
                 "ticker": ticker,
                 "score": prior.get("score") or p.get("long_term_score"),
-                "rating": prior.get("rating") or p.get("long_term_rating", "HOLD"),
-                "signal": "HOLD",
+                "rating": prior_rating,
+                "signal": "ENTER" if prior_rating == "BUY" else "HOLD",
                 "conviction": prior.get("conviction") or p.get("conviction", "stable"),
                 "thesis_summary": prior.get("thesis_summary", ""),
                 "sector": sector,
