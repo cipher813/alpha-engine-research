@@ -1,6 +1,7 @@
 .env
 config/universe.yaml
 config/prompts/
+config/prompts.example/
 config/scoring.yaml
 *.db
 .coverage
