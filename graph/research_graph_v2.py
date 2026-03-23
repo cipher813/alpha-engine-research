@@ -499,7 +499,7 @@ def consolidator_v2(state: ResearchStateV2) -> dict:
             sections.append(f"- {item}")
         sections.append("")
 
-    # ── Section 4: Universe Ratings ──────────────────────────────────────────
+    # ── Section 4: Universe Ratings (unified table) ─────────────────────────
     sections.append("---\n")
     sections.append("## d. UNIVERSE RATINGS\n")
 
@@ -508,9 +508,9 @@ def consolidator_v2(state: ResearchStateV2) -> dict:
     current_tickers = {p["ticker"] for p in current_pop} if current_pop else set()
     new_tickers = {p["ticker"] for p in new_pop} if new_pop else set()
 
-    continuing_tickers = current_tickers & new_tickers
     entrant_tickers = new_tickers - current_tickers
     exit_list = state.get("exits", [])
+    exit_tickers = {e.get("ticker_out", "") for e in exit_list}
 
     theses = state.get("investment_theses", {})
     prior_theses = state.get("prior_theses", {})
@@ -523,62 +523,52 @@ def consolidator_v2(state: ResearchStateV2) -> dict:
         for ticker in output.get("thesis_updates", {}):
             updated_tickers.add(ticker)
 
-    # Build a lookup for population entry data (score, rating from prior week)
     pop_lookup = {p["ticker"]: p for p in new_pop}
 
-    # 4a. Continuing Coverage
-    if continuing_tickers:
-        sections.append(f"### Continuing Coverage ({len(continuing_tickers)} stocks)\n")
-        sections.append("| Ticker | Rating | Score | Rationale |")
-        sections.append("|--------|--------|-------|-----------|")
-        for ticker in sorted(continuing_tickers):
-            thesis = theses.get(ticker, {})
-            prior = prior_theses.get(ticker, {})
-            pop_entry = pop_lookup.get(ticker, {})
-            # Prefer fresh thesis, fall back to prior, then population
-            rating = thesis.get("rating") or prior.get("rating") or pop_entry.get("long_term_rating", "HOLD")
-            score = thesis.get("final_score") or prior.get("score") or pop_entry.get("long_term_score", 0)
-            score_str = f"{score:.0f}" if score else "—"
-            # Fresh thesis if material update occurred, otherwise carry over prior
-            if ticker in updated_tickers and thesis.get("bull_case"):
-                rationale = thesis.get("bull_case", "")
-            elif prior.get("thesis_summary"):
-                rationale = prior["thesis_summary"]
-            elif thesis.get("bull_case"):
-                rationale = thesis["bull_case"]
-            else:
-                rationale = "Continuing coverage — no material update"
-            sections.append(f"| {ticker} | {rating} | {score_str} | {rationale} |")
-        sections.append("")
+    # Build unified rows: (ticker, status, rating, score, rationale)
+    rows = []
 
-    # 4b. Entrants
-    if entrant_tickers:
-        sections.append(f"### Entrants ({len(entrant_tickers)} stocks)\n")
-        sections.append("| Ticker | Rating | Score | Rationale |")
-        sections.append("|--------|--------|-------|-----------|")
-        for ticker in sorted(entrant_tickers):
-            thesis = theses.get(ticker, {})
+    # Current portfolio stocks
+    for p in new_pop:
+        ticker = p["ticker"]
+        thesis = theses.get(ticker, {})
+        prior = prior_theses.get(ticker, {})
+        pop_entry = pop_lookup.get(ticker, {})
+
+        rating = thesis.get("rating") or prior.get("rating") or pop_entry.get("long_term_rating", "HOLD")
+        score = thesis.get("final_score") or prior.get("score") or pop_entry.get("long_term_score", 0)
+
+        if ticker in entrant_tickers:
+            status = "NEW"
             et = entry_theses.get(ticker, {})
-            rating = thesis.get("rating", "BUY")
-            score = thesis.get("final_score", 0)
-            score_str = f"{score:.0f}" if score else "—"
-            # Always fresh thesis for entrants — prefer CIO entry thesis
             rationale = et.get("bull_case") or thesis.get("bull_case", "New entry")
-            sections.append(f"| {ticker} | {rating} | {score_str} | {rationale} |")
-        sections.append("")
+        elif ticker in updated_tickers and thesis.get("bull_case"):
+            status = "UPDATED"
+            rationale = thesis.get("bull_case", "")
+        else:
+            status = "HOLD"
+            rationale = prior.get("thesis_summary") or thesis.get("bull_case", "Continuing coverage — no material update")
 
-    # 4c. Exits
-    if exit_list:
-        sections.append(f"### Exits ({len(exit_list)} stocks)\n")
-        sections.append("| Ticker | Score | Rationale |")
-        sections.append("|--------|-------|-----------|")
-        for e in exit_list:
-            ticker = e.get("ticker_out", "?")
-            score = e.get("score_out", 0)
-            score_str = f"{score:.0f}" if score else "—"
-            reason = e.get("reason", "Exited")
-            sections.append(f"| {ticker} | {score_str} | {reason} |")
-        sections.append("")
+        rows.append((ticker, status, rating, score, rationale))
+
+    # Exited stocks
+    for e in exit_list:
+        ticker = e.get("ticker_out", "?")
+        score = e.get("score_out", 0)
+        reason = e.get("reason", "Exited from population")
+        rows.append((ticker, "EXIT", "SELL", score, reason))
+
+    # Sort: NEW first, then UPDATED, then HOLD by score desc, then EXIT
+    status_order = {"NEW": 0, "UPDATED": 1, "HOLD": 2, "EXIT": 3}
+    rows.sort(key=lambda r: (status_order.get(r[1], 9), -(r[3] or 0)))
+
+    sections.append(f"*{len(new_pop)} stocks in portfolio | {len(entrant_tickers)} new | {len(exit_list)} exited*\n")
+    sections.append("| Ticker | Status | Rating | Score | Rationale |")
+    sections.append("|--------|--------|--------|-------|-----------|")
+    for ticker, status, rating, score, rationale in rows:
+        score_str = f"{score:.0f}" if score else "—"
+        sections.append(f"| {ticker} | {status} | {rating} | {score_str} | {rationale} |")
+    sections.append("")
 
     # Footer
     sections.append("---\n")
