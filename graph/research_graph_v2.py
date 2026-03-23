@@ -458,54 +458,159 @@ def population_entry_handler(state: ResearchStateV2) -> dict:
 
 
 def consolidator_v2(state: ResearchStateV2) -> dict:
-    """Synthesize IC decisions + team updates into morning email."""
+    """Build the weekly research email with 4 structured sections."""
     logger.info("[v2:consolidator] starting")
 
-    # Build email content
     sections = []
+    run_date = state.get("run_date", "")
 
-    # 1. Macro
+    # ── Section 1: Macro Regime Summary ──────────────────────────────────────
     regime = state.get("market_regime", "neutral")
-    sections.append(f"## Market Regime: {regime.upper()}\n")
+    sections.append(f"# Daily Research Brief — {run_date}\n")
+    sections.append("---\n")
+    sections.append("## a. MACRO REGIME SUMMARY\n")
+    sections.append(f"**Current Regime: {regime.upper()}**\n")
     macro_report = state.get("macro_report", "")
     if macro_report:
-        sections.append(macro_report[:500] + "\n")
+        sections.append(macro_report)
+    sections.append("")
 
-    # 2. Exits
-    exits = state.get("exits", [])
-    if exits:
-        sections.append("## Population Exits\n")
-        for e in exits:
-            sections.append(f"- **{e.get('ticker_out', '?')}**: {e.get('reason', 'unknown')}\n")
+    # ── Section 2: Sector Allocation ─────────────────────────────────────────
+    sector_ratings = state.get("sector_ratings", {})
+    if sector_ratings:
+        sections.append("---\n")
+        sections.append("## b. SECTOR ALLOCATION\n")
+        sections.append("| Sector | Rating | Rationale |")
+        sections.append("|--------|--------|-----------|")
+        for sector in sorted(sector_ratings):
+            sr = sector_ratings[sector]
+            rating_raw = sr.get("rating", "market_weight")
+            indicator = {"overweight": "\u25b2", "underweight": "\u25bc"}.get(rating_raw, "\u25cf")
+            label = f"{indicator} {rating_raw.replace('_', ' ').upper()}"
+            rationale = sr.get("rationale", "")
+            sections.append(f"| {sector} | {label} | {rationale} |")
+        sections.append("")
 
-    # 3. CIO Decisions
-    decisions = state.get("ic_decisions", [])
-    if decisions:
-        sections.append("## CIO Decisions\n")
-        for d in decisions:
-            emoji = {"ADVANCE": "+", "REJECT": "-", "NO_ADVANCE_DEADLOCK": "~"}.get(d.get("decision"), "?")
-            sections.append(
-                f"- [{emoji}] **{d.get('ticker', '?')}** ({d.get('decision', '?')}, "
-                f"conv={d.get('conviction', '?')}): {d.get('rationale', '')[:100]}\n"
-            )
+    # ── Section 3: Notable Developments ──────────────────────────────────────
+    notable = _build_notable_developments(state)
+    if notable:
+        sections.append("---\n")
+        sections.append("## c. NOTABLE DEVELOPMENTS\n")
+        for item in notable:
+            sections.append(f"- {item}")
+        sections.append("")
 
-    # 4. Team summaries
-    team_outputs = state.get("sector_team_outputs", {})
-    if team_outputs:
-        sections.append("## Sector Team Summaries\n")
-        for team_id in sorted(team_outputs):
-            output = team_outputs[team_id]
-            recs = output.get("recommendations", [])
-            rec_text = ", ".join(r.get("ticker", "?") for r in recs) or "none"
-            sections.append(f"- **{team_id.title()}**: recommended {rec_text}\n")
+    # ── Section 4: Universe Ratings ──────────────────────────────────────────
+    sections.append("---\n")
+    sections.append("## d. UNIVERSE RATINGS\n")
 
-    # 5. Population summary
+    current_pop = state.get("current_population", [])
     new_pop = state.get("new_population", [])
-    sections.append(f"\n## Portfolio: {len(new_pop)} stocks\n")
+    current_tickers = {p["ticker"] for p in current_pop} if current_pop else set()
+    new_tickers = {p["ticker"] for p in new_pop} if new_pop else set()
+
+    continuing_tickers = current_tickers & new_tickers
+    entrant_tickers = new_tickers - current_tickers
+    exit_list = state.get("exits", [])
+
+    theses = state.get("investment_theses", {})
+    prior_theses = state.get("prior_theses", {})
+    entry_theses = state.get("entry_theses", {})
+    team_outputs = state.get("sector_team_outputs", {})
+
+    # Collect tickers with material thesis updates from sector teams
+    updated_tickers = set()
+    for team_id, output in team_outputs.items():
+        for ticker in output.get("thesis_updates", {}):
+            updated_tickers.add(ticker)
+
+    # 4a. Continuing Coverage
+    if continuing_tickers:
+        sections.append(f"### Continuing Coverage ({len(continuing_tickers)} stocks)\n")
+        sections.append("| Ticker | Rating | Score | Rationale |")
+        sections.append("|--------|--------|-------|-----------|")
+        for ticker in sorted(continuing_tickers):
+            thesis = theses.get(ticker, {})
+            rating = thesis.get("rating", "HOLD")
+            score = thesis.get("final_score", 0)
+            score_str = f"{score:.0f}" if score else "—"
+            # Fresh thesis if material update occurred, otherwise carry over prior
+            if ticker in updated_tickers and thesis.get("bull_case"):
+                rationale = thesis.get("bull_case", "")
+            elif prior_theses.get(ticker, {}).get("thesis_summary"):
+                rationale = prior_theses[ticker]["thesis_summary"]
+            else:
+                rationale = thesis.get("bull_case", "")
+            sections.append(f"| {ticker} | {rating} | {score_str} | {rationale} |")
+        sections.append("")
+
+    # 4b. Entrants
+    if entrant_tickers:
+        sections.append(f"### Entrants ({len(entrant_tickers)} stocks)\n")
+        sections.append("| Ticker | Rating | Score | Rationale |")
+        sections.append("|--------|--------|-------|-----------|")
+        for ticker in sorted(entrant_tickers):
+            thesis = theses.get(ticker, {})
+            et = entry_theses.get(ticker, {})
+            rating = thesis.get("rating", "BUY")
+            score = thesis.get("final_score", 0)
+            score_str = f"{score:.0f}" if score else "—"
+            # Always fresh thesis for entrants — prefer CIO entry thesis
+            rationale = et.get("bull_case") or thesis.get("bull_case", "New entry")
+            sections.append(f"| {ticker} | {rating} | {score_str} | {rationale} |")
+        sections.append("")
+
+    # 4c. Exits
+    if exit_list:
+        sections.append(f"### Exits ({len(exit_list)} stocks)\n")
+        sections.append("| Ticker | Score | Rationale |")
+        sections.append("|--------|-------|-----------|")
+        for e in exit_list:
+            ticker = e.get("ticker_out", "?")
+            score = e.get("score_out", 0)
+            score_str = f"{score:.0f}" if score else "—"
+            reason = e.get("reason", "Exited")
+            sections.append(f"| {ticker} | {score_str} | {reason} |")
+        sections.append("")
+
+    # Footer
+    sections.append("---\n")
+    sections.append(f"*Brief generated: {run_date} | Portfolio: {len(new_pop)} stocks*")
 
     consolidated = "\n".join(sections)
-
     return {"consolidated_report": consolidated}
+
+
+def _build_notable_developments(state: ResearchStateV2) -> list[str]:
+    """Extract notable developments from team outputs and exits."""
+    notable = []
+
+    # High-conviction recommendations
+    team_outputs = state.get("sector_team_outputs", {})
+    for team_id, output in team_outputs.items():
+        for rec in output.get("recommendations", []):
+            ticker = rec.get("ticker", "?")
+            bull = rec.get("bull_case", "")
+            conviction = rec.get("conviction", "")
+            if conviction in ("high",) and bull:
+                notable.append(f"**{ticker} — High Conviction ({team_id.title()}):** {bull[:200]}")
+
+    # Exits with reasons
+    for e in state.get("exits", []):
+        ticker = e.get("ticker_out", "?")
+        reason = e.get("reason", "")
+        if reason:
+            notable.append(f"**{ticker} — Exit:** {reason[:200]}")
+
+    # CIO advances
+    for d in state.get("ic_decisions", []):
+        if d.get("decision") == "ADVANCE":
+            ticker = d.get("ticker", "?")
+            rationale = d.get("rationale", "")
+            if rationale:
+                notable.append(f"**{ticker} — CIO Advance:** {rationale[:200]}")
+
+    return notable[:7]
 
 
 def archive_writer_v2(state: ResearchStateV2) -> dict:
@@ -576,8 +681,9 @@ def archive_writer_v2(state: ResearchStateV2) -> dict:
 
 
 def email_sender_v2(state: ResearchStateV2) -> dict:
-    """Send the morning email."""
+    """Send the morning email with properly rendered HTML."""
     from emailer.sender import send_email
+    from emailer.formatter import format_email
     from config import EMAIL_RECIPIENTS, EMAIL_SENDER
 
     logger.info("[v2:email_sender] starting")
@@ -586,11 +692,12 @@ def email_sender_v2(state: ResearchStateV2) -> dict:
 
     if consolidated:
         try:
-            subject = f"Alpha Engine Research — {run_date} (v2)"
+            subject = f"Alpha Engine Research — {run_date}"
+            html_body, plain_body = format_email(consolidated, run_date)
             send_email(
                 subject=subject,
-                html_body=f"<pre>{consolidated}</pre>",
-                plain_body=consolidated,
+                html_body=html_body,
+                plain_body=plain_body,
                 recipients=EMAIL_RECIPIENTS,
                 sender=EMAIL_SENDER,
             )
@@ -602,11 +709,19 @@ def email_sender_v2(state: ResearchStateV2) -> dict:
 
 
 def _build_signals_payload(state: ResearchStateV2) -> dict:
-    """Build backward-compatible signals.json payload."""
+    """Build backward-compatible signals.json payload.
+
+    Includes both v2 keys (signals, population) and v1 keys (universe, buy_candidates)
+    so the executor and predictor can read actionable signals.
+    """
     theses = state.get("investment_theses", {})
     pop = state.get("new_population", [])
     pop_tickers = {p["ticker"] for p in pop}
+    pop_lookup = {p["ticker"]: p for p in pop}
+    sector_ratings = state.get("sector_ratings", {})
+    entry_theses = state.get("entry_theses", {})
 
+    # v2 signals dict (keyed by ticker)
     signals = {}
     for ticker, thesis in theses.items():
         signals[ticker] = {
@@ -622,14 +737,45 @@ def _build_signals_payload(state: ResearchStateV2) -> dict:
             "qual_score": thesis.get("qual_score"),
         }
 
+    # v1-compatible universe list (executor reads this)
+    universe = []
+    for ticker, sig in signals.items():
+        sector = sig["sector"]
+        sr = sector_ratings.get(sector, {})
+        pop_entry = pop_lookup.get(ticker, {})
+        universe.append({
+            "ticker": ticker,
+            "signal": sig["signal"],
+            "score": sig["score"],
+            "rating": sig["rating"],
+            "conviction": sig["conviction"],
+            "price_target_upside": pop_entry.get("price_target_upside"),
+            "sector_rating": sr.get("rating", "market_weight"),
+            "sector": sector,
+            "thesis_summary": sig["thesis_summary"],
+        })
+
+    # v1-compatible buy_candidates list (ENTER signals with enriched theses)
+    buy_candidates = []
+    for entry in universe:
+        if entry["signal"] == "ENTER":
+            candidate = dict(entry)
+            et = entry_theses.get(entry["ticker"], {})
+            if et:
+                candidate["thesis_summary"] = et.get("bull_case", candidate["thesis_summary"])
+                candidate["catalysts"] = et.get("catalysts", [])
+            buy_candidates.append(candidate)
+
     return {
         "date": state.get("run_date", ""),
         "time": state.get("run_time", ""),
         "market_regime": state.get("market_regime", "neutral"),
         "sector_modifiers": state.get("sector_modifiers", {}),
-        "sector_ratings": state.get("sector_ratings", {}),
+        "sector_ratings": sector_ratings,
         "signals": signals,
         "population": [p["ticker"] for p in pop],
+        "universe": universe,
+        "buy_candidates": buy_candidates,
         "architecture_version": "v2_sector_teams",
     }
 
