@@ -30,11 +30,21 @@ run.log
 *.ipynb
 
 # ── Proprietary source (prompts, scoring, orchestration) ──────────
+# v1 agents
 agents/consolidator.py
 agents/macro_agent.py
 agents/news_agent.py
 agents/research_agent.py
 agents/scanner_ranking_agent.py
+# v2 agents (contain prompts)
+agents/investment_committee/ic_cio.py
+agents/sector_teams/quant_analyst.py
+agents/sector_teams/qual_analyst.py
+agents/sector_teams/peer_review.py
+agents/sector_teams/sector_team.py
+agents/debate_agents.py
+agents/synthesis_judge.py
+# Scoring, orchestration, config
 scoring/technical.py
 scoring/aggregator.py
 scoring/performance_tracker.py
