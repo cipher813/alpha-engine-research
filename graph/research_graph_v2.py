@@ -765,6 +765,24 @@ def _build_signals_payload(state: ResearchStateV2) -> dict:
                 "qual_score": prior.get("qual_score"),
             }
 
+    # Third: exited stocks — explicit EXIT signal so executor knows to sell
+    for e in state.get("exits", []):
+        ticker = e.get("ticker_out", "")
+        if ticker and ticker not in signals:
+            sector = sector_map.get(ticker, "Unknown")
+            signals[ticker] = {
+                "ticker": ticker,
+                "score": e.get("score_out", 0),
+                "rating": "SELL",
+                "signal": "EXIT",
+                "conviction": "declining",
+                "thesis_summary": e.get("reason", "Exited from population"),
+                "sector": sector,
+                "team_id": None,
+                "quant_score": None,
+                "qual_score": None,
+            }
+
     # v1-compatible universe list (executor reads this)
     universe = []
     for ticker, sig in signals.items():
