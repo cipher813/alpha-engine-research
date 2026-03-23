@@ -26,6 +26,7 @@ def create_qual_tools(context: dict) -> list:
         List of LangChain tool callables.
     """
     prior_theses = context.get("prior_theses", {})
+    price_data = context.get("price_data", {})
 
     @tool
     def get_news_articles(ticker: str, days: int = 7) -> str:
@@ -50,7 +51,11 @@ def create_qual_tools(context: dict) -> list:
         from data.fetchers.analyst_fetcher import fetch_analyst_consensus
 
         try:
-            data = fetch_analyst_consensus(ticker)
+            cp = None
+            df = price_data.get(ticker)
+            if df is not None and not df.empty and "Close" in df.columns:
+                cp = float(df["Close"].iloc[-1])
+            data = fetch_analyst_consensus(ticker, current_price=cp)
             return json.dumps({
                 "ticker": ticker,
                 "consensus_rating": data.get("consensus_rating", "N/A"),

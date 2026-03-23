@@ -29,7 +29,7 @@ _fmp_lock = threading.Lock()
 _fmp_last_call = 0.0
 _fmp_daily_count = 0
 _FMP_MIN_INTERVAL = 1.0  # 1s between calls — spreads 250 daily quota over ~4 min
-_FMP_DAILY_LIMIT = 240  # stop 10 short of 250 to leave headroom
+_FMP_DAILY_LIMIT = 250  # FMP free tier hard limit; FMP returns 429 if exceeded
 _FMP_MAX_RETRIES = 3
 _FMP_RETRY_BACKOFF = 5.0  # seconds, doubles each retry
 
@@ -86,10 +86,16 @@ def _fmp_get(endpoint: str, params: Optional[dict] = None, base: str = _FMP_STAB
     return resp.json()
 
 
-def fetch_analyst_consensus(ticker: str) -> dict:
+def fetch_analyst_consensus(ticker: str, current_price: Optional[float] = None) -> dict:
     """
     Fetch analyst consensus rating, mean price target, and number of analysts.
     Returns empty result immediately if FMP daily budget is exhausted.
+
+    Args:
+        ticker: Stock symbol.
+        current_price: If provided, used for upside_pct calculation instead of
+                       making a separate FMP quote call. Pass from yfinance data.
+
     Returns dict with keys: consensus_rating, mean_target, num_analysts,
     current_price, upside_pct.
     """
@@ -98,7 +104,7 @@ def fetch_analyst_consensus(ticker: str) -> dict:
         "consensus_rating": None,
         "mean_target": None,
         "num_analysts": None,
-        "current_price": None,
+        "current_price": current_price,
         "upside_pct": None,
         "rating_changes": [],
         "earnings_surprises": [],
@@ -128,18 +134,11 @@ def fetch_analyst_consensus(ticker: str) -> dict:
     except Exception as e:
         logger.warning("FMP price-target-consensus failed for %s: %s", ticker, e)
 
-    # Current price
-    try:
-        data = _fmp_get("quote", {"symbol": ticker})
-        if isinstance(data, list) and data:
-            q = data[0]
-            result["current_price"] = q.get("price")
-            if result["mean_target"] and result["current_price"]:
-                result["upside_pct"] = round(
-                    (result["mean_target"] / result["current_price"] - 1) * 100, 1
-                )
-    except Exception as e:
-        logger.warning("FMP quote failed for %s: %s", ticker, e)
+    # Compute upside from price already available (yfinance or passed in)
+    if result["mean_target"] and result["current_price"]:
+        result["upside_pct"] = round(
+            (result["mean_target"] / result["current_price"] - 1) * 100, 1
+        )
 
     # O10: Earnings surprises (uses v3 API)
     try:

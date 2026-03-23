@@ -63,13 +63,18 @@ def create_quant_tools(context: dict) -> list:
 
     @tool
     def get_analyst_consensus(tickers: list[str]) -> str:
-        """Get analyst ratings, price targets, earnings surprises. Returns consensus_rating, num_analysts, mean_target, upside_pct."""
+        """Get analyst ratings, price targets, earnings surprises for up to 5 tickers (FMP daily limit). Pass your top candidates only. Returns consensus_rating, num_analysts, mean_target, upside_pct."""
         from data.fetchers.analyst_fetcher import fetch_analyst_consensus as _fetch
 
         results = {}
-        for t in tickers[:20]:
+        for t in tickers[:5]:
             try:
-                data = _fetch(t)
+                # Pass yfinance close price to avoid a separate FMP quote call
+                cp = None
+                df = price_data.get(t)
+                if df is not None and not df.empty and "Close" in df.columns:
+                    cp = float(df["Close"].iloc[-1])
+                data = _fetch(t, current_price=cp)
                 results[t] = {
                     "consensus_rating": data.get("consensus_rating", "N/A"),
                     "num_analysts": data.get("num_analysts", 0),
