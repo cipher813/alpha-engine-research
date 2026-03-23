@@ -22,11 +22,25 @@ class PriceFetchError(RuntimeError):
 
 
 _BATCH_SIZE = 100
-_DOWNLOAD_WORKERS = 5
+_BATCH_DELAY_SECS = 2
+_MIN_FETCH_RATIO = 0.80
+
+
+def _make_rate_limited_session():
+    """Create a requests session with rate limiting (max 2 requests per 5 seconds)."""
+    try:
+        from requests_ratelimiter import LimiterSession, RequestRate, Limiter, Duration
+        rate = RequestRate(2, Duration.SECOND * 5)
+        session = LimiterSession(limiter=Limiter(rate))
+        session.headers["User-agent"] = "alpha-engine-research/1.0"
+        return session
+    except ImportError:
+        logger.warning("requests_ratelimiter not installed, using default session")
+        return None
 
 
 @retry(max_attempts=2, retryable=(Exception,), label="yfinance")
-def _download_batch(tickers: list[str], period: str) -> dict[str, pd.DataFrame]:
+def _download_batch(tickers: list[str], period: str, session=None) -> dict[str, pd.DataFrame]:
     """Download one batch of tickers and return per-ticker DataFrames."""
     result: dict[str, pd.DataFrame] = {}
     if not tickers:
@@ -40,6 +54,7 @@ def _download_batch(tickers: list[str], period: str) -> dict[str, pd.DataFrame]:
         progress=False,
         group_by="ticker",
         threads=True,
+        session=session,
     )
 
     if len(tickers) == 1:
@@ -63,50 +78,42 @@ def _download_batch(tickers: list[str], period: str) -> dict[str, pd.DataFrame]:
 
 def fetch_price_data(tickers: list[str], period: str = "1y") -> dict[str, pd.DataFrame]:
     """
-    Download daily OHLCV for a list of tickers in parallel batches of 100.
+    Download daily OHLCV for a list of tickers in sequential batches of 100
+    with a rate-limited session and delay between batches to avoid Yahoo rate limits.
     Returns dict of ticker → DataFrame with columns [Open, High, Low, Close, Volume].
-    Missing tickers are silently skipped (empty DataFrame).
+    Raises PriceFetchError if fewer than 80% of tickers return data.
     """
-    import concurrent.futures
+    import time
 
     if not tickers:
         return {}
 
+    session = _make_rate_limited_session()
     batches = [tickers[i:i + _BATCH_SIZE] for i in range(0, len(tickers), _BATCH_SIZE)]
     result: dict[str, pd.DataFrame] = {}
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=_DOWNLOAD_WORKERS) as executor:
-        futures = {executor.submit(_download_batch, batch, period): batch for batch in batches}
-        failed_batches = []
-        for future in concurrent.futures.as_completed(futures):
-            try:
-                result.update(future.result())
-            except Exception as e:
-                failed_batches.append(futures[future])
-                logger.warning("Batch download failed (%d tickers), will retry: %s", len(futures[future]), e)
-
-    # Retry failed batches sequentially (no parallelism to avoid yfinance race conditions)
-    for batch in failed_batches:
+    for i, batch in enumerate(batches):
+        if i > 0:
+            time.sleep(_BATCH_DELAY_SECS)
         try:
-            result.update(_download_batch(batch, period))
+            result.update(_download_batch(batch, period, session=session))
+            n_ok = sum(1 for t in batch if t in result and not result[t].empty)
+            logger.info("Batch %d/%d: %d/%d tickers OK", i + 1, len(batches), n_ok, len(batch))
         except Exception as e:
-            logger.warning("Batch retry failed (%d tickers), skipping: %s", len(batch), e)
+            logger.warning("Batch %d/%d failed (%d tickers): %s", i + 1, len(batches), len(batch), e)
 
-    # ── Catastrophic failure gate ──────────────────────────────────────────
+    # ── Data quality gate ─────────────────────────────────────────────────
     n_requested = len(tickers)
     n_fetched = sum(1 for df in result.values() if not df.empty)
-    if n_requested > 0 and n_fetched < max(n_requested * 0.10, 1):
-        msg = (f"Price fetch catastrophic failure: {n_fetched}/{n_requested} "
-               f"tickers with data ({n_fetched/n_requested*100:.0f}%)")
+    pct = n_fetched / n_requested * 100 if n_requested > 0 else 0
+
+    if n_requested > 0 and n_fetched < n_requested * _MIN_FETCH_RATIO:
+        msg = (f"Price fetch failed: {n_fetched}/{n_requested} tickers "
+               f"with data ({pct:.0f}%) — minimum {_MIN_FETCH_RATIO:.0%} required")
         logger.error(msg)
         raise PriceFetchError(msg)
 
-    if n_requested > 0 and n_fetched < n_requested * 0.50:
-        logger.warning(
-            "Price fetch degraded: %d/%d tickers with data (%.0f%%)",
-            n_fetched, n_requested, n_fetched / n_requested * 100,
-        )
-
+    logger.info("Price fetch complete: %d/%d tickers (%.0f%%)", n_fetched, n_requested, pct)
     return result
 
 

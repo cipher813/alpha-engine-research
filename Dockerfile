@@ -22,6 +22,7 @@ COPY scoring/ ${LAMBDA_TASK_ROOT}/scoring/
 COPY thesis/ ${LAMBDA_TASK_ROOT}/thesis/
 COPY archive/ ${LAMBDA_TASK_ROOT}/archive/
 COPY flow-doctor.yaml ${LAMBDA_TASK_ROOT}/
+COPY retry.py ${LAMBDA_TASK_ROOT}/
 
 # Main Lambda handler
 COPY lambda/handler.py ${LAMBDA_TASK_ROOT}/handler.py
