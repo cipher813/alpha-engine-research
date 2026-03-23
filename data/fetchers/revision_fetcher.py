@@ -12,31 +12,19 @@ from __future__ import annotations
 
 import json
 import logging
-import os
-import time
 from datetime import datetime, timedelta
 from typing import Optional
 
-import requests
-
 log = logging.getLogger(__name__)
 
-_FMP_BASE = "https://financialmodelingprep.com/api/v3"
-_TIMEOUT = 10
-_RATE_LIMIT_DELAY = 0.25
+_FMP_V3 = "https://financialmodelingprep.com/api/v3"
+
+# Use the shared FMP rate limiter from analyst_fetcher
+from data.fetchers.analyst_fetcher import _fmp_get as _fmp_get_shared
 
 
 def _fmp_get(endpoint: str, params: Optional[dict] = None) -> dict | list:
-    api_key = os.environ.get("FMP_API_KEY", "")
-    if not api_key:
-        raise RuntimeError("FMP_API_KEY environment variable not set.")
-    url = f"{_FMP_BASE}/{endpoint}"
-    p = {"apikey": api_key}
-    if params:
-        p.update(params)
-    resp = requests.get(url, params=p, timeout=_TIMEOUT)
-    resp.raise_for_status()
-    return resp.json()
+    return _fmp_get_shared(endpoint, params=params, base=_FMP_V3)
 
 
 def fetch_revisions(
@@ -67,7 +55,6 @@ def fetch_revisions(
     for ticker in tickers:
         try:
             data = _fmp_get(f"analyst-estimates/{ticker}", params={"limit": 1})
-            time.sleep(_RATE_LIMIT_DELAY)
             if isinstance(data, list) and data:
                 current_estimates[ticker] = data[0].get("estimatedEpsAvg", 0.0)
             else:
