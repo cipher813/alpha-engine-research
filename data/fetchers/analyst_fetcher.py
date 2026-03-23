@@ -72,11 +72,12 @@ def _fmp_get(endpoint: str, params: Optional[dict] = None, base: str = _FMP_STAB
         resp = requests.get(url, params=p, timeout=_TIMEOUT)
 
         if resp.status_code == 429:
-            backoff = _FMP_RETRY_BACKOFF * (2 ** attempt)
-            logger.warning("FMP 429 for %s — retrying in %.1fs (attempt %d/%d, daily count: %d)",
-                           endpoint, backoff, attempt + 1, _FMP_MAX_RETRIES, _fmp_daily_count)
-            time.sleep(backoff)
-            continue
+            # 429 means daily quota is exhausted — stop all FMP calls immediately
+            with _fmp_lock:
+                _fmp_daily_count = _FMP_DAILY_LIMIT
+            logger.warning("FMP 429 for %s — daily quota exhausted, disabling FMP for remainder of run",
+                           endpoint)
+            raise FMPDailyLimitError(f"FMP 429 received — quota exhausted")
 
         resp.raise_for_status()
         return resp.json()
