@@ -5,8 +5,9 @@ Usage:
   python local/run.py                    # run today's pipeline
   python local/run.py --date 2026-03-05  # run for a specific date
   python local/run.py --dry-run          # skip email, skip S3 write
+  python local/run.py --offline          # full offline: no API/LLM/S3 calls (synthetic data)
 
-Requires environment variables:
+Requires environment variables (unless --offline):
   ANTHROPIC_API_KEY
   FMP_API_KEY
   FRED_API_KEY
@@ -43,12 +44,21 @@ def main():
                         help="Skip email delivery and S3 upload. Print report to stdout.")
     parser.add_argument("--skip-scanner", action="store_true",
                         help="Skip scanner pipeline (Branch B) for faster testing.")
+    parser.add_argument("--offline", action="store_true",
+                        help="Full offline mode: stub all API/LLM/S3/email calls with synthetic data.")
     args = parser.parse_args()
+
+    # Install offline stubs BEFORE any graph/agent imports
+    if args.offline:
+        from local.offline_stubs import install_offline_stubs
+        install_offline_stubs()
 
     run_date = args.date or str(datetime.date.today())
 
     print(f"alpha-engine-research local run — {run_date}")
-    if args.dry_run:
+    if args.offline:
+        print("OFFLINE MODE: all external calls stubbed with synthetic data")
+    elif args.dry_run:
         print("DRY RUN: email and S3 writes disabled")
 
     # Check trading day (use importlib: 'lambda' is a reserved keyword)
@@ -92,6 +102,11 @@ def main():
     else:
         from graph.research_graph import build_graph, create_initial_state
 
+    # Patch graph module local name bindings after import
+    if args.offline:
+        from local.offline_stubs import patch_graph_modules
+        patch_graph_modules()
+
     graph = build_graph()
     state = create_initial_state(
         run_date=run_date,
@@ -102,7 +117,7 @@ def main():
     if ARCHITECTURE_VERSION != "v2_sector_teams":
         state["performance_summary"] = perf_summary
 
-    if args.dry_run:
+    if args.dry_run and not args.offline:
         if ARCHITECTURE_VERSION == "v2_sector_teams":
             import graph.research_graph_v2 as graph_mod
             graph_mod.email_sender_v2 = lambda state: {"email_sent": False}

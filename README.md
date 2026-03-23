@@ -236,12 +236,57 @@ cp config/universe.sample.yaml config/universe.yaml
 
 # 3. Create gitignored source files (see table above)
 
-# 4. Dry run
+# 4. Dry run (skips email + S3 write, still calls APIs/LLM)
 python local/run.py --dry-run
 
 # 5. Deploy to Lambda
 ./infrastructure/deploy.sh main
 ```
+
+### Offline Mode
+
+Run the full pipeline end-to-end with **zero external calls** — no API keys, no LLM, no S3, no network required. All data fetchers, LLM agents, S3 operations, and email are replaced with synthetic stubs that return structurally valid data.
+
+```bash
+# Basic offline run (uses today's date)
+python local/run.py --offline
+
+# Offline with a specific date
+python local/run.py --offline --date 2026-03-23
+```
+
+**What gets stubbed:**
+
+| Category | Stubbed Functions | Synthetic Output |
+|----------|-------------------|-----------------|
+| Price data | `fetch_price_data`, `fetch_sp500_sp400_with_sectors`, `yf.download` | 252-day synthetic OHLCV for 30 sample tickers |
+| News | `fetch_all_news` | 2 synthetic headlines per ticker |
+| Analyst | `fetch_analyst_consensus`, `fetch_revisions` | Randomized consensus ratings + targets |
+| Macro | `fetch_macro_data`, `compute_market_breadth` | Hardcoded neutral macro environment |
+| Insider/Options | `fetch_insider_activity`, `fetch_options_signals`, `fetch_short_interest`, `fetch_institutional_accumulation` | Empty or minimal synthetic data |
+| V1 LLM agents | `run_news_agent`, `run_research_agent`, `run_macro_agent_with_reflection`, `run_scanner_ranking_agent`, `run_consolidator_agent`, `run_synthesis_judge`, `run_candidate_debate` | Deterministic scores (40-75 range), stub reports |
+| V2 sector teams | `run_sector_team`, `run_quant_analyst`, `run_qual_analyst`, `run_peer_review` | Synthetic picks with randomized quant/qual scores |
+| V2 CIO | `run_cio` | Advances candidates up to open slot count |
+| S3 / Archive | `download_db`, `upload_db`, `load_predictions_json`, `write_signals_json`, `upload_population_json` | Uses local SQLite (creates empty if none exists), skips all S3 I/O |
+| Email | `send_email` | Prints subject line to stdout |
+
+**Use cases:**
+- Validate graph topology and node wiring after refactors
+- Test scoring/aggregation/population logic changes without burning API credits
+- CI pipeline smoke tests
+- Develop and debug new graph nodes or scoring features
+- Onboard new contributors without requiring API keys or AWS credentials
+
+**How it works:** `local/offline_stubs.py` monkey-patches all external call sites at import time. Stubs are installed before graph modules load, so `from X import Y` bindings in the graph pick up the patched functions. The pipeline runs in ~1 second.
+
+**Combining with other flags:**
+
+```bash
+# Offline + skip scanner (V1 only — fastest possible run)
+python local/run.py --offline --skip-scanner
+```
+
+> **Note:** `--offline` implies `--dry-run` behavior (no email delivery, no S3 writes). You don't need to pass both.
 
 ---
 
