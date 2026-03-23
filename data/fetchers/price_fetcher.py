@@ -156,8 +156,12 @@ def fetch_sp500_sp400_with_sectors() -> tuple[list[str], dict[str, str]]:
     from pathlib import Path
     from io import StringIO
 
-    cache_path = Path(__file__).parent.parent.parent / "data" / "constituents_cache.csv"
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    # Writable cache in /tmp (Lambda's /var/task is read-only); fall back to baked-in copy
+    baked_cache = Path(__file__).parent.parent.parent / "data" / "constituents_cache.csv"
+    cache_path = Path("/tmp/constituents_cache.csv")
+    if not cache_path.exists() and baked_cache.exists():
+        import shutil
+        shutil.copy2(baked_cache, cache_path)
 
     sp500_url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
     sp400_url = "https://en.wikipedia.org/wiki/List_of_S%26P_400_companies"
