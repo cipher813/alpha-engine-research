@@ -173,12 +173,8 @@ def fetch_data_v2(state: ResearchStateV2) -> dict:
     breadth = compute_market_breadth(price_data)
     macro_data.update(breadth)
 
-    # Load prior data
-    prior_theses = {}
-    for t in population_tickers:
-        thesis = am.load_structured_thesis(t) if hasattr(am, 'load_structured_thesis') else None
-        if thesis:
-            prior_theses[t] = thesis
+    # Load prior theses from SQLite (most recent entry per population ticker)
+    prior_theses = am.load_latest_theses(population_tickers)
 
     prior_sector_ratings = state.get("prior_sector_ratings", {})
 

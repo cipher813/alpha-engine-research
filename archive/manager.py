@@ -351,6 +351,43 @@ class ArchiveManager:
                 pass
         return None
 
+    def load_latest_theses(self, tickers: list[str]) -> dict[str, dict]:
+        """Load the most recent investment thesis per ticker from SQLite.
+
+        Returns {ticker: {rating, score, conviction, thesis_summary, ...}}.
+        """
+        if not self.db_conn or not tickers:
+            return {}
+        results = {}
+        # SQLite pre-3.24: no window functions. Use GROUP BY + MAX(id) for latest per ticker.
+        placeholders = ",".join("?" for _ in tickers)
+        try:
+            rows = self.db_conn.execute(
+                f"""SELECT t.symbol, t.rating, t.score, t.conviction, t.signal,
+                           t.thesis_summary, t.technical_score, t.price_target_upside
+                    FROM investment_thesis t
+                    INNER JOIN (
+                        SELECT symbol, MAX(id) as max_id
+                        FROM investment_thesis
+                        WHERE symbol IN ({placeholders})
+                        GROUP BY symbol
+                    ) latest ON t.id = latest.max_id""",
+                tickers,
+            ).fetchall()
+            for row in rows:
+                results[row["symbol"]] = {
+                    "rating": row["rating"],
+                    "score": row["score"],
+                    "conviction": row["conviction"],
+                    "signal": row["signal"],
+                    "thesis_summary": row["thesis_summary"] or "",
+                    "technical_score": row["technical_score"],
+                    "price_target_upside": row["price_target_upside"],
+                }
+        except Exception as e:
+            log.warning("Failed to load latest theses from SQLite: %s", e)
+        return results
+
     def save_reports(
         self,
         ticker: str,
