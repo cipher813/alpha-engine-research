@@ -472,6 +472,9 @@ def consolidator_v2(state: ResearchStateV2) -> dict:
     sections.append(f"**Current Regime: {regime.upper()}**\n")
     macro_report = state.get("macro_report", "")
     if macro_report:
+        # Strip code fences that the macro agent sometimes includes
+        import re
+        macro_report = re.sub(r"```\w*\n?", "", macro_report).strip()
         sections.append(macro_report)
     sections.append("")
 
@@ -524,6 +527,9 @@ def consolidator_v2(state: ResearchStateV2) -> dict:
         for ticker in output.get("thesis_updates", {}):
             updated_tickers.add(ticker)
 
+    # Build a lookup for population entry data (score, rating from prior week)
+    pop_lookup = {p["ticker"]: p for p in new_pop}
+
     # 4a. Continuing Coverage
     if continuing_tickers:
         sections.append(f"### Continuing Coverage ({len(continuing_tickers)} stocks)\n")
@@ -531,16 +537,21 @@ def consolidator_v2(state: ResearchStateV2) -> dict:
         sections.append("|--------|--------|-------|-----------|")
         for ticker in sorted(continuing_tickers):
             thesis = theses.get(ticker, {})
-            rating = thesis.get("rating", "HOLD")
-            score = thesis.get("final_score", 0)
+            prior = prior_theses.get(ticker, {})
+            pop_entry = pop_lookup.get(ticker, {})
+            # Prefer fresh thesis, fall back to prior, then population
+            rating = thesis.get("rating") or prior.get("rating") or pop_entry.get("long_term_rating", "HOLD")
+            score = thesis.get("final_score") or prior.get("score") or pop_entry.get("long_term_score", 0)
             score_str = f"{score:.0f}" if score else "—"
             # Fresh thesis if material update occurred, otherwise carry over prior
             if ticker in updated_tickers and thesis.get("bull_case"):
                 rationale = thesis.get("bull_case", "")
-            elif prior_theses.get(ticker, {}).get("thesis_summary"):
-                rationale = prior_theses[ticker]["thesis_summary"]
+            elif prior.get("thesis_summary"):
+                rationale = prior["thesis_summary"]
+            elif thesis.get("bull_case"):
+                rationale = thesis["bull_case"]
             else:
-                rationale = thesis.get("bull_case", "")
+                rationale = "Continuing coverage — no material update"
             sections.append(f"| {ticker} | {rating} | {score_str} | {rationale} |")
         sections.append("")
 
@@ -715,14 +726,17 @@ def _build_signals_payload(state: ResearchStateV2) -> dict:
     so the executor and predictor can read actionable signals.
     """
     theses = state.get("investment_theses", {})
+    prior_theses = state.get("prior_theses", {})
     pop = state.get("new_population", [])
     pop_tickers = {p["ticker"] for p in pop}
     pop_lookup = {p["ticker"]: p for p in pop}
+    sector_map = state.get("sector_map", {})
     sector_ratings = state.get("sector_ratings", {})
     entry_theses = state.get("entry_theses", {})
 
-    # v2 signals dict (keyed by ticker)
+    # v2 signals dict (keyed by ticker) — includes new theses AND population carryovers
     signals = {}
+    # First: tickers with fresh theses from this run
     for ticker, thesis in theses.items():
         signals[ticker] = {
             "ticker": ticker,
@@ -736,6 +750,24 @@ def _build_signals_payload(state: ResearchStateV2) -> dict:
             "quant_score": thesis.get("quant_score"),
             "qual_score": thesis.get("qual_score"),
         }
+    # Second: population tickers without fresh theses — carry over from prior week
+    for p in pop:
+        ticker = p["ticker"]
+        if ticker not in signals:
+            prior = prior_theses.get(ticker, {})
+            sector = sector_map.get(ticker, p.get("sector", "Unknown"))
+            signals[ticker] = {
+                "ticker": ticker,
+                "score": prior.get("score") or p.get("long_term_score"),
+                "rating": prior.get("rating") or p.get("long_term_rating", "HOLD"),
+                "signal": "HOLD",
+                "conviction": prior.get("conviction") or p.get("conviction", "stable"),
+                "thesis_summary": prior.get("thesis_summary", ""),
+                "sector": sector,
+                "team_id": prior.get("team_id"),
+                "quant_score": prior.get("quant_score"),
+                "qual_score": prior.get("qual_score"),
+            }
 
     # v1-compatible universe list (executor reads this)
     universe = []
