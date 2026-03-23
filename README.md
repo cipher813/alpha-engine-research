@@ -10,6 +10,14 @@ Autonomous investment research pipeline for US equities. 6 sector teams with ReA
 
 Research is the signal generator. It produces `signals/{date}/signals.json` — the file that the Predictor and Executor both depend on. Runs weekly on Monday (06:00 UTC via EventBridge). Each sector team builds on prior theses rather than starting from scratch, creating compounding institutional knowledge over time.
 
+**signals.json** contains:
+- `universe` — list of all stocks with signal (ENTER/HOLD/EXIT), score, rating, conviction, sector_rating, thesis
+- `buy_candidates` — subset with ENTER signals and enriched CIO theses
+- `market_regime`, `sector_ratings` — macro context for executor position sizing
+- `population` — current 25-stock portfolio ticker list
+
+Research and Predictor Training are **independent** — no data flows between them. They run sequentially on Monday only to spread API load.
+
 ---
 
 ## Architecture (v2 — Sector Teams)
@@ -30,9 +38,9 @@ SEQUENTIAL (fan-in)
 ├── Score Aggregator  (quant × w_quant + qual × w_qual + macro shift + boosts)
 ├── CIO               (single Sonnet batch: evaluate all picks on 4 dimensions)
 ├── Population Entry   (place CIO ADVANCE decisions into population)
-├── Consolidator      (morning email with exit rationales + CIO decisions)
-├── Archive Writer    (S3 + SQLite + thesis history + IC audit trail)
-└── Email Sender
+├── Consolidator      (morning email: macro, sector allocation, notable developments, universe ratings)
+├── Archive Writer    (S3 + SQLite + thesis history + IC audit trail + signals.json)
+└── Email Sender      (markdown → HTML via formatter, Gmail SMTP primary, SES fallback)
 ```
 
 ### 6 Sector Teams
@@ -110,7 +118,8 @@ This repo is open-source, but files containing prompts, scoring logic, and orche
 - `scoring/composite.py` — v2 composite scoring (quant × w_quant + qual × w_qual)
 - `data/fetchers/` — All 8 data fetchers (price, news, analyst, macro, insider, institutional, options, revision)
 - `data/deduplicator.py` — Duplicate headline handling
-- `archive/manager.py` — S3 + SQLite CRUD + thesis history + IC audit trail
+- `archive/manager.py` — S3 + SQLite CRUD + thesis history + IC audit trail + `load_latest_theses()` for prior week backfill
+- `retry.py` — Exponential-backoff retry decorator (used by archive manager + price fetcher)
 - `emailer/` — Markdown to HTML email + SES/Gmail delivery
 - `lambda/` — AWS Lambda handlers (main pipeline + intraday alerts)
 - `infrastructure/` — Deploy scripts, IAM policies
@@ -157,6 +166,27 @@ Teams always produce 2-3 picks regardless of allocation. The CIO selects from th
 
 ---
 
+## Weekly Email Format
+
+The morning research brief contains 4 sections:
+
+1. **Macro Regime Summary** — full macro narrative (Fed, yield curve, credit, equity, commodities), key risks to monitor
+2. **Sector Allocation** — 11-sector table with overweight/market weight/underweight ratings and rationale
+3. **Notable Developments** — high-conviction recommendations, CIO advances, material exits
+4. **Universe Ratings** — unified table of all stocks with status column:
+
+| Status | Meaning |
+|--------|---------|
+| NEW | Entered portfolio this week (CIO advanced) |
+| BUY REC | Buy recommendation, not yet held (no open slot) |
+| UPDATED | Continuing stock with material trigger, fresh thesis |
+| HOLD | Continuing stock, carryover thesis from prior week |
+| EXIT | Dropped from portfolio this week |
+
+Sorted by status priority, then score descending. Each stock has rating, score, and thesis rationale.
+
+---
+
 ## Data Sources
 
 | Data Type | Source | Cost |
@@ -175,7 +205,7 @@ Teams always produce 2-3 picks regardless of allocation. The CIO selects from th
 | Email | AWS SES + Gmail SMTP | Free tier |
 | Storage | AWS S3 | ~$0.50/month |
 
-FMP rate-limited with thread-safe 250ms interval + retry with exponential backoff on 429.
+FMP rate-limited: 1 req/sec with global thread lock, 250/day budget tracked in-process. First 429 response immediately disables all FMP calls for remainder of run (graceful degradation — agents proceed without analyst data). yfinance uses sequential batches of 100 with rate-limited session via `requests-ratelimiter`.
 
 ---
 
@@ -250,10 +280,10 @@ Tests cover scoring engine, agent JSON extraction, rotation logic, archive CRUD,
 - **Adaptive slot allocation**: Weight team recommendations by historical accuracy
 - **Backtester team performance**: Per-team signal accuracy at 10d/30d, fed back to CIO
 - **IC critic**: Add a Haiku critic to challenge CIO selections before finalization
-- **Thesis maintenance optimization**: Only update theses for stocks with material news
+- ~~**Thesis maintenance optimization**: Only update theses for stocks with material news~~ ✅ Implemented — material triggers check all held stocks weekly, carryover thesis for unchanged stocks
 
 ### Performance
-- **S3 price caching**: Cache weekly price data to avoid re-downloading 900 tickers from yfinance
+- ~~**S3 price caching**: Cache weekly price data to avoid re-downloading 900 tickers from yfinance~~ ✅ Predictor maintains S3 price cache; research uses sequential rate-limited batches
 - **Batch S3 I/O**: Consolidated JSON alongside per-ticker files
 - **LangGraph state optimization**: Return only changed keys from memory-intensive nodes
 
