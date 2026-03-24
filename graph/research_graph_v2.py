@@ -778,11 +778,17 @@ def _build_signals_payload(state: ResearchStateV2) -> dict:
             prior = prior_theses.get(ticker, {})
             sector = sector_map.get(ticker, p.get("sector", "Unknown"))
             prior_rating = prior.get("rating") or p.get("long_term_rating", "HOLD")
+            carried_score = prior.get("score") or p.get("long_term_score")
+            # Only emit ENTER if we have a score — unscored holdovers stay HOLD
+            if prior_rating == "BUY" and carried_score is not None:
+                carried_signal = "ENTER"
+            else:
+                carried_signal = "HOLD"
             signals[ticker] = {
                 "ticker": ticker,
-                "score": prior.get("score") or p.get("long_term_score"),
+                "score": carried_score,
                 "rating": prior_rating,
-                "signal": "ENTER" if prior_rating == "BUY" else "HOLD",
+                "signal": carried_signal,
                 "conviction": normalize_conviction(prior.get("conviction") or p.get("conviction", "stable")),
                 "thesis_summary": prior.get("thesis_summary", ""),
                 "sector": sector,
