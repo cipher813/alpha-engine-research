@@ -311,6 +311,29 @@ pytest tests/ -v
 
 Tests cover scoring engine, agent JSON extraction, rotation logic, archive CRUD, and scheduling. No LLM API calls or AWS access required.
 
+### Local Pipeline Runs
+
+```bash
+# Offline mode: synthetic data, no API/LLM/S3 calls
+python local/run.py --offline
+
+# No-S3 mode: real APIs, writes signals to local/output/ instead of S3, no email
+# Safe for preprod testing — does not affect live executor
+python local/run.py --no-s3
+
+# Full local run: real APIs, writes to S3, sends email (same as Lambda)
+python local/run.py --local
+
+# Specify date
+python local/run.py --offline --date 2026-03-24
+```
+
+**Preprod workflow:**
+1. `--offline` — verify pipeline logic runs without crashes
+2. `--no-s3` — verify with real APIs, inspect `local/output/signals-{date}.json`
+3. Validate output: `python ~/Development/alpha-engine/tests/validate_signals.py local/output/signals-{date}.json`
+4. `--local` — push to prod S3 and send email
+
 ---
 
 ## Opportunities
