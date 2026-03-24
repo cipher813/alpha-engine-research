@@ -2,8 +2,9 @@
 Local test runner — bypasses Lambda for development and testing.
 
 Usage:
-  python local/run.py                    # run today's pipeline (alias for --local)
-  python local/run.py --local            # full pipeline from laptop: real APIs, S3 write, email
+  python local/run.py                    # run today's pipeline (full: APIs + S3 + email)
+  python local/run.py --local            # same as above (explicit)
+  python local/run.py --no-s3            # real APIs but write signals to local file, skip email
   python local/run.py --date 2026-03-05  # run for a specific date
   python local/run.py --offline          # full offline: no API/LLM/S3 calls (synthetic data)
 
@@ -42,6 +43,9 @@ def main():
                         help="Run date (YYYY-MM-DD). Defaults to today.")
     parser.add_argument("--local", action="store_true",
                         help="Full pipeline from laptop: real APIs, writes signals to S3, sends email.")
+    parser.add_argument("--no-s3", action="store_true",
+                        help="Real APIs but write signals.json to local file instead of S3, skip email. "
+                             "Safe preprod check — does not affect live executor.")
     parser.add_argument("--skip-scanner", action="store_true",
                         help="Skip scanner pipeline (Branch B) for faster testing.")
     parser.add_argument("--offline", action="store_true",
@@ -58,6 +62,8 @@ def main():
     print(f"alpha-engine-research local run — {run_date}")
     if args.offline:
         print("OFFLINE MODE: all external calls stubbed with synthetic data")
+    elif args.no_s3:
+        print("NO-S3 MODE: real APIs, signals written to local file, email skipped")
 
     # Check trading day (use importlib: 'lambda' is a reserved keyword)
     import importlib
@@ -114,6 +120,39 @@ def main():
 
     if ARCHITECTURE_VERSION != "v2_sector_teams":
         state["performance_summary"] = perf_summary
+
+    # --no-s3: intercept S3 writes → local files, skip email
+    if args.no_s3 and not args.offline:
+        import json as _json
+        _out_dir = os.path.join(project_root, "local", "output")
+        os.makedirs(_out_dir, exist_ok=True)
+
+        if ARCHITECTURE_VERSION == "v2_sector_teams":
+            import graph.research_graph_v2 as _gm
+
+            _orig_archive_writer = _gm.archive_writer_v2
+            def _local_archive_writer(state):
+                """Run archive writer but redirect signals.json to local file."""
+                # Build signals payload without writing to S3
+                from graph.research_graph_v2 import _build_signals_payload
+                try:
+                    payload = _build_signals_payload(state)
+                    out_path = os.path.join(_out_dir, f"signals-{run_date}.json")
+                    with open(out_path, "w") as f:
+                        _json.dump(payload, f, indent=2)
+                    print(f"\n=== SIGNALS WRITTEN TO: {out_path} ===")
+                except Exception as e:
+                    print(f"WARNING: could not write local signals: {e}")
+                # Still run archive writer for SQLite but skip S3 uploads
+                am = state.get("archive_manager")
+                if am:
+                    am.upload_db = lambda *a, **k: None
+                    am.write_signals_json = lambda *a, **k: None
+                return _orig_archive_writer(state)
+            _gm.archive_writer_v2 = _local_archive_writer
+
+            # Skip email
+            _gm.email_sender_v2 = lambda state: {"email_sent": False}
 
     if args.skip_scanner and ARCHITECTURE_VERSION != "v2_sector_teams":
         import graph.research_graph as graph_mod
