@@ -8,13 +8,15 @@ surprises from the v3 API for PEAD scoring (O10).
 
 from __future__ import annotations
 
+import json as _json
 import logging
 import os
 import threading
 import time
-from datetime import datetime
+from datetime import date, datetime
 from typing import Optional
 
+import boto3
 import requests
 
 logger = logging.getLogger(__name__)
@@ -23,11 +25,43 @@ _FMP_STABLE = "https://financialmodelingprep.com/stable"
 _FMP_V3 = "https://financialmodelingprep.com/api/v3"
 _TIMEOUT = 10
 
+# S3 persistence for FMP daily counter (survives Lambda cold starts)
+_FMP_COUNTER_BUCKET = "alpha-engine-research"
+_FMP_COUNTER_KEY = "health/fmp_daily_count.json"
+
+
+def _load_fmp_counter() -> int:
+    """Load today's FMP call count from S3. Returns 0 if not found or stale."""
+    try:
+        s3 = boto3.client("s3")
+        obj = s3.get_object(Bucket=_FMP_COUNTER_BUCKET, Key=_FMP_COUNTER_KEY)
+        data = _json.loads(obj["Body"].read())
+        if data.get("date") == str(date.today()):
+            return data.get("count", 0)
+    except Exception:
+        pass
+    return 0
+
+
+def _save_fmp_counter(count: int) -> None:
+    """Persist FMP call count to S3."""
+    try:
+        s3 = boto3.client("s3")
+        s3.put_object(
+            Bucket=_FMP_COUNTER_BUCKET,
+            Key=_FMP_COUNTER_KEY,
+            Body=_json.dumps({"date": str(date.today()), "count": count}).encode(),
+            ContentType="application/json",
+        )
+    except Exception as e:
+        logger.warning("Failed to persist FMP counter: %s", e)
+
+
 # Rate limiter: FMP free tier = 250 req/day.
 # With 6 sector teams calling in parallel, we need a global lock and daily counter.
 _fmp_lock = threading.Lock()
 _fmp_last_call = 0.0
-_fmp_daily_count = 0
+_fmp_daily_count = _load_fmp_counter()
 _FMP_MIN_INTERVAL = 1.0  # 1s between calls — spreads 250 daily quota over ~4 min
 _FMP_DAILY_LIMIT = 250  # FMP free tier hard limit; FMP returns 429 if exceeded
 _FMP_MAX_RETRIES = 3
@@ -68,6 +102,8 @@ def _fmp_get(endpoint: str, params: Optional[dict] = None, base: str = _FMP_STAB
                 time.sleep(wait)
             _fmp_last_call = time.monotonic()
             _fmp_daily_count += 1
+            if _fmp_daily_count % 25 == 0:
+                _save_fmp_counter(_fmp_daily_count)
 
         resp = requests.get(url, params=p, timeout=_TIMEOUT)
 
@@ -75,6 +111,7 @@ def _fmp_get(endpoint: str, params: Optional[dict] = None, base: str = _FMP_STAB
             # 429 means daily quota is exhausted — stop all FMP calls immediately
             with _fmp_lock:
                 _fmp_daily_count = _FMP_DAILY_LIMIT
+            _save_fmp_counter(_fmp_daily_count)
             logger.warning("FMP 429 for %s — daily quota exhausted, disabling FMP for remainder of run",
                            endpoint)
             raise FMPDailyLimitError(f"FMP 429 received — quota exhausted")

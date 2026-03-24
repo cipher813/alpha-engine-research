@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -27,24 +28,35 @@ _FRED_TIMEOUT = 15
 
 
 def _fred_latest(series_id: str, api_key: str) -> Optional[float]:
-    """Fetch the most recent observation for a FRED series."""
-    try:
-        params = {
-            "series_id": series_id,
-            "api_key": api_key,
-            "file_type": "json",
-            "sort_order": "desc",
-            "limit": 5,
-        }
-        resp = requests.get(_FRED_BASE, params=params, timeout=_FRED_TIMEOUT)
-        resp.raise_for_status()
-        obs = resp.json().get("observations", [])
-        for o in obs:
-            val = o.get("value", ".")
-            if val != ".":
-                return float(val)
-    except Exception as e:
-        logger.warning("FRED fetch failed for %s: %s", series_id, e)
+    """Fetch the most recent observation for a FRED series (with retry)."""
+    last_err = None
+    for attempt in range(1, 3):  # 2 attempts
+        try:
+            params = {
+                "series_id": series_id,
+                "api_key": api_key,
+                "file_type": "json",
+                "sort_order": "desc",
+                "limit": 5,
+            }
+            resp = requests.get(_FRED_BASE, params=params, timeout=_FRED_TIMEOUT)
+            resp.raise_for_status()
+            obs = resp.json().get("observations", [])
+            for o in obs:
+                val = o.get("value", ".")
+                if val != ".":
+                    return float(val)
+            return None
+        except requests.exceptions.RequestException as e:
+            last_err = e
+            if attempt < 2:
+                logger.warning("FRED fetch failed for %s (attempt %d/2): %s — retrying in 3s", series_id, attempt, e)
+                time.sleep(3)
+            else:
+                logger.warning("FRED fetch failed for %s after 2 attempts: %s", series_id, e)
+        except Exception as e:
+            logger.warning("FRED fetch failed for %s: %s", series_id, e)
+            return None
     return None
 
 
@@ -117,7 +129,7 @@ def fetch_macro_data() -> dict:
     Returns dict with:
       fed_funds_rate, treasury_2yr, treasury_10yr, yield_curve_slope,
       vix, unemployment, cpi_yoy,
-      ism_pmi, initial_claims, hy_credit_spread_oas,
+      consumer_sentiment, initial_claims, hy_credit_spread_oas,
       sp500_close, sp500_30d_return, qqq_30d_return, iwm_30d_return,
       oil_wti, gold, copper
     """
@@ -134,7 +146,7 @@ def fetch_macro_data() -> dict:
         "unemployment": "UNRATE",
         "cpi_yoy": "CPIAUCSL",  # we'll compute YoY below
         # Leading indicators
-        "ism_pmi": "NAPM",                   # ISM Manufacturing PMI
+        "consumer_sentiment": "UMCSENT",      # U. Michigan Consumer Sentiment
         "initial_claims": "ICSA",            # Initial Jobless Claims (weekly, thousands)
         "hy_credit_spread_oas": "BAMLH0A0HYM2",  # ICE BofA HY OAS (bps)
     }

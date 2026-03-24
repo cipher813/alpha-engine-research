@@ -118,7 +118,7 @@ def _stub_fetch_macro_data():
         "spy_30d": 2.1, "qqq_30d": 3.4, "iwm_30d": 1.2,
         "oil": 78.50, "gold": 2350.0, "copper": 4.25,
         "cpi_yoy": 3.1, "unemployment": 3.9,
-        "ism_pmi": 51.2, "initial_claims": 215,
+        "consumer_sentiment": 67.8, "initial_claims": 215,
         "hy_oas": 340,
         "upcoming_releases": "CPI (next week), FOMC (in 2 weeks)",
     }
