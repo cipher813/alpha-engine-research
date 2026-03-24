@@ -2,9 +2,9 @@
 Local test runner — bypasses Lambda for development and testing.
 
 Usage:
-  python local/run.py                    # run today's pipeline
+  python local/run.py                    # run today's pipeline (alias for --local)
+  python local/run.py --local            # full pipeline from laptop: real APIs, S3 write, email
   python local/run.py --date 2026-03-05  # run for a specific date
-  python local/run.py --dry-run          # skip email, skip S3 write
   python local/run.py --offline          # full offline: no API/LLM/S3 calls (synthetic data)
 
 Requires environment variables (unless --offline):
@@ -40,8 +40,8 @@ def main():
     parser = argparse.ArgumentParser(description="Run alpha-engine-research pipeline locally")
     parser.add_argument("--date", type=str, default=None,
                         help="Run date (YYYY-MM-DD). Defaults to today.")
-    parser.add_argument("--dry-run", action="store_true",
-                        help="Skip email delivery and S3 upload. Print report to stdout.")
+    parser.add_argument("--local", action="store_true",
+                        help="Full pipeline from laptop: real APIs, writes signals to S3, sends email.")
     parser.add_argument("--skip-scanner", action="store_true",
                         help="Skip scanner pipeline (Branch B) for faster testing.")
     parser.add_argument("--offline", action="store_true",
@@ -58,8 +58,6 @@ def main():
     print(f"alpha-engine-research local run — {run_date}")
     if args.offline:
         print("OFFLINE MODE: all external calls stubbed with synthetic data")
-    elif args.dry_run:
-        print("DRY RUN: email and S3 writes disabled")
 
     # Check trading day (use importlib: 'lambda' is a reserved keyword)
     import importlib
@@ -116,14 +114,6 @@ def main():
 
     if ARCHITECTURE_VERSION != "v2_sector_teams":
         state["performance_summary"] = perf_summary
-
-    if args.dry_run and not args.offline:
-        if ARCHITECTURE_VERSION == "v2_sector_teams":
-            import graph.research_graph_v2 as graph_mod
-            graph_mod.email_sender_v2 = lambda state: {"email_sent": False}
-        else:
-            import graph.research_graph as graph_mod
-            graph_mod.send_email = lambda **kwargs: (print("\n=== EMAIL BODY ===\n" + kwargs.get("plain_body", "")), True)[1]
 
     if args.skip_scanner and ARCHITECTURE_VERSION != "v2_sector_teams":
         import graph.research_graph as graph_mod

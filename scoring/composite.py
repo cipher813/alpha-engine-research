@@ -87,6 +87,40 @@ def compute_composite_score(
     }
 
 
+_VALID_CONVICTIONS = {"rising", "stable", "declining"}
+
+
+def normalize_conviction(raw_conviction) -> str:
+    """Map v2 conviction formats to executor-compatible enum.
+
+    Accepts:
+      - Already valid: "rising", "stable", "declining" -> pass through
+      - Qual analyst strings: "high" -> "rising", "medium" -> "stable", "low" -> "declining"
+      - CIO numeric (0-100): >= 70 -> "rising", 40-69 -> "stable", < 40 -> "declining"
+      - Anything else (sentences, None, etc.) -> "stable"
+    """
+    if isinstance(raw_conviction, str):
+        lower = raw_conviction.strip().lower()
+        if lower in _VALID_CONVICTIONS:
+            return lower
+        if lower == "high":
+            return "rising"
+        if lower == "medium":
+            return "stable"
+        if lower == "low":
+            return "declining"
+        return "stable"
+
+    if isinstance(raw_conviction, (int, float)):
+        if raw_conviction >= 70:
+            return "rising"
+        if raw_conviction >= 40:
+            return "stable"
+        return "declining"
+
+    return "stable"
+
+
 def score_to_rating(score: float | None, buy_threshold: float = 70.0, sell_threshold: float = 40.0) -> str:
     """Convert a composite score to a rating."""
     if score is None:

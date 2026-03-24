@@ -48,7 +48,7 @@ from data.population_selector import (
     compute_exits_and_open_slots,
     apply_ic_entries,
 )
-from scoring.composite import compute_composite_score, score_to_rating
+from scoring.composite import compute_composite_score, normalize_conviction, score_to_rating
 from archive.manager import ArchiveManager
 
 logger = logging.getLogger(__name__)
@@ -379,7 +379,7 @@ def score_aggregator_v2(state: ResearchStateV2) -> dict:
                 "bull_case": rec.get("bull_case", ""),
                 "bear_case": rec.get("bear_case", ""),
                 "catalysts": rec.get("catalysts", []),
-                "conviction": rec.get("conviction", "medium"),
+                "conviction": normalize_conviction(rec.get("conviction", "medium")),
                 "quant_rationale": rec.get("quant_rationale", ""),
                 "rating": score_to_rating(score_result["final_score"]),
                 "score_failed": score_result["score_failed"],
@@ -763,7 +763,7 @@ def _build_signals_payload(state: ResearchStateV2) -> dict:
             "score": thesis.get("final_score"),
             "rating": rating,
             "signal": signal,
-            "conviction": thesis.get("conviction", "stable"),
+            "conviction": normalize_conviction(thesis.get("conviction", "stable")),
             "thesis_summary": thesis.get("bull_case", ""),
             "sector": thesis.get("sector", "Unknown"),
             "team_id": thesis.get("team_id"),
@@ -783,7 +783,7 @@ def _build_signals_payload(state: ResearchStateV2) -> dict:
                 "score": prior.get("score") or p.get("long_term_score"),
                 "rating": prior_rating,
                 "signal": "ENTER" if prior_rating == "BUY" else "HOLD",
-                "conviction": prior.get("conviction") or p.get("conviction", "stable"),
+                "conviction": normalize_conviction(prior.get("conviction") or p.get("conviction", "stable")),
                 "thesis_summary": prior.get("thesis_summary", ""),
                 "sector": sector,
                 "team_id": prior.get("team_id"),
