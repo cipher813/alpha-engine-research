@@ -28,7 +28,7 @@ CREATE TABLE IF NOT EXISTS rag.chunks (
     chunk_index INTEGER NOT NULL,
     content TEXT NOT NULL,
     section_label VARCHAR(100),          -- 'Risk Factors', 'MD&A', 'prepared_remarks', 'qa_session', etc.
-    embedding vector(1024),              -- Voyage voyage-3-lite dimension
+    embedding vector(512),               -- Voyage voyage-3-lite dimension
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
