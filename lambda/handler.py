@@ -72,18 +72,11 @@ def handler(event, context):
     Returns:
         dict with status: "OK" | "SKIPPED" | "ERROR"
     """
+    os.environ.setdefault("XDG_CACHE_HOME", "/tmp")
+
     force = event.get("force", False)
     weekly = event.get("weekly_run", False)
-
     fd = None
-    try:
-        import flow_doctor
-        fd = flow_doctor.init(config_path=os.path.join(
-            os.path.dirname(os.path.dirname(__file__)), "flow-doctor.yaml"))
-    except ImportError:
-        pass  # flow-doctor not installed — optional dependency
-    except Exception as e:
-        print(f"WARNING: flow-doctor init failed: {e}")
 
     # Time gate: weekly runs and force bypass; weekday runs require 5:40-5:55am PT
     if not force and not weekly and not _is_scheduled_run_time():
@@ -164,7 +157,7 @@ def handler(event, context):
             is_early_close=early_close,
         )
         initial_state["performance_summary"] = perf_summary
-        initial_state["flow_doctor"] = fd
+        initial_state["flow_doctor"] = None
 
         final_state = graph.invoke(initial_state)
 
@@ -218,10 +211,4 @@ def handler(event, context):
         except Exception as he:
             print(f"WARNING: health status write failed: {he}")
 
-        if fd:
-            fd.report(e, severity="critical", context={
-                "site": "research_pipeline_toplevel",
-                "run_date": run_date,
-                "weekly_run": weekly,
-            })
         return {"status": "ERROR", "date": run_date, "error": str(e)}
