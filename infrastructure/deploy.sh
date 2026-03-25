@@ -172,6 +172,26 @@ build_and_deploy_main() {
       --region "$REGION" > /dev/null
   fi
   echo "  $FUNCTION_MAIN deployed (container image)."
+
+  # Publish version and update 'live' alias
+  echo "  Publishing Lambda version..."
+  aws lambda wait function-updated --function-name "$FUNCTION_MAIN" --region "$REGION" 2>/dev/null || sleep 5
+  VERSION=$(aws lambda publish-version \
+    --function-name "$FUNCTION_MAIN" \
+    --query "Version" --output text \
+    --region "$REGION")
+  echo "  Published version: $VERSION"
+  aws lambda update-alias \
+    --function-name "$FUNCTION_MAIN" \
+    --name live \
+    --function-version "$VERSION" \
+    --region "$REGION" 2>/dev/null || \
+  aws lambda create-alias \
+    --function-name "$FUNCTION_MAIN" \
+    --name live \
+    --function-version "$VERSION" \
+    --region "$REGION"
+  echo "  Alias 'live' → version $VERSION"
 }
 
 # ── Alerts function: container image deployment ───────────────────────────────
