@@ -4,12 +4,15 @@ Downloads filing HTML from SEC EDGAR, extracts key sections (Risk Factors,
 MD&A, Business Description), chunks the text, embeds via Voyage, and stores
 in Neon pgvector.
 
+Uses the EDGAR full-text search API (efts.sec.gov/LATEST/search-index) for
+filing discovery and the EDGAR Archives for document download.
+
 Usage:
     # Ingest recent filings for a list of tickers
-    python -m rag.pipelines.ingest_sec_filings --tickers AAPL,MSFT,GOOG
+    .venv/bin/python -m rag.pipelines.ingest_sec_filings --tickers AAPL,MSFT,GOOG
 
-    # Backfill last 2 years for all tickers in a signals file
-    python -m rag.pipelines.ingest_sec_filings --from-signals --lookback-years 2
+    # Backfill last 2 years for all tickers in latest signals
+    .venv/bin/python -m rag.pipelines.ingest_sec_filings --from-signals --lookback-years 2
 """
 
 from __future__ import annotations
@@ -27,92 +30,134 @@ from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
 
-_EDGAR_SEARCH_URL = "https://efts.sec.gov/LATEST/search-index"
-_EDGAR_FULL_TEXT_URL = "https://efts.sec.gov/LATEST/search-index"
-_EDGAR_FILING_URL = "https://www.sec.gov/cgi-bin/browse-edgar"
-_EDGAR_ARCHIVES_URL = "https://www.sec.gov/Archives/edgar/data"
-_SEC_HEADERS = {"User-Agent": "AlphaEngine research@nousergon.ai"}
+_SEC_HEADERS = {
+    "User-Agent": "AlphaEngine research@nousergon.ai",
+    "Accept-Encoding": "gzip, deflate",
+}
 
 # Sections to extract from 10-K / 10-Q
 _TARGET_SECTIONS = [
     "Risk Factors",
     "Management's Discussion and Analysis",
     "Business",
-    "Financial Statements",
     "Quantitative and Qualitative Disclosures About Market Risk",
 ]
 
-# Chunk config
-_CHUNK_SIZE = 400  # tokens (approximate by words * 1.3)
+_CHUNK_SIZE = 400
 _CHUNK_OVERLAP = 50
 
 
+# ── CIK lookup ───────────────────────────────────────────────────────────────
+
+_CIK_CACHE: dict[str, str] = {}
+
+
+def _get_cik(ticker: str) -> str | None:
+    """Look up a company's CIK number from ticker via EDGAR company tickers JSON."""
+    if ticker in _CIK_CACHE:
+        return _CIK_CACHE[ticker]
+
+    try:
+        resp = requests.get(
+            "https://www.sec.gov/files/company_tickers.json",
+            headers=_SEC_HEADERS,
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            for entry in data.values():
+                t = entry.get("ticker", "").upper()
+                cik = str(entry.get("cik_str", ""))
+                _CIK_CACHE[t] = cik
+            return _CIK_CACHE.get(ticker.upper())
+    except Exception as e:
+        logger.warning("CIK lookup failed: %s", e)
+    return None
+
+
+# ── Filing search via EDGAR submissions API ──────────────────────────────────
+
 def _search_filings(ticker: str, form_types: list[str], lookback_days: int = 730) -> list[dict]:
-    """Search SEC EDGAR for recent filings of given types."""
+    """Search SEC EDGAR for recent filings using the submissions API.
+
+    Uses https://data.sec.gov/submissions/CIK{cik}.json which returns
+    all recent filings for a company with proper form types.
+    """
+    cik = _get_cik(ticker)
+    if not cik:
+        logger.warning("No CIK found for %s", ticker)
+        return []
+
+    cik_padded = cik.zfill(10)
+    url = f"https://data.sec.gov/submissions/CIK{cik_padded}.json"
+
+    try:
+        time.sleep(0.12)  # SEC rate limit: 10 req/sec
+        resp = requests.get(url, headers=_SEC_HEADERS, timeout=15)
+        if resp.status_code != 200:
+            logger.warning("EDGAR submissions API returned %d for %s", resp.status_code, ticker)
+            return []
+        data = resp.json()
+    except Exception as e:
+        logger.warning("EDGAR submissions API failed for %s: %s", ticker, e)
+        return []
+
+    cutoff = date.today() - timedelta(days=lookback_days)
+    form_type_set = set(f.upper() for f in form_types)
+
     results = []
-    for form_type in form_types:
-        params = {
-            "q": f'"{ticker}"',
-            "dateRange": "custom",
-            "startdt": (date.today() - timedelta(days=lookback_days)).isoformat(),
-            "enddt": date.today().isoformat(),
-            "forms": form_type,
-        }
+    recent = data.get("filings", {}).get("recent", {})
+    forms = recent.get("form", [])
+    dates = recent.get("filingDate", [])
+    accessions = recent.get("accessionNumber", [])
+    primary_docs = recent.get("primaryDocument", [])
+
+    for i, form in enumerate(forms):
+        if form.upper() not in form_type_set:
+            continue
+        filed_str = dates[i] if i < len(dates) else ""
+        if not filed_str:
+            continue
         try:
-            resp = requests.get(
-                "https://efts.sec.gov/LATEST/search-index",
-                params=params,
-                headers=_SEC_HEADERS,
-                timeout=15,
-            )
-            if resp.status_code != 200:
-                # Fallback: use EDGAR full-text search API
-                resp = requests.get(
-                    "https://efts.sec.gov/LATEST/search-index",
-                    params={"q": ticker, "forms": form_type, "dateRange": "custom",
-                            "startdt": params["startdt"], "enddt": params["enddt"]},
-                    headers=_SEC_HEADERS,
-                    timeout=15,
-                )
-            data = resp.json() if resp.status_code == 200 else {}
-            for hit in data.get("hits", {}).get("hits", []):
-                src = hit.get("_source", {})
-                results.append({
-                    "form_type": form_type,
-                    "filed_date": src.get("file_date", ""),
-                    "accession_number": src.get("accession_no", "").replace("-", ""),
-                    "cik": src.get("entity_id", ""),
-                    "company_name": src.get("entity_name", ""),
-                    "url": f"https://www.sec.gov/Archives/edgar/data/{src.get('entity_id', '')}/{src.get('accession_no', '').replace('-', '')}/",
-                })
-        except Exception as e:
-            logger.warning("EDGAR search failed for %s %s: %s", ticker, form_type, e)
-        time.sleep(0.15)  # SEC rate limit: 10 req/sec
+            filed_date = date.fromisoformat(filed_str)
+        except ValueError:
+            continue
+        if filed_date < cutoff:
+            continue
+
+        accession = accessions[i] if i < len(accessions) else ""
+        primary_doc = primary_docs[i] if i < len(primary_docs) else ""
+        accession_path = accession.replace("-", "")
+
+        doc_url = (
+            f"https://www.sec.gov/Archives/edgar/data/{cik}/{accession_path}/{primary_doc}"
+            if primary_doc
+            else f"https://www.sec.gov/Archives/edgar/data/{cik}/{accession_path}/"
+        )
+
+        results.append({
+            "form_type": form.upper(),
+            "filed_date": filed_str,
+            "accession_number": accession,
+            "cik": cik,
+            "primary_doc": primary_doc,
+            "url": doc_url,
+        })
+
+    logger.info("Found %d %s filings for %s (since %s)", len(results), form_types, ticker, cutoff)
     return results
 
 
-def _download_filing_html(url: str) -> str | None:
-    """Download the primary filing document HTML from an EDGAR filing URL."""
-    try:
-        # Get the filing index page to find the primary document
-        resp = requests.get(url, headers=_SEC_HEADERS, timeout=30)
-        if resp.status_code != 200:
-            return None
-        soup = BeautifulSoup(resp.text, "lxml")
+# ── Filing download and section extraction ───────────────────────────────────
 
-        # Find the primary document link (usually the .htm file)
-        for row in soup.select("table.tableFile tr"):
-            cells = row.find_all("td")
-            if len(cells) >= 4:
-                doc_type = cells[3].get_text(strip=True)
-                if doc_type in ("10-K", "10-Q", "10-K/A", "10-Q/A"):
-                    link = cells[2].find("a")
-                    if link and link.get("href"):
-                        doc_url = "https://www.sec.gov" + link["href"]
-                        time.sleep(0.15)
-                        doc_resp = requests.get(doc_url, headers=_SEC_HEADERS, timeout=60)
-                        if doc_resp.status_code == 200:
-                            return doc_resp.text
+def _download_filing_html(url: str) -> str | None:
+    """Download filing document from EDGAR Archives."""
+    try:
+        time.sleep(0.12)
+        resp = requests.get(url, headers=_SEC_HEADERS, timeout=60)
+        if resp.status_code == 200 and len(resp.text) > 1000:
+            return resp.text
+        logger.debug("Filing download returned %d (%d bytes) from %s", resp.status_code, len(resp.text), url)
         return None
     except Exception as e:
         logger.warning("Failed to download filing from %s: %s", url, e)
@@ -120,16 +165,12 @@ def _download_filing_html(url: str) -> str | None:
 
 
 def _extract_sections(html: str) -> dict[str, str]:
-    """Extract target sections from filing HTML.
-
-    Returns dict mapping section_label → text content.
-    """
+    """Extract target sections from filing HTML."""
     soup = BeautifulSoup(html, "lxml")
     text = soup.get_text(separator="\n", strip=True)
 
     sections = {}
     for section_name in _TARGET_SECTIONS:
-        # Try to find section by heading pattern
         pattern = re.compile(
             rf"(?:Item\s+\d+[A-Z]?\.?\s*)?{re.escape(section_name)}",
             re.IGNORECASE,
@@ -137,26 +178,20 @@ def _extract_sections(html: str) -> dict[str, str]:
         match = pattern.search(text)
         if match:
             start = match.start()
-            # Find the next section heading (Item N.)
             next_item = re.search(r"\nItem\s+\d+[A-Z]?\.?\s+[A-Z]", text[start + len(match.group()):])
             end = start + len(match.group()) + next_item.start() if next_item else start + 50000
             section_text = text[start:end].strip()
-            # Truncate very long sections (some MD&A sections are 100K+ chars)
             if len(section_text) > 50000:
                 section_text = section_text[:50000]
-            if len(section_text) > 200:  # skip empty/trivial sections
+            if len(section_text) > 200:
                 sections[section_name] = section_text
 
     return sections
 
 
 def _chunk_text(text: str, chunk_size: int = _CHUNK_SIZE, overlap: int = _CHUNK_OVERLAP) -> list[str]:
-    """Split text into overlapping chunks by approximate token count.
-
-    Uses word count * 1.3 as token approximation.
-    """
+    """Split text into overlapping chunks by approximate token count."""
     words = text.split()
-    # Approximate words per chunk (tokens / 1.3)
     words_per_chunk = int(chunk_size / 1.3)
     overlap_words = int(overlap / 1.3)
 
@@ -174,6 +209,8 @@ def _chunk_text(text: str, chunk_size: int = _CHUNK_SIZE, overlap: int = _CHUNK_
     return chunks
 
 
+# ── Per-ticker ingestion ─────────────────────────────────────────────────────
+
 def ingest_ticker(
     ticker: str,
     sector: str | None = None,
@@ -181,10 +218,7 @@ def ingest_ticker(
     lookback_days: int = 730,
     dry_run: bool = False,
 ) -> int:
-    """Ingest SEC filings for a single ticker.
-
-    Returns number of documents ingested.
-    """
+    """Ingest SEC filings for a single ticker. Returns count ingested."""
     from rag.embeddings import embed_texts
     from rag.retrieval import ingest_document, document_exists
 
@@ -192,14 +226,10 @@ def ingest_ticker(
         form_types = ["10-K", "10-Q"]
 
     filings = _search_filings(ticker, form_types, lookback_days)
-    logger.info("Found %d filings for %s", len(filings), ticker)
 
     ingested = 0
     for filing in filings:
         filed_date_str = filing.get("filed_date", "")
-        if not filed_date_str:
-            continue
-
         try:
             filed_date = date.fromisoformat(filed_date_str[:10])
         except ValueError:
@@ -215,8 +245,7 @@ def ingest_ticker(
             ingested += 1
             continue
 
-        # Download and parse
-        html = _download_filing_html(filing.get("url", ""))
+        html = _download_filing_html(filing["url"])
         if not html:
             logger.warning("Could not download %s %s %s", ticker, form_type, filed_date)
             continue
@@ -226,7 +255,6 @@ def ingest_ticker(
             logger.warning("No sections extracted from %s %s %s", ticker, form_type, filed_date)
             continue
 
-        # Chunk and embed all sections
         all_chunks = []
         for section_label, section_text in sections.items():
             for chunk_text in _chunk_text(section_text):
@@ -238,12 +266,10 @@ def ingest_ticker(
         if not all_chunks:
             continue
 
-        # Embed in batch
         embeddings = embed_texts([c["content"] for c in all_chunks])
         for chunk, emb in zip(all_chunks, embeddings):
             chunk["embedding"] = emb
 
-        # Store
         doc_id = ingest_document(
             ticker=ticker,
             sector=sector,
@@ -256,9 +282,12 @@ def ingest_ticker(
         )
         if doc_id:
             ingested += 1
+            logger.info("Ingested %s %s %s: %d chunks", ticker, form_type, filed_date, len(all_chunks))
 
     return ingested
 
+
+# ── CLI ──────────────────────────────────────────────────────────────────────
 
 def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -275,14 +304,12 @@ def main():
     elif args.from_signals:
         import boto3
         s3 = boto3.client("s3")
-        # Find the most recent signals file
         resp = s3.list_objects_v2(Bucket="alpha-engine-research", Prefix="signals/", Delimiter="/")
         prefixes = sorted([p["Prefix"] for p in resp.get("CommonPrefixes", [])])
         if not prefixes:
             logger.error("No signals found on S3")
             return
-        latest = prefixes[-1]
-        obj = s3.get_object(Bucket="alpha-engine-research", Key=f"{latest}signals.json")
+        obj = s3.get_object(Bucket="alpha-engine-research", Key=f"{prefixes[-1]}signals.json")
         data = json.loads(obj["Body"].read())
         tickers = [s["ticker"] for s in data.get("universe", []) if s.get("ticker")]
         logger.info("Loaded %d tickers from signals", len(tickers))
@@ -295,7 +322,6 @@ def main():
     for ticker in tickers:
         n = ingest_ticker(ticker, lookback_days=lookback_days, dry_run=args.dry_run)
         total += n
-        logger.info("Ingested %d filings for %s", n, ticker)
 
     logger.info("Total: %d filings ingested for %d tickers", total, len(tickers))
 
