@@ -33,5 +33,6 @@ python-dotenv~=1.0.1
 # SEC EDGAR data
 edgartools~=2.0
 
-# Error handling
-flow-doctor~=0.1
+# RAG — vector retrieval over SEC filings + earnings transcripts
+psycopg2-binary~=2.9
+voyageai~=0.3

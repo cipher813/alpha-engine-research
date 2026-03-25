@@ -147,6 +147,43 @@ def create_qual_tools(context: dict) -> list:
         except Exception as e:
             return json.dumps({"ticker": ticker, "error": str(e)})
 
+    @tool
+    def query_filings(ticker: str, query: str, doc_types: str = "10-K,10-Q,earnings_transcript") -> str:
+        """Search SEC filings and earnings transcripts for deep fundamental context.
+
+        Use this when evaluating competitive position, risk factors, management guidance,
+        capital allocation strategy, or business model changes. Returns relevant excerpts
+        from 10-K/10-Q filings and earnings call transcripts with source metadata.
+
+        Args:
+            ticker: Stock symbol (e.g., 'AAPL')
+            query: What to search for (e.g., 'competitive risks and market position')
+            doc_types: Comma-separated filing types (default: '10-K,10-Q,earnings_transcript')
+        """
+        try:
+            from rag.retrieval import retrieve
+            from datetime import date, timedelta
+
+            results = retrieve(
+                query=query,
+                tickers=[ticker],
+                doc_types=[d.strip() for d in doc_types.split(",")],
+                min_date=date.today() - timedelta(days=730),
+                top_k=8,
+            )
+            if not results:
+                return f"No filing data found for {ticker}."
+
+            formatted = []
+            for r in results:
+                formatted.append(
+                    f"[{r.doc_type} | {r.filed_date} | {r.section_label}]\n{r.content}"
+                )
+            return "\n\n---\n\n".join(formatted)
+        except Exception as e:
+            log.debug("RAG query_filings unavailable: %s", e)
+            return f"Filing search temporarily unavailable for {ticker}."
+
     return [
         get_news_articles,
         get_analyst_reports,
@@ -155,4 +192,5 @@ def create_qual_tools(context: dict) -> list:
         get_prior_thesis,
         get_options_flow,
         get_institutional_activity,
+        query_filings,
     ]
