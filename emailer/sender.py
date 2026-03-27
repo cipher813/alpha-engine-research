@@ -20,6 +20,7 @@ custom domain sender to avoid spam; @gmail.com senders will land in spam).
 
 from __future__ import annotations
 
+import logging
 import os
 import smtplib
 from email.mime.multipart import MIMEMultipart
@@ -29,6 +30,8 @@ import boto3
 from botocore.exceptions import ClientError
 
 from config import AWS_REGION
+
+logger = logging.getLogger(__name__)
 
 _GMAIL_SMTP_HOST = "smtp.gmail.com"
 _GMAIL_SMTP_PORT = 587
@@ -66,7 +69,7 @@ def _send_via_gmail_smtp(
             server.ehlo()
             server.login(sender, password)
             server.sendmail(sender, recipients, msg.as_string())
-        print(f"Email sent via Gmail SMTP: '{subject}' to {recipients}")
+        logger.info("Email sent via Gmail SMTP: '%s' to %s", subject, recipients)
         return True
     except smtplib.SMTPAuthenticationError as e:
         print(
@@ -75,7 +78,7 @@ def _send_via_gmail_smtp(
         )
         return False
     except Exception as e:
-        print(f"Gmail SMTP send error: {e}")
+        logger.error("Gmail SMTP send error: %s", e)
         return False
 
 

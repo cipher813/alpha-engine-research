@@ -8,11 +8,8 @@ Tools are created via factory that closes over shared context (prior_theses).
 from __future__ import annotations
 
 import json
-import logging
 
 from langchain_core.tools import tool
-
-log = logging.getLogger(__name__)
 
 
 def create_qual_tools(context: dict) -> list:

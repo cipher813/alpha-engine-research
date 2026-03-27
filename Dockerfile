@@ -22,6 +22,7 @@ COPY scoring/ ${LAMBDA_TASK_ROOT}/scoring/
 COPY thesis/ ${LAMBDA_TASK_ROOT}/thesis/
 COPY archive/ ${LAMBDA_TASK_ROOT}/archive/
 COPY evals/ ${LAMBDA_TASK_ROOT}/evals/
+COPY memory/ ${LAMBDA_TASK_ROOT}/memory/
 COPY flow-doctor.yaml ${LAMBDA_TASK_ROOT}/
 COPY retry.py ${LAMBDA_TASK_ROOT}/
 COPY health_status.py ${LAMBDA_TASK_ROOT}/

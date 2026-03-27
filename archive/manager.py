@@ -10,6 +10,9 @@ Manages the full archive lifecycle:
 
 S3 layout: see §7.1
 SQLite schema: see §7.2
+
+Note: Database columns use "symbol" for historical reasons.
+Application code uses "ticker". Both refer to the stock symbol (e.g., "AAPL").
 """
 
 from __future__ import annotations
@@ -375,8 +378,8 @@ class ArchiveManager:
         if raw:
             try:
                 return json.loads(raw)
-            except Exception:
-                pass
+            except Exception as e:
+                log.debug("JSON parse failed for %s: %s", key, e)
         return None
 
     def load_latest_theses(self, tickers: list[str]) -> dict[str, dict]:
@@ -517,7 +520,8 @@ class ArchiveManager:
             data = json.loads(raw)
             predictions = data.get("predictions", [])
             return {p["ticker"]: p for p in predictions if "ticker" in p}
-        except Exception:
+        except Exception as e:
+            log.debug("Failed to load predictions JSON: %s", e)
             return {}
 
     def write_predictor_outcome(self, symbol: str, prediction_date: str, outcome: dict) -> None:
@@ -1061,8 +1065,8 @@ class ArchiveManager:
             )
             self.db_conn.commit()
             return True
-        except Exception:
-            # Likely duplicate — update reinforced_date instead
+        except Exception as e:
+            log.debug("Semantic memory duplicate — reinforcing: %s", e)
             self.db_conn.execute(
                 "UPDATE memory_semantic SET reinforced_date = ? "
                 "WHERE category = ? AND source = ? AND content = ?",

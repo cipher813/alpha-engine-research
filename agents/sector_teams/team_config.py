@@ -50,6 +50,10 @@ TEAM_SECTORS: dict[str, list[str]] = {
 
 ALL_TEAM_IDS = list(TEAM_SECTORS.keys())
 
+# ── Agent Parameters ─────────────────────────────────────────────────────────
+QUANT_TOP_N = 10       # number of picks the quant analyst screens for
+MAX_TICKERS_IN_PROMPT = 200  # max tickers listed in quant analyst prompt
+
 # ── Slot Allocation ──────────────────────────────────────────────────────────
 # Teams always produce 2-3 picks. The slot allocation table determines how many
 # open slots each team's picks compete for (used by CIO for context, not by teams).

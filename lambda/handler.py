@@ -156,7 +156,7 @@ def handler(event, context):
 
         # Extract episodic memories from newly completed signal outcomes
         try:
-            from evals.memory_extractor import extract_memories
+            from memory.episodic import extract_memories
             n_memories = extract_memories(archive.db_conn)
             if n_memories:
                 print(f"Extracted {n_memories} new episodic memories from outcomes")
