@@ -749,6 +749,13 @@ class ArchiveManager:
         if not self.db_conn:
             return
 
+        # Normalize conviction for all entries before persisting — ensures
+        # retained stocks with stale thesis text in the conviction field
+        # get mapped to valid enum values ("rising"/"stable"/"declining").
+        from scoring.composite import normalize_conviction
+        for p in population:
+            p["conviction"] = normalize_conviction(p.get("conviction", "stable"))
+
         # SQLite: clear and rewrite population table
         self.db_conn.execute("DELETE FROM population")
         for p in population:
