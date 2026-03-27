@@ -31,12 +31,13 @@ for old in alpha-research-pdt alpha-research-pst alpha-research-sunday; do
   fi
 done
 
-# ── Weekly rule (Monday 06:00 UTC = Sunday ~10-11pm PT; population refresh) ──
+# ── Weekly rule (Saturday 06:00 UTC = Friday ~10-11pm PT; population refresh) ──
+# Saturday gives a weekend buffer to fix any pipeline issues before Monday trading.
 aws events put-rule \
   --name "$RULE_WEEKLY" \
-  --schedule-expression "cron(0 6 ? * MON *)" \
+  --schedule-expression "cron(0 6 ? * SAT *)" \
   --state ENABLED \
-  --description "Monday 06:00 UTC (Sun night PT) — weekly population refresh" \
+  --description "Saturday 06:00 UTC (Fri night PT) — weekly population refresh" \
   --region "$REGION"
 
 aws events put-targets \

@@ -88,14 +88,16 @@ class TestGetTradingDayOffset:
         result = get_trading_day_offset("2026-01-01", 3, db)
         assert result == "2026-01-06"
 
-    def test_returns_none_when_insufficient_rows(self, db):
+    def test_returns_calendar_fallback_when_insufficient_rows(self, db):
         _insert_tech_dates(db, ["2026-01-02", "2026-01-05"])
         result = get_trading_day_offset("2026-01-01", 10, db)
-        assert result is None
+        # Falls back to calendar-based calculation when DB has insufficient rows
+        assert result is not None
 
-    def test_returns_none_on_empty_table(self, db):
+    def test_returns_calendar_fallback_on_empty_table(self, db):
         result = get_trading_day_offset("2026-01-01", 5, db)
-        assert result is None
+        # Falls back to calendar-based calculation when DB is empty
+        assert result is not None
 
     def test_offset_of_one(self, db):
         _insert_tech_dates(db, ["2026-01-02", "2026-01-05"])

@@ -2,6 +2,10 @@
 anthropic~=0.40
 langgraph~=0.2
 langchain-anthropic~=0.3
+langsmith~=0.7
+
+# Evals
+agentevals~=0.0
 
 # Data
 yfinance~=0.2.54

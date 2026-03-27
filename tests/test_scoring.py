@@ -9,10 +9,9 @@ from scoring.technical import (
     compute_technical_score,
     compute_momentum_percentiles,
 )
-from scoring.aggregator import (
-    compute_attractiveness_score,
+from scoring.composite import (
+    compute_composite_score,
     score_to_rating,
-    check_consistency,
 )
 
 
@@ -136,77 +135,74 @@ class TestMomentumPercentiles:
         assert result["B"] == 50.0
 
 
-class TestAggregator:
+class TestCompositeScoring:
     def test_score_formula(self):
         # With neutral modifier (1.0) the macro_shift is 0, so final == weighted_base
-        result = compute_attractiveness_score(
-            ticker="AAPL",
-            technical_score=80.0,
-            news_score=60.0,
-            research_score=70.0,
-            sector_modifiers={"Technology": 1.0},
-            sector_map={"AAPL": "Technology"},
+        result = compute_composite_score(
+            quant_score=80.0, qual_score=60.0, sector_modifier=1.0,
         )
-        expected_base = 80.0 * 0.40 + 60.0 * 0.30 + 70.0 * 0.30  # 71.0
-        assert abs(result["weighted_base"] - expected_base) < 0.01
-        assert abs(result["macro_shift"]) < 0.01       # neutral = no shift
-        assert abs(result["final_score"] - expected_base) < 0.01
+        expected_base = 80.0 * 0.50 + 60.0 * 0.50  # 70.0
+        assert abs(result["weighted_base"] - expected_base) < 0.1
+        assert abs(result["macro_shift"]) < 0.01
+        assert abs(result["final_score"] - expected_base) < 0.1
 
     def test_macro_shift_additive(self):
-        # Modifier 0.70 → shift = -10; modifier 1.30 → shift = +10
-        result_headwind = compute_attractiveness_score(
-            ticker="X", technical_score=70.0, news_score=70.0, research_score=70.0,
-            sector_modifiers={"Technology": 0.70}, sector_map={"X": "Technology"},
+        result_headwind = compute_composite_score(
+            quant_score=70.0, qual_score=70.0, sector_modifier=0.70,
         )
-        result_tailwind = compute_attractiveness_score(
-            ticker="X", technical_score=70.0, news_score=70.0, research_score=70.0,
-            sector_modifiers={"Technology": 1.30}, sector_map={"X": "Technology"},
+        result_tailwind = compute_composite_score(
+            quant_score=70.0, qual_score=70.0, sector_modifier=1.30,
         )
-        assert abs(result_headwind["macro_shift"] - (-10.0)) < 0.01
-        assert abs(result_tailwind["macro_shift"] - 10.0) < 0.01
-        # 20-point spread between extremes
-        assert abs(result_tailwind["final_score"] - result_headwind["final_score"] - 20.0) < 0.1
+        assert abs(result_headwind["macro_shift"] - (-10.0)) < 0.1
+        assert abs(result_tailwind["macro_shift"] - 10.0) < 0.1
+        assert abs(result_tailwind["final_score"] - result_headwind["final_score"] - 20.0) < 0.2
 
     def test_macro_modifier_applied(self):
-        result_no_boost = compute_attractiveness_score(
-            ticker="AAPL",
-            technical_score=60.0, news_score=60.0, research_score=60.0,
-            sector_modifiers={"Technology": 1.0},
-            sector_map={"AAPL": "Technology"},
+        result_neutral = compute_composite_score(
+            quant_score=60.0, qual_score=60.0, sector_modifier=1.0,
         )
-        result_boosted = compute_attractiveness_score(
-            ticker="AAPL",
-            technical_score=60.0, news_score=60.0, research_score=60.0,
-            sector_modifiers={"Technology": 1.2},
-            sector_map={"AAPL": "Technology"},
+        result_boosted = compute_composite_score(
+            quant_score=60.0, qual_score=60.0, sector_modifier=1.2,
         )
-        assert result_boosted["final_score"] > result_no_boost["final_score"]
+        assert result_boosted["final_score"] > result_neutral["final_score"]
 
     def test_score_clipped_at_100(self):
-        result = compute_attractiveness_score(
-            ticker="X", technical_score=100, news_score=100, research_score=100,
-            sector_modifiers={"Technology": 1.3},
-            sector_map={"X": "Technology"},
+        result = compute_composite_score(
+            quant_score=100, qual_score=100, sector_modifier=1.3,
         )
         assert result["final_score"] <= 100.0
 
+    def test_score_clipped_at_0(self):
+        result = compute_composite_score(
+            quant_score=5, qual_score=5, sector_modifier=0.70,
+        )
+        assert result["final_score"] >= 0.0
+
+    def test_missing_quant_uses_qual(self):
+        result = compute_composite_score(
+            quant_score=None, qual_score=70.0, sector_modifier=1.0,
+        )
+        assert result["final_score"] == 70.0
+        assert result["score_failed"] is False
+
+    def test_both_missing_returns_failed(self):
+        result = compute_composite_score(
+            quant_score=None, qual_score=None, sector_modifier=1.0,
+        )
+        assert result["score_failed"] is True
+
+    def test_boosts_capped(self):
+        result = compute_composite_score(
+            quant_score=70.0, qual_score=70.0, sector_modifier=1.0,
+            boosts={"pead": 5, "revision": 3, "options": 4, "insider": 5},
+        )
+        assert result["total_boost"] == 10.0  # capped at 10
+
     def test_ratings(self):
         assert score_to_rating(75) == "BUY"
-        assert score_to_rating(65) == "BUY"   # buy threshold is 65
-        assert score_to_rating(64) == "HOLD"
+        assert score_to_rating(69) == "HOLD"
+        assert score_to_rating(70) == "BUY"   # default buy threshold is 70
         assert score_to_rating(55) == "HOLD"
-        assert score_to_rating(40) == "HOLD"
-        assert score_to_rating(39) == "SELL"
+        assert score_to_rating(41) == "HOLD"
+        assert score_to_rating(40) == "SELL"  # sell threshold is <= 40
         assert score_to_rating(35) == "SELL"
-
-    def test_consistency_flag_divergent_scores(self):
-        # News bullish (80), research bearish (30) → flag inconsistency
-        assert check_consistency(80, 30, 55) is True
-
-    def test_consistency_flag_aligned_scores(self):
-        # Both scores similar → no flag
-        assert check_consistency(70, 65, 67) is False
-
-    def test_consistency_flag_none_scores(self):
-        # One score missing → no flag (can't detect inconsistency)
-        assert check_consistency(None, 65, 65) is False

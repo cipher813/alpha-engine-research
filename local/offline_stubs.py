@@ -253,37 +253,13 @@ def _stub_run_consolidator_agent(run_date, macro_report, universe_news_reports,
     )
 
 
-def _stub_run_synthesis_judge(ticker, company_name, news_report, research_report,
-                              news_score, research_score, analyst_data,
-                              macro_context, api_key=None, **kwargs):
-    logger.info("[offline] stub run_synthesis_judge: %s", ticker)
-    avg = (news_score + research_score) / 2
-    return {
-        "adjusted_score": round(avg, 1),
-        "dominant_perspective": "balanced",
-        "judge_rationale": "[OFFLINE] Averaged news and research scores.",
-    }
-
-
-def _stub_run_candidate_debate(ticker, news_report, research_report,
-                               analyst_data, tech_score, macro_context,
-                               api_key=None, **kwargs):
-    logger.info("[offline] stub run_candidate_debate: %s", ticker)
-    return {
-        "verdict": "BUY",
-        "conviction_score": 65,
-        "rationale": "[OFFLINE] Synthetic debate — moderate conviction.",
-        "key_condition": "Earnings must confirm growth trajectory.",
-        "bull_case": "Strong fundamentals and sector tailwinds.",
-        "bear_case": "Valuation stretched relative to peers.",
-    }
 
 
 def _stub_run_macro_agent(prior_report, prior_date, macro_data, api_key=None, **kwargs):
     return _stub_run_macro_agent_with_reflection(prior_report, prior_date, macro_data)
 
 
-# ── V2 sector team / CIO stubs ──────────────────────────────────────────────
+# ── Sector team / CIO stubs ──────────────────────────────────────────────
 
 def _stub_run_quant_analyst(team_id, sector_tickers, market_regime, price_data,
                             technical_scores, run_date, api_key=None, **kwargs):
@@ -459,10 +435,8 @@ def install_offline_stubs():
         ("agents.macro_agent.run_macro_agent", _stub_run_macro_agent),
         ("agents.scanner_ranking_agent.run_scanner_ranking_agent", _stub_run_scanner_ranking_agent),
         ("agents.consolidator.run_consolidator_agent", _stub_run_consolidator_agent),
-        ("agents.synthesis_judge.run_synthesis_judge", _stub_run_synthesis_judge),
-        ("agents.debate_agents.run_candidate_debate", _stub_run_candidate_debate),
 
-        # V2 sector teams + CIO
+        # Sector teams + CIO
         ("agents.sector_teams.quant_analyst.run_quant_analyst", _stub_run_quant_analyst),
         ("agents.sector_teams.qual_analyst.run_qual_analyst", _stub_run_qual_analyst),
         ("agents.sector_teams.peer_review.run_peer_review", _stub_run_peer_review),
@@ -558,11 +532,11 @@ def patch_graph_modules():
         "run_scanner_ranking_agent": _stub_run_scanner_ranking_agent,
         "run_consolidator_agent": _stub_run_consolidator_agent,
         "send_email": _stub_send_email,
-        # V2 sector teams + CIO
+        # Sector teams + CIO
         "run_sector_team": _stub_run_sector_team,
         "run_cio": _stub_run_cio,
     }
-    for mod_name in ("graph.research_graph", "graph.research_graph_v2"):
+    for mod_name in ("graph.research_graph",):
         mod = sys.modules.get(mod_name)
         if mod:
             for attr, stub in _graph_patches.items():

@@ -284,6 +284,34 @@ class ArchiveManager:
             resource_detail TEXT,
             influence       TEXT DEFAULT 'supporting'
         );
+
+        CREATE TABLE IF NOT EXISTS memory_episodes (
+            id              INTEGER PRIMARY KEY,
+            ticker          TEXT NOT NULL,
+            signal_date     TEXT NOT NULL,
+            score           REAL,
+            rating          TEXT,
+            conviction      TEXT,
+            thesis_summary  TEXT,
+            outcome_10d     REAL,
+            outcome_vs_spy  REAL,
+            lesson          TEXT,
+            sector          TEXT,
+            pattern_tags    TEXT,
+            created_date    TEXT NOT NULL,
+            UNIQUE(ticker, signal_date)
+        );
+
+        CREATE TABLE IF NOT EXISTS memory_semantic (
+            id              INTEGER PRIMARY KEY,
+            category        TEXT NOT NULL,
+            source          TEXT NOT NULL,
+            content         TEXT NOT NULL,
+            sector          TEXT,
+            related_tickers TEXT,
+            created_date    TEXT NOT NULL,
+            reinforced_date TEXT
+        );
         """)
         # ── Column migrations (existing DBs may lack newer columns) ──────────
         migrations = [
@@ -902,6 +930,146 @@ class ArchiveManager:
             (ticker, run_date, agent, resource_type, resource_detail, influence),
         )
         self.db_conn.commit()
+
+    # ── Memory: Episodic (Phase 2) ───────────────────────────────────────────
+
+    def load_episodic_memories(
+        self,
+        tickers: list[str],
+        sectors: list[str],
+        max_per_ticker: int = 3,
+        max_age_weeks: int = 12,
+    ) -> dict[str, list[dict]]:
+        """Load episodic memories for tickers (exact match) and sectors (related stocks)."""
+        import json as _json
+        from datetime import date, timedelta
+        cutoff = str(date.today() - timedelta(weeks=max_age_weeks))
+
+        result: dict[str, list[dict]] = {}
+
+        # Exact ticker matches
+        for ticker in tickers:
+            rows = self.db_conn.execute(
+                "SELECT ticker, signal_date, score, conviction, thesis_summary, "
+                "outcome_10d, outcome_vs_spy, lesson, sector, pattern_tags "
+                "FROM memory_episodes WHERE ticker = ? AND created_date >= ? "
+                "ORDER BY signal_date DESC LIMIT ?",
+                (ticker, cutoff, max_per_ticker),
+            ).fetchall()
+            if rows:
+                result[ticker] = [
+                    {"ticker": r[0], "signal_date": r[1], "score": r[2],
+                     "conviction": r[3], "thesis_summary": r[4],
+                     "outcome_10d": r[5], "outcome_vs_spy": r[6],
+                     "lesson": r[7], "sector": r[8], "pattern_tags": r[9]}
+                    for r in rows
+                ]
+
+        # Sector-level memories (for stocks not in exact match)
+        for sector in sectors:
+            rows = self.db_conn.execute(
+                "SELECT ticker, signal_date, score, conviction, thesis_summary, "
+                "outcome_10d, outcome_vs_spy, lesson, sector, pattern_tags "
+                "FROM memory_episodes WHERE sector = ? AND created_date >= ? "
+                "ORDER BY signal_date DESC LIMIT 5",
+                (sector, cutoff),
+            ).fetchall()
+            for r in rows:
+                t = r[0]
+                if t not in result:
+                    result.setdefault(t, []).append(
+                        {"ticker": r[0], "signal_date": r[1], "score": r[2],
+                         "conviction": r[3], "thesis_summary": r[4],
+                         "outcome_10d": r[5], "outcome_vs_spy": r[6],
+                         "lesson": r[7], "sector": r[8], "pattern_tags": r[9]}
+                    )
+
+        # Prune old memories
+        self.db_conn.execute("DELETE FROM memory_episodes WHERE created_date < ?", (cutoff,))
+        self.db_conn.commit()
+
+        return result
+
+    # ── Memory: Semantic (Phase 3) ─────────────────────────────────────────
+
+    def load_semantic_memories(
+        self,
+        sectors: list[str],
+        max_age_weeks: int = 8,
+        max_per_sector: int = 5,
+    ) -> dict[str, list[dict]]:
+        """Load semantic memories by sector. Auto-prunes stale entries."""
+        from datetime import date, timedelta
+        cutoff = str(date.today() - timedelta(weeks=max_age_weeks))
+
+        # Prune stale memories
+        self.db_conn.execute("DELETE FROM memory_semantic WHERE created_date < ?", (cutoff,))
+        self.db_conn.commit()
+
+        result: dict[str, list[dict]] = {}
+        for sector in sectors:
+            rows = self.db_conn.execute(
+                "SELECT category, source, content, sector, related_tickers, "
+                "created_date, reinforced_date "
+                "FROM memory_semantic WHERE sector = ? "
+                "ORDER BY reinforced_date DESC, created_date DESC LIMIT ?",
+                (sector, max_per_sector),
+            ).fetchall()
+            if rows:
+                result[sector] = [
+                    {"category": r[0], "source": r[1], "content": r[2],
+                     "sector": r[3], "related_tickers": r[4],
+                     "created_date": r[5], "reinforced_date": r[6]}
+                    for r in rows
+                ]
+
+        # Also load cross-sector memories
+        cross_rows = self.db_conn.execute(
+            "SELECT category, source, content, sector, related_tickers, "
+            "created_date, reinforced_date "
+            "FROM memory_semantic WHERE category = 'cross_sector' "
+            "ORDER BY created_date DESC LIMIT 5"
+        ).fetchall()
+        if cross_rows:
+            result["_cross_sector"] = [
+                {"category": r[0], "source": r[1], "content": r[2],
+                 "sector": r[3], "related_tickers": r[4],
+                 "created_date": r[5], "reinforced_date": r[6]}
+                for r in cross_rows
+            ]
+
+        return result
+
+    def save_semantic_memory(
+        self,
+        category: str,
+        source: str,
+        content: str,
+        sector: str | None,
+        related_tickers: list[str] | None,
+        run_date: str,
+    ) -> bool:
+        """Save a semantic memory. Returns True if new, False if duplicate."""
+        import json as _json
+        tickers_json = _json.dumps(related_tickers) if related_tickers else None
+        try:
+            self.db_conn.execute(
+                "INSERT INTO memory_semantic "
+                "(category, source, content, sector, related_tickers, created_date) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (category, source, content, sector, tickers_json, run_date),
+            )
+            self.db_conn.commit()
+            return True
+        except Exception:
+            # Likely duplicate — update reinforced_date instead
+            self.db_conn.execute(
+                "UPDATE memory_semantic SET reinforced_date = ? "
+                "WHERE category = ? AND source = ? AND content = ?",
+                (run_date, category, source, content),
+            )
+            self.db_conn.commit()
+            return False
 
     def close(self) -> None:
         if self.db_conn:

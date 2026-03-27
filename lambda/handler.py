@@ -120,13 +120,8 @@ def handler(event, context):
 
     # Import pipeline (deferred to reduce cold-start time)
     try:
-        from config import ARCHITECTURE_VERSION
         from archive.manager import ArchiveManager
-
-        if ARCHITECTURE_VERSION == "v2_sector_teams":
-            from graph.research_graph_v2 import build_graph_v2 as build_graph, create_initial_state_v2 as create_initial_state
-        else:
-            from graph.research_graph import build_graph, create_initial_state
+        from graph.research_graph import build_graph, create_initial_state
 
         # ── Validate required env vars (fail fast, not 30 min in) ─────
         from config import ANTHROPIC_API_KEY, FMP_API_KEY, FRED_API_KEY
@@ -159,7 +154,31 @@ def handler(event, context):
         initial_state["performance_summary"] = perf_summary
         initial_state["flow_doctor"] = None
 
+        # Extract episodic memories from newly completed signal outcomes
+        try:
+            from evals.memory_extractor import extract_memories
+            n_memories = extract_memories(archive.db_conn)
+            if n_memories:
+                print(f"Extracted {n_memories} new episodic memories from outcomes")
+        except Exception as _me:
+            print(f"WARNING: memory extraction skipped: {_me}")
+
         final_state = graph.invoke(initial_state)
+
+        # ── Trajectory validation (Phase 2 eval) ──────────────────
+        _trajectory_result = None
+        try:
+            from evals.trajectory import validate_trajectory
+            _trajectory_result = validate_trajectory(
+                project_name=os.environ.get("LANGCHAIN_PROJECT", "alpha-research"),
+            )
+            if _trajectory_result and not _trajectory_result["passed"]:
+                import logging as _logging
+                _logging.getLogger("evals.trajectory").error(
+                    "Trajectory validation failed: %s", _trajectory_result["failures"]
+                )
+        except Exception as _te:
+            print(f"WARNING: trajectory validation skipped: {_te}")
 
         archive.close()
 
@@ -169,7 +188,7 @@ def handler(event, context):
             _population = final_state.get("new_population", [])
             _rotations = final_state.get("population_rotation_events", [])
             write_health(
-                bucket="alpha-engine-research",
+                bucket=os.environ.get("RESEARCH_BUCKET", "alpha-engine-research"),
                 module_name="research",
                 status="ok",
                 run_date=run_date,
@@ -190,6 +209,7 @@ def handler(event, context):
             "email_sent": final_state.get("email_sent", False),
             "early_close": early_close,
             "weekly_run": weekly,
+            "trajectory_passed": _trajectory_result["passed"] if _trajectory_result else None,
         }
 
     except Exception as e:
@@ -201,7 +221,7 @@ def handler(event, context):
         try:
             from health_status import write_health
             write_health(
-                bucket="alpha-engine-research",
+                bucket=os.environ.get("RESEARCH_BUCKET", "alpha-engine-research"),
                 module_name="research",
                 status="failed",
                 run_date=run_date,

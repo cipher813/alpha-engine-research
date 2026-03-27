@@ -20,7 +20,7 @@ Research and Predictor Training are **independent** — no data flows between th
 
 ---
 
-## Architecture (v2 — Sector Teams)
+## Architecture
 
 ```
 PARALLEL (LangGraph Send() fan-out)
@@ -85,24 +85,21 @@ This repo is open-source, but files containing prompts, scoring logic, and orche
 | File | Purpose |
 |------|---------|
 | `config.py` | Centralized configuration loader |
-| `config/universe.yaml` | Population size, thresholds, LLM models, architecture version |
-| `graph/research_graph.py` | v1 LangGraph orchestrator |
+| `config/universe.yaml` | Population size, thresholds, LLM models |
+| `graph/research_graph.py` | LangGraph orchestrator (Send fan-out, sector teams) |
 | `agents/macro_agent.py` | Macro economist with reflection loop |
-| `agents/news_agent.py` | v1 news sentiment agent |
-| `agents/research_agent.py` | v1 research analysis agent |
-| `agents/scanner_ranking_agent.py` | v1 scanner ranking agent |
+| `agents/news_agent.py` | News sentiment agent |
+| `agents/research_agent.py` | Research analysis agent |
+| `agents/scanner_ranking_agent.py` | Scanner ranking agent |
 | `agents/consolidator.py` | Email brief synthesizer |
 | `agents/investment_committee/ic_cio.py` | CIO batch evaluator |
 | `agents/sector_teams/quant_analyst.py` | Quant analyst ReAct agent |
 | `agents/sector_teams/qual_analyst.py` | Qual analyst ReAct agent |
 | `agents/sector_teams/peer_review.py` | Intra-team peer review |
 | `agents/sector_teams/sector_team.py` | Team orchestrator |
-| `agents/debate_agents.py` | v1 bull/bear/judge agents |
-| `agents/synthesis_judge.py` | v1 divergence resolution |
 | `scoring/technical.py` | Technical scoring engine |
-| `scoring/aggregator.py` | v1 weighted composite |
 | `scoring/performance_tracker.py` | Signal accuracy tracking |
-| `data/scanner.py` | v1 quant filter pipeline |
+| `data/scanner.py` | Quant filter pipeline |
 | `data/population_selector.py` | Population management + exit/entry handlers |
 | `thesis/updater.py` | Thesis record builder |
 
@@ -114,8 +111,9 @@ This repo is open-source, but files containing prompts, scoring logic, and orche
 - `agents/sector_teams/material_triggers.py` — Thesis update triggers (no LLM)
 - `agents/prompt_loader.py` — Loads prompts from `config/prompts/`
 - `agents/token_guard.py` — Token budget validation
-- `graph/research_graph_v2.py` — v2 LangGraph graph with Send() fan-out
-- `scoring/composite.py` — v2 composite scoring (quant × w_quant + qual × w_qual)
+- `scoring/composite.py` — Composite scoring (quant × w_quant + qual × w_qual)
+- `agents/json_utils.py` — Shared JSON extraction (balanced-brace scanner)
+- `agents/langchain_utils.py` — Shared LangGraph message utilities
 - `data/fetchers/` — All 8 data fetchers (price, news, analyst, macro, insider, institutional, options, revision)
 - `data/deduplicator.py` — Duplicate headline handling
 - `archive/manager.py` — S3 + SQLite CRUD + thesis history + IC audit trail + `load_latest_theses()` for prior week backfill
@@ -126,7 +124,7 @@ This repo is open-source, but files containing prompts, scoring logic, and orche
 
 ---
 
-## How Scoring Works (v2)
+## How Scoring Works
 
 ```
 composite = quant_score × w_quant + qual_score × w_qual + macro_shift + signal_boosts
@@ -232,7 +230,7 @@ cp .env.example .env
 
 # 2. Configuration files
 cp config/universe.sample.yaml config/universe.yaml
-# Edit universe.yaml — set architecture_version, LLM models, thresholds
+# Edit universe.yaml — set LLM models, thresholds, population config
 
 # 3. Create gitignored source files (see table above)
 
@@ -264,9 +262,9 @@ python local/run.py --offline --date 2026-03-23
 | Analyst | `fetch_analyst_consensus`, `fetch_revisions` | Randomized consensus ratings + targets |
 | Macro | `fetch_macro_data`, `compute_market_breadth` | Hardcoded neutral macro environment |
 | Insider/Options | `fetch_insider_activity`, `fetch_options_signals`, `fetch_short_interest`, `fetch_institutional_accumulation` | Empty or minimal synthetic data |
-| V1 LLM agents | `run_news_agent`, `run_research_agent`, `run_macro_agent_with_reflection`, `run_scanner_ranking_agent`, `run_consolidator_agent`, `run_synthesis_judge`, `run_candidate_debate` | Deterministic scores (40-75 range), stub reports |
-| V2 sector teams | `run_sector_team`, `run_quant_analyst`, `run_qual_analyst`, `run_peer_review` | Synthetic picks with randomized quant/qual scores |
-| V2 CIO | `run_cio` | Advances candidates up to open slot count |
+| LLM agents | `run_news_agent`, `run_research_agent`, `run_macro_agent_with_reflection`, `run_scanner_ranking_agent`, `run_consolidator_agent` | Deterministic scores (40-75 range), stub reports |
+| Sector teams | `run_sector_team`, `run_quant_analyst`, `run_qual_analyst`, `run_peer_review` | Synthetic picks with randomized quant/qual scores |
+| CIO | `run_cio` | Advances candidates up to open slot count |
 | S3 / Archive | `download_db`, `upload_db`, `load_predictions_json`, `write_signals_json`, `upload_population_json` | Uses local SQLite (creates empty if none exists), skips all S3 I/O |
 | Email | `send_email` | Prints subject line to stdout |
 
@@ -282,8 +280,8 @@ python local/run.py --offline --date 2026-03-23
 **Combining with other flags:**
 
 ```bash
-# Offline + skip scanner (V1 only — fastest possible run)
-python local/run.py --offline --skip-scanner
+# Offline run
+python local/run.py --offline
 ```
 
 > **Note:** `--offline` implies `--dry-run` behavior (no email delivery, no S3 writes). You don't need to pass both.
@@ -292,13 +290,8 @@ python local/run.py --offline --skip-scanner
 
 ## Database Tables
 
-### Core (v1)
-`investment_thesis`, `agent_reports`, `population`, `population_history`, `scanner_appearances`, `technical_scores`, `macro_snapshots`, `score_performance`, `news_article_hashes`, `predictor_outcomes`
-
-### v2 Additions
-- `stock_archive` — every stock ever analyzed (ticker, sector, team, first/last analyzed, times in population)
-- `thesis_history` — every thesis version (author: `team:technology`, `ic:cio`, etc.), full bull/bear/catalysts/risks
-- `analyst_resources` — which tools each agent used per ticker (for future refinement)
+### Core
+`investment_thesis`, `agent_reports`, `population`, `population_history`, `scanner_appearances`, `technical_scores`, `macro_snapshots`, `score_performance`, `news_article_hashes`, `predictor_outcomes`, `stock_archive`, `thesis_history`, `analyst_resources`, `memory_episodes`, `memory_semantic`
 
 ---
 
@@ -354,6 +347,18 @@ python local/run.py --offline --date 2026-03-24
 - ~~**S3 price caching**: Cache weekly price data to avoid re-downloading 900 tickers from yfinance~~ ✅ Predictor maintains S3 price cache; research uses sequential rate-limited batches
 - **Batch S3 I/O**: Consolidated JSON alongside per-ticker files
 - **LangGraph state optimization**: Return only changed keys from memory-intensive nodes
+
+### AI Agent Evals
+- **LangSmith tracing** (Phase 1, deployed): Full execution traces for every Monday run — per-agent token usage, latency, tool calls. Set `LANGCHAIN_TRACING_V2=true` in `.env`.
+- **Trajectory validation** (Phase 2, deployed): Post-pipeline check that the graph executed all 11 required nodes in the correct order with 6 sector teams. Failures logged to CloudWatch.
+- **Output quality evaluation** (Phase 3, future): LLM-as-judge faithfulness checks on agent theses using DeepEval — verify claims trace back to actual fetcher data. Custom evaluators for thesis consistency, score calibration, macro regime accuracy. ~1-2 weeks lift.
+- **Feedback loop closure** (Phase 4, future): Retroactively label research outputs with backtester outcome data (5d/10d returns). Correlate eval quality scores with actual alpha contribution. Build growing eval dataset for regression testing. ~2-4 weeks lift.
+
+### Agent Memory
+- **Macro memory fix + structured prior context** (Phase 1, deployed): Macro agent now receives prior report and last 3 macro snapshots for incremental updates. CIO receives prior week's IC decisions for portfolio continuity.
+- **Episodic memory from outcomes** (Phase 2, deployed): Failed BUY signals are extracted into lessons via Haiku and stored in `memory_episodes` table. Qual analysts retrieve relevant lessons when analyzing stocks with similar patterns. Cost-capped at 15 Haiku calls/run.
+- **Cross-agent semantic memory** (Phase 3, deployed): Sector teams share observations and the macro agent accumulates regime reasoning via `memory_semantic` table. Auto-pruned after 8 weeks. Cost-capped at 10 Haiku calls/run.
+- **Procedural memory** (Phase 4, future): Consolidated sector-specific strategies learned from 3+ months of episodic data (e.g., "biotech theses degrade after 3 days without material events"). Requires episodic memory running 8-12 weeks first. ~3-4 weeks lift.
 
 ### Data Gaps
 - **Survivorship bias**: Wikipedia S&P constituents are current-only — need append-only log

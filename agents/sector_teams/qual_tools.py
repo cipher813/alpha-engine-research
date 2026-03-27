@@ -27,6 +27,8 @@ def create_qual_tools(context: dict) -> list:
     """
     prior_theses = context.get("prior_theses", {})
     price_data = context.get("price_data", {})
+    episodic_memories = context.get("episodic_memories", {})
+    semantic_memories = context.get("semantic_memories", {})
 
     @tool
     def get_news_articles(ticker: str, days: int = 7) -> str:
@@ -184,6 +186,39 @@ def create_qual_tools(context: dict) -> list:
             log.debug("RAG query_filings unavailable: %s", e)
             return f"Filing search temporarily unavailable for {ticker}."
 
+    @tool
+    def get_lessons(ticker: str) -> str:
+        """Get lessons from past signal outcomes for a ticker. Shows what went wrong with previous BUY signals."""
+        memories = episodic_memories.get(ticker, [])
+        if not memories:
+            return json.dumps({"ticker": ticker, "lessons": [], "note": "No prior outcome lessons available"})
+        items = []
+        for m in memories[:5]:
+            items.append({
+                "signal_date": m.get("signal_date", ""),
+                "score": m.get("score"),
+                "outcome_10d": m.get("outcome_10d"),
+                "outcome_vs_spy": m.get("outcome_vs_spy"),
+                "lesson": m.get("lesson", ""),
+                "pattern_tags": m.get("pattern_tags", ""),
+            })
+        return json.dumps({"ticker": ticker, "lessons": items})
+
+    @tool
+    def get_sector_insights(sector: str) -> str:
+        """Get cross-team observations and insights for a sector from prior runs."""
+        memories = semantic_memories.get(sector, [])
+        if not memories:
+            return json.dumps({"sector": sector, "insights": [], "note": "No prior sector insights available"})
+        items = []
+        for m in memories[:5]:
+            items.append({
+                "source": m.get("source", ""),
+                "content": m.get("content", ""),
+                "created_date": m.get("created_date", ""),
+            })
+        return json.dumps({"sector": sector, "insights": items})
+
     return [
         get_news_articles,
         get_analyst_reports,
@@ -193,4 +228,6 @@ def create_qual_tools(context: dict) -> list:
         get_options_flow,
         get_institutional_activity,
         query_filings,
+        get_lessons,
+        get_sector_insights,
     ]

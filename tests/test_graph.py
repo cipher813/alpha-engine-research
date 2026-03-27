@@ -1,5 +1,5 @@
 """
-Tests for graph node logic and trading day detection.
+Tests for trading day detection and handler gate logic.
 Validates scheduler logic without triggering real AWS or LLM calls.
 """
 
@@ -46,32 +46,3 @@ class TestHandlerHolidaySkip:
         result = handler({}, {})
         assert result["status"] == "SKIPPED"
         assert result["reason"] == "market_holiday"
-
-
-class TestScoreAggregatorNode:
-    def test_aggregator_uses_sector_modifiers(self):
-        from graph.research_graph import score_aggregator
-
-        state = {
-            "run_date": "2026-03-04",
-            "run_time": "2026-03-04T06:20:00Z",
-            "universe_tickers": ["AAPL"],
-            "candidate_tickers": [],
-            "technical_scores": {"AAPL": {"technical_score": 70.0}},
-            "news_scores": {"AAPL": 65.0},
-            "research_scores": {"AAPL": 60.0},
-            "sector_modifiers": {"Technology": 1.2},
-            "prior_theses": {},
-            "market_regime": "bull",
-            "scanner_scores": {},
-        }
-
-        # Patch SECTOR_MAP to include AAPL
-        with patch("graph.research_graph.SECTOR_MAP", {"AAPL": "Technology"}):
-            result = score_aggregator(state)
-
-        aapl_thesis = result["investment_theses"]["AAPL"]
-        # Expected base = 70*0.4 + 65*0.3 + 60*0.3 = 28 + 19.5 + 18 = 65.5
-        # With 1.2 modifier = 65.5 * 1.2 = 78.6
-        assert aapl_thesis["final_score"] > 70.0
-        assert aapl_thesis["macro_modifier"] == pytest.approx(1.2, abs=0.01)

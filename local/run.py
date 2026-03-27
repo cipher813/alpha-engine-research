@@ -46,8 +46,6 @@ def main():
     parser.add_argument("--no-s3", action="store_true",
                         help="Real APIs but write signals.json to local file instead of S3, skip email. "
                              "Safe preprod check — does not affect live executor.")
-    parser.add_argument("--skip-scanner", action="store_true",
-                        help="Skip scanner pipeline (Branch B) for faster testing.")
     parser.add_argument("--offline", action="store_true",
                         help="Full offline mode: stub all API/LLM/S3/email calls with synthetic data.")
     args = parser.parse_args()
@@ -97,14 +95,8 @@ def main():
     perf_summary = run_performance_checks(archive.db_conn, run_date)
     print(f"Performance summary: {perf_summary}")
 
-    # Build and run graph — respects architecture_version in universe.yaml
-    from config import ARCHITECTURE_VERSION
-    print(f"Architecture version: {ARCHITECTURE_VERSION}")
-
-    if ARCHITECTURE_VERSION == "v2_sector_teams":
-        from graph.research_graph_v2 import build_graph_v2 as build_graph, create_initial_state_v2 as create_initial_state
-    else:
-        from graph.research_graph import build_graph, create_initial_state
+    # Build and run graph
+    from graph.research_graph import build_graph, create_initial_state
 
     # Patch graph module local name bindings after import
     if args.offline:
@@ -118,53 +110,57 @@ def main():
         is_early_close=early_close,
     )
 
-    if ARCHITECTURE_VERSION != "v2_sector_teams":
-        state["performance_summary"] = perf_summary
-
     # --no-s3: intercept S3 writes → local files, skip email
     if args.no_s3 and not args.offline:
         import json as _json
         _out_dir = os.path.join(project_root, "local", "output")
         os.makedirs(_out_dir, exist_ok=True)
 
-        if ARCHITECTURE_VERSION == "v2_sector_teams":
-            import graph.research_graph_v2 as _gm
+        import graph.research_graph as _gm
 
-            _orig_archive_writer = _gm.archive_writer_v2
-            def _local_archive_writer(state):
-                """Run archive writer but redirect signals.json to local file."""
-                # Build signals payload without writing to S3
-                from graph.research_graph_v2 import _build_signals_payload
-                try:
-                    payload = _build_signals_payload(state)
-                    out_path = os.path.join(_out_dir, f"signals-{run_date}.json")
-                    with open(out_path, "w") as f:
-                        _json.dump(payload, f, indent=2)
-                    print(f"\n=== SIGNALS WRITTEN TO: {out_path} ===")
-                except Exception as e:
-                    print(f"WARNING: could not write local signals: {e}")
-                # Still run archive writer for SQLite but skip S3 uploads
-                am = state.get("archive_manager")
-                if am:
-                    am.upload_db = lambda *a, **k: None
-                    am.write_signals_json = lambda *a, **k: None
-                return _orig_archive_writer(state)
-            _gm.archive_writer_v2 = _local_archive_writer
+        _orig_archive_writer = _gm.archive_writer
+        def _local_archive_writer(state):
+            """Run archive writer but redirect signals.json to local file."""
+            from graph.research_graph import _build_signals_payload
+            try:
+                payload = _build_signals_payload(state)
+                out_path = os.path.join(_out_dir, f"signals-{run_date}.json")
+                with open(out_path, "w") as f:
+                    _json.dump(payload, f, indent=2)
+                print(f"\n=== SIGNALS WRITTEN TO: {out_path} ===")
+            except Exception as e:
+                print(f"WARNING: could not write local signals: {e}")
+            # Still run archive writer for SQLite but skip S3 uploads
+            am = state.get("archive_manager")
+            if am:
+                am.upload_db = lambda *a, **k: None
+                am.write_signals_json = lambda *a, **k: None
+            return _orig_archive_writer(state)
+        _gm.archive_writer = _local_archive_writer
 
-            # Skip email
-            _gm.email_sender_v2 = lambda state: {"email_sent": False}
-
-    if args.skip_scanner and ARCHITECTURE_VERSION != "v2_sector_teams":
-        import graph.research_graph as graph_mod
-        def _skip_scanner(state):
-            print("  [scanner skipped]")
-            return {"scanner_filtered": [], "scanner_ranked": [],
-                    "scanner_news_reports": {}, "scanner_research_reports": {},
-                    "scanner_scores": {}}
-        graph_mod.run_scanner_pipeline = _skip_scanner
+        # Skip email
+        _gm.email_sender = lambda state: {"email_sent": False}
 
     print("Running pipeline...")
     final_state = graph.invoke(state)
+
+    # Trajectory validation (only when LangSmith tracing is active)
+    if os.environ.get("LANGCHAIN_TRACING_V2") == "true" and not args.offline:
+        try:
+            from evals.trajectory import validate_trajectory
+            traj_result = validate_trajectory(
+                project_name=os.environ.get("LANGCHAIN_PROJECT", "alpha-research"),
+            )
+            if traj_result:
+                status = "PASS" if traj_result["passed"] else "FAIL"
+                print(f"\n=== TRAJECTORY VALIDATION: {status} ===")
+                if not traj_result["passed"]:
+                    for f in traj_result["failures"]:
+                        print(f"  FAIL: {f}")
+                print(f"  Nodes: {sum(traj_result['node_counts'].values())} | "
+                      f"Duration: {traj_result['duration_ms']}ms")
+        except Exception as e:
+            print(f"Trajectory validation skipped: {e}")
 
     print("\n=== RUN COMPLETE ===")
     print(f"Email sent: {final_state.get('email_sent', False)}")
