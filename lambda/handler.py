@@ -202,6 +202,26 @@ def handler(event, context):
         except Exception as he:
             print(f"WARNING: health status write failed: {he}")
 
+        # Write data manifest
+        try:
+            from health_status import write_data_manifest
+            write_data_manifest(
+                bucket=os.environ.get("RESEARCH_BUCKET", "alpha-engine-research"),
+                module_name="research",
+                run_date=run_date,
+                manifest={
+                    "n_population": len(_population) if isinstance(_population, list) else 0,
+                    "n_rotations": len(_rotations) if isinstance(_rotations, list) else 0,
+                    "market_regime": final_state.get("market_regime", "unknown"),
+                    "n_buy_candidates": len(final_state.get("buy_candidates", [])),
+                    "n_universe": len(final_state.get("universe_scores", [])),
+                    "weekly_run": weekly,
+                    "email_sent": final_state.get("email_sent", False),
+                },
+            )
+        except Exception as _me:
+            print(f"WARNING: data manifest write failed: {_me}")
+
         print(f"Run complete. Email sent: {final_state.get('email_sent', False)}")
         return {
             "status": "OK",
