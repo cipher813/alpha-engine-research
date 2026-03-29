@@ -314,13 +314,16 @@ def _stub_run_peer_review(team_id, quant_picks, qual_assessments,
     return {"recommendations": recs, "peer_review_rationale": "[OFFLINE] Synthetic review"}
 
 
-def _stub_run_sector_team(team_id, scanner_universe, sector_map, price_data,
-                          technical_scores, market_regime, prior_theses,
-                          held_tickers, news_data_by_ticker, analyst_data_by_ticker,
-                          insider_data_by_ticker, prior_sector_ratings,
-                          current_sector_ratings, run_date, api_key=None, **kwargs):
+def _stub_run_sector_team(team_id, ctx, **kwargs):
     logger.info("[offline] stub run_sector_team: %s", team_id)
     from agents.sector_teams.team_config import get_team_tickers
+    scanner_universe = ctx.scanner_universe
+    sector_map = ctx.sector_map
+    price_data = ctx.price_data
+    technical_scores = ctx.technical_scores
+    market_regime = ctx.market_regime
+    prior_theses = ctx.prior_theses
+    run_date = ctx.run_date
     sector_tickers = get_team_tickers(team_id, scanner_universe, sector_map)
     if not sector_tickers:
         return {"team_id": team_id, "recommendations": [], "thesis_updates": {},
