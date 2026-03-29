@@ -24,6 +24,15 @@ class PriceFetchError(RuntimeError):
 _BATCH_SIZE = 100
 _BATCH_DELAY_SECS = 2
 _MIN_FETCH_RATIO = 0.80
+_MIN_EXPECTED_CONSTITUENTS = 800  # S&P 500 (~503) + S&P 400 (~400), minus overlaps
+
+# ── yfinance request counter (per-Lambda-invocation) ─────────────────────────
+_yf_request_count = 0
+
+
+def get_yf_request_count() -> int:
+    """Return total yfinance requests made this invocation."""
+    return _yf_request_count
 
 
 def _make_rate_limited_session():
@@ -88,6 +97,8 @@ def fetch_price_data(tickers: list[str], period: str = "1y") -> dict[str, pd.Dat
     if not tickers:
         return {}
 
+    global _yf_request_count
+
     session = _make_rate_limited_session()
     batches = [tickers[i:i + _BATCH_SIZE] for i in range(0, len(tickers), _BATCH_SIZE)]
     result: dict[str, pd.DataFrame] = {}
@@ -97,9 +108,11 @@ def fetch_price_data(tickers: list[str], period: str = "1y") -> dict[str, pd.Dat
             time.sleep(_BATCH_DELAY_SECS)
         try:
             result.update(_download_batch(batch, period, session=session))
+            _yf_request_count += 1
             n_ok = sum(1 for t in batch if t in result and not result[t].empty)
             logger.info("Batch %d/%d: %d/%d tickers OK", i + 1, len(batches), n_ok, len(batch))
         except Exception as e:
+            _yf_request_count += 1
             logger.warning("Batch %d/%d failed (%d tickers): %s", i + 1, len(batches), len(batch), e)
 
     # ── Data quality gate ─────────────────────────────────────────────────
@@ -113,7 +126,10 @@ def fetch_price_data(tickers: list[str], period: str = "1y") -> dict[str, pd.Dat
         logger.error(msg)
         raise PriceFetchError(msg)
 
-    logger.info("Price fetch complete: %d/%d tickers (%.0f%%)", n_fetched, n_requested, pct)
+    logger.info(
+        "Price fetch complete: %d/%d tickers (%.0f%%), %d batches, %d total yf requests this run",
+        n_fetched, n_requested, pct, len(batches), _yf_request_count,
+    )
     return result
 
 
@@ -212,17 +228,26 @@ def fetch_sp500_sp400_with_sectors() -> tuple[list[str], dict[str, str]]:
                     sector_map[raw_ticker] = mapped
 
         tickers = list(dict.fromkeys(tickers))  # dedupe, preserve order
+
+        # Sanity check: Wikipedia should return ~900 tickers
+        if tickers and len(tickers) < _MIN_EXPECTED_CONSTITUENTS:
+            logger.error(
+                "Wikipedia returned only %d tickers (expected >= %d) — falling back to cache",
+                len(tickers), _MIN_EXPECTED_CONSTITUENTS,
+            )
+            raise ValueError(f"Insufficient tickers from Wikipedia: {len(tickers)}")
+
         if tickers:
             cache_df = pd.DataFrame({
                 "ticker": tickers,
                 "sector": [sector_map.get(t, "Unknown") for t in tickers],
             })
             cache_df.to_csv(cache_path, index=False)
-            print(f"  Fetched {len(tickers)} S&P 500+400 constituents with sectors from Wikipedia.")
+            logger.info("Fetched %d S&P 500+400 constituents with sectors from Wikipedia", len(tickers))
         return tickers, sector_map
 
     except Exception as e:
-        print(f"  Wikipedia fetch failed ({e}); trying cache...")
+        logger.warning("Wikipedia fetch failed (%s); trying cache...", e)
         if cache_path.exists():
             cached = pd.read_csv(cache_path)
             ticker_list = cached["ticker"].tolist()
@@ -233,9 +258,9 @@ def fetch_sp500_sp400_with_sectors() -> tuple[list[str], dict[str, str]]:
                     if s and str(s) != "nan"
                 }
             has_sectors = "with" if sector_map else "without"
-            print(f"  Loaded {len(ticker_list)} tickers from cache ({has_sectors} sectors).")
+            logger.info("Loaded %d tickers from cache (%s sectors)", len(ticker_list), has_sectors)
             return ticker_list, sector_map
-        print("  No cache found. Scanner will have no universe.")
+        logger.error("No cache found. Scanner will have no universe.")
         return [], {}
 
 
@@ -261,10 +286,14 @@ def fetch_short_interest(tickers: list[str]) -> dict[str, dict]:
 
     Returns {ticker: {short_pct_float, short_ratio, shares_short}}.
     """
+    global _yf_request_count
+
     results: dict[str, dict] = {}
+    n_ok = 0
     for ticker in tickers:
         try:
             info = yf.Ticker(ticker).info
+            _yf_request_count += 1
             short_pct = info.get("shortPercentOfFloat")  # e.g. 0.05 = 5%
             short_ratio = info.get("shortRatio")          # days to cover
             shares_short = info.get("sharesShort")
@@ -278,13 +307,21 @@ def fetch_short_interest(tickers: list[str]) -> dict[str, dict]:
                 "short_ratio": short_ratio,
                 "shares_short": shares_short,
             }
+            if short_pct is not None:
+                n_ok += 1
         except Exception as e:
+            _yf_request_count += 1
             logger.debug("Short interest fetch failed for %s: %s", ticker, e)
             results[ticker] = {
                 "short_pct_float": None,
                 "short_ratio": None,
                 "shares_short": None,
             }
+
+    logger.info(
+        "Short interest: %d/%d tickers with data, %d total yf requests this run",
+        n_ok, len(tickers), _yf_request_count,
+    )
     return results
 
 

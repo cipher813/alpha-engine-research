@@ -17,6 +17,10 @@ log = logging.getLogger(__name__)
 DEFAULT_W_QUANT = 0.50
 DEFAULT_W_QUAL = 0.50
 
+# Macro shift parameters — maps sector modifier range [0.70, 1.30] to point shift [-10, +10]
+MACRO_MODIFIER_RANGE = 0.30      # distance from 1.0 to min/max (0.70 and 1.30)
+MACRO_MAX_SHIFT_POINTS = 10.0    # max pts added/subtracted by macro shift
+
 
 def compute_composite_score(
     quant_score: float | None,
@@ -66,8 +70,8 @@ def compute_composite_score(
     else:
         weighted_base = quant_score * w_quant + qual_score * w_qual
 
-    # Macro shift: (modifier - 1.0) / 0.30 × 10 → range [-10, +10]
-    macro_shift = (sector_modifier - 1.0) / 0.30 * 10.0
+    # Macro shift: (modifier - 1.0) / range × max_shift → [-10, +10]
+    macro_shift = (sector_modifier - 1.0) / MACRO_MODIFIER_RANGE * MACRO_MAX_SHIFT_POINTS
 
     # Aggregate boosts with cap
     total_boost = 0.0

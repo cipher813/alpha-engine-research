@@ -66,6 +66,36 @@ class TestNormalizeConviction:
         assert normalize_conviction("RISING") == "rising"
         assert normalize_conviction("Declining") == "declining"
 
+    def test_numeric_boundary_values(self):
+        """Boundary values at 70 and 40 thresholds."""
+        assert normalize_conviction(70) == "rising"
+        assert normalize_conviction(69.9) == "stable"
+        assert normalize_conviction(40) == "stable"
+        assert normalize_conviction(39.9) == "declining"
+        assert normalize_conviction(70.0) == "rising"
+        assert normalize_conviction(0) == "declining"
+        assert normalize_conviction(100) == "rising"
+
+    def test_whitespace_handling(self):
+        """Leading/trailing whitespace should be stripped."""
+        assert normalize_conviction("  rising  ") == "rising"
+        assert normalize_conviction(" high ") == "rising"
+        assert normalize_conviction("\tstable\n") == "stable"
+
+    def test_mixed_case_qual_labels(self):
+        """Qual analyst labels in various case formats."""
+        assert normalize_conviction("High") == "rising"
+        assert normalize_conviction("MEDIUM") == "stable"
+        assert normalize_conviction("LOW") == "declining"
+
+    def test_empty_string_defaults_stable(self):
+        assert normalize_conviction("") == "stable"
+
+    def test_cio_prose_defaults_stable(self):
+        """Original bug: CIO returning prose instead of enum."""
+        assert normalize_conviction("Best quant+qual in tech cohort") == "stable"
+        assert normalize_conviction("Strong momentum with rising analyst consensus") == "stable"
+
 
 class TestScoreToRating:
     def test_none_returns_hold(self):

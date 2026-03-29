@@ -13,12 +13,15 @@ Pass {"force": true} to bypass all gates (manual testing).
 from __future__ import annotations
 
 import datetime
+import logging
 import os
 import time
 
 import pytz
 
 from exchange_calendars import get_calendar
+
+logger = logging.getLogger(__name__)
 
 
 def is_trading_day(date: datetime.date | None = None) -> bool:
@@ -45,8 +48,10 @@ def is_early_close(date: datetime.date | None = None) -> bool:
             standard_close_utc_hour = 21
             if close_time.hour < standard_close_utc_hour:
                 return True
-    except Exception:
-        pass
+    except (KeyError, AttributeError, TypeError):
+        pass  # expected: schedule format edge cases
+    except Exception as e:
+        logger.warning("Early close detection failed: %s — assuming normal close", e)
     return False
 
 

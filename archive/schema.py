@@ -1,0 +1,337 @@
+"""
+Database schema and migrations for research.db.
+
+Tables are defined as CREATE IF NOT EXISTS statements — safe for new and
+existing databases. Migrations are versioned and tracked in a schema_version
+table so each ALTER runs exactly once.
+
+To add a new migration:
+  1. Add an entry to MIGRATIONS with the next version number
+  2. Bump SCHEMA_VERSION to match
+  3. Deploy — ensure_schema() will apply it on next Lambda cold-start
+"""
+
+from __future__ import annotations
+
+import logging
+import sqlite3
+from datetime import datetime, timezone
+
+log = logging.getLogger(__name__)
+
+SCHEMA_VERSION = 7
+
+# ── Table Definitions ────────────────────────────────────────────────────────
+
+TABLES_SQL = """
+CREATE TABLE IF NOT EXISTS investment_thesis (
+    id                       INTEGER PRIMARY KEY,
+    symbol                   TEXT NOT NULL,
+    date                     TEXT NOT NULL,
+    run_time                 TEXT NOT NULL,
+    rating                   TEXT NOT NULL,
+    score                    REAL NOT NULL,
+    technical_score          REAL,
+    news_score               REAL,
+    research_score           REAL,
+    macro_modifier           REAL,
+    thesis_summary           TEXT,
+    prev_rating              TEXT,
+    prev_score               REAL,
+    last_material_change_date TEXT,
+    stale_days               INTEGER,
+    consistency_flag         INTEGER DEFAULT 0,
+    UNIQUE(symbol, date, run_time)
+);
+
+CREATE TABLE IF NOT EXISTS agent_reports (
+    id          INTEGER PRIMARY KEY,
+    symbol      TEXT,
+    date        TEXT NOT NULL,
+    run_time    TEXT NOT NULL,
+    agent_type  TEXT NOT NULL,
+    report_md   TEXT NOT NULL,
+    word_count  INTEGER,
+    UNIQUE(symbol, date, run_time, agent_type)
+);
+
+CREATE TABLE IF NOT EXISTS candidate_tenures (
+    id              INTEGER PRIMARY KEY,
+    symbol          TEXT NOT NULL,
+    slot            INTEGER NOT NULL,
+    entry_date      TEXT NOT NULL,
+    exit_date       TEXT,
+    exit_reason     TEXT,
+    replaced_by     TEXT,
+    peak_score      REAL,
+    exit_score      REAL,
+    tenure_days     INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS active_candidates (
+    slot            INTEGER PRIMARY KEY,
+    symbol          TEXT NOT NULL,
+    entry_date      TEXT NOT NULL,
+    prior_tenures   INTEGER NOT NULL DEFAULT 0,
+    score           REAL,
+    consecutive_low_runs INTEGER DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS scanner_appearances (
+    id              INTEGER PRIMARY KEY,
+    symbol          TEXT NOT NULL,
+    date            TEXT NOT NULL,
+    scanner_rank    INTEGER NOT NULL,
+    scan_path       TEXT,
+    tech_score      REAL,
+    news_score      REAL,
+    research_score  REAL,
+    final_score     REAL,
+    selected        INTEGER NOT NULL DEFAULT 0,
+    selection_reason TEXT,
+    UNIQUE(symbol, date)
+);
+
+CREATE TABLE IF NOT EXISTS technical_scores (
+    id              INTEGER PRIMARY KEY,
+    symbol          TEXT NOT NULL,
+    date            TEXT NOT NULL,
+    rsi_14          REAL,
+    macd_signal     REAL,
+    price_vs_ma50   REAL,
+    price_vs_ma200  REAL,
+    momentum_20d    REAL,
+    technical_score REAL,
+    UNIQUE(symbol, date)
+);
+
+CREATE TABLE IF NOT EXISTS macro_snapshots (
+    id                  INTEGER PRIMARY KEY,
+    date                TEXT NOT NULL UNIQUE,
+    fed_funds_rate      REAL,
+    treasury_2yr        REAL,
+    treasury_10yr       REAL,
+    yield_curve_slope   REAL,
+    vix                 REAL,
+    sp500_close         REAL,
+    sp500_30d_return    REAL,
+    oil_wti             REAL,
+    gold                REAL,
+    copper              REAL,
+    market_regime       TEXT,
+    sector_modifiers    TEXT
+);
+
+CREATE TABLE IF NOT EXISTS score_performance (
+    id              INTEGER PRIMARY KEY,
+    symbol          TEXT NOT NULL,
+    score_date      TEXT NOT NULL,
+    score           REAL NOT NULL,
+    price_on_date   REAL,
+    price_10d       REAL,
+    price_30d       REAL,
+    spy_10d_return  REAL,
+    spy_30d_return  REAL,
+    return_10d      REAL,
+    return_30d      REAL,
+    beat_spy_10d    INTEGER,
+    beat_spy_30d    INTEGER,
+    eval_date_10d   TEXT,
+    eval_date_30d   TEXT,
+    UNIQUE(symbol, score_date)
+);
+
+CREATE TABLE IF NOT EXISTS news_article_hashes (
+    id          INTEGER PRIMARY KEY,
+    symbol      TEXT NOT NULL,
+    article_hash TEXT NOT NULL,
+    first_seen  TEXT NOT NULL,
+    mention_count INTEGER NOT NULL DEFAULT 1,
+    UNIQUE(symbol, article_hash)
+);
+
+CREATE TABLE IF NOT EXISTS predictor_outcomes (
+    id                      INTEGER PRIMARY KEY,
+    symbol                  TEXT NOT NULL,
+    prediction_date         TEXT NOT NULL,
+    predicted_direction     TEXT,
+    prediction_confidence   REAL,
+    p_up                    REAL,
+    p_flat                  REAL,
+    p_down                  REAL,
+    score_modifier_applied  REAL DEFAULT 0.0,
+    actual_5d_return        REAL,
+    correct_5d              INTEGER,
+    UNIQUE(symbol, prediction_date)
+);
+
+CREATE TABLE IF NOT EXISTS population (
+    id                  INTEGER PRIMARY KEY,
+    symbol              TEXT NOT NULL UNIQUE,
+    sector              TEXT NOT NULL,
+    long_term_score     REAL,
+    long_term_rating    TEXT,
+    conviction          TEXT DEFAULT 'stable',
+    price_target_upside REAL,
+    thesis_summary      TEXT,
+    entry_date          TEXT,
+    tenure_weeks        INTEGER DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS population_history (
+    id          INTEGER PRIMARY KEY,
+    date        TEXT NOT NULL,
+    event_type  TEXT NOT NULL,
+    ticker_in   TEXT,
+    ticker_out  TEXT,
+    sector      TEXT,
+    reason      TEXT,
+    score_in    REAL,
+    score_out   REAL
+);
+
+CREATE TABLE IF NOT EXISTS stock_archive (
+    id              INTEGER PRIMARY KEY,
+    ticker          TEXT NOT NULL UNIQUE,
+    sector          TEXT NOT NULL,
+    sector_team     TEXT NOT NULL,
+    first_analyzed  TEXT NOT NULL,
+    last_analyzed   TEXT NOT NULL,
+    times_in_population INTEGER DEFAULT 0,
+    current_status  TEXT DEFAULT 'inactive'
+);
+
+CREATE TABLE IF NOT EXISTS thesis_history (
+    id              INTEGER PRIMARY KEY,
+    ticker          TEXT NOT NULL,
+    run_date        TEXT NOT NULL,
+    author          TEXT NOT NULL,
+    thesis_type     TEXT NOT NULL,
+    bull_case       TEXT,
+    bear_case       TEXT,
+    catalysts       TEXT,
+    risks           TEXT,
+    conviction      INTEGER,
+    score           REAL,
+    rationale       TEXT
+);
+
+CREATE TABLE IF NOT EXISTS analyst_resources (
+    id              INTEGER PRIMARY KEY,
+    ticker          TEXT NOT NULL,
+    run_date        TEXT NOT NULL,
+    agent           TEXT NOT NULL,
+    resource_type   TEXT NOT NULL,
+    resource_detail TEXT,
+    influence       TEXT DEFAULT 'supporting'
+);
+
+CREATE TABLE IF NOT EXISTS memory_episodes (
+    id              INTEGER PRIMARY KEY,
+    ticker          TEXT NOT NULL,
+    signal_date     TEXT NOT NULL,
+    score           REAL,
+    rating          TEXT,
+    conviction      TEXT,
+    thesis_summary  TEXT,
+    outcome_10d     REAL,
+    outcome_vs_spy  REAL,
+    lesson          TEXT,
+    sector          TEXT,
+    pattern_tags    TEXT,
+    created_date    TEXT NOT NULL,
+    UNIQUE(ticker, signal_date)
+);
+
+CREATE TABLE IF NOT EXISTS memory_semantic (
+    id              INTEGER PRIMARY KEY,
+    category        TEXT NOT NULL,
+    source          TEXT NOT NULL,
+    content         TEXT NOT NULL,
+    sector          TEXT,
+    related_tickers TEXT,
+    created_date    TEXT NOT NULL,
+    reinforced_date TEXT
+);
+"""
+
+# ── Versioned Migrations ─────────────────────────────────────────────────────
+#
+# Each entry: version -> (description, SQL statement)
+# Versions are applied in order. Never reorder or renumber existing entries.
+# To add a new migration: append with the next version number and bump
+# SCHEMA_VERSION at the top of this file.
+
+MIGRATIONS: dict[int, tuple[str, str]] = {
+    1: ("Add conviction to investment_thesis",
+        "ALTER TABLE investment_thesis ADD COLUMN conviction TEXT"),
+    2: ("Add signal to investment_thesis",
+        "ALTER TABLE investment_thesis ADD COLUMN signal TEXT"),
+    3: ("Add score_velocity_5d to investment_thesis",
+        "ALTER TABLE investment_thesis ADD COLUMN score_velocity_5d REAL"),
+    4: ("Add price_target_upside to investment_thesis",
+        "ALTER TABLE investment_thesis ADD COLUMN price_target_upside REAL"),
+    5: ("Add sector_ratings to macro_snapshots",
+        "ALTER TABLE macro_snapshots ADD COLUMN sector_ratings TEXT"),
+    6: ("Add predicted_direction to investment_thesis",
+        "ALTER TABLE investment_thesis ADD COLUMN predicted_direction TEXT"),
+    7: ("Add prediction_confidence to investment_thesis",
+        "ALTER TABLE investment_thesis ADD COLUMN prediction_confidence REAL"),
+}
+
+
+# ── Schema Initialization ────────────────────────────────────────────────────
+
+def ensure_schema(conn: sqlite3.Connection) -> None:
+    """
+    Create all tables and apply pending migrations with version tracking.
+
+    Safe to call on every cold-start:
+    - CREATE IF NOT EXISTS is idempotent for tables
+    - Migrations are tracked in schema_version and only applied once
+    - Duplicate-column errors are caught for backward compat with
+      pre-versioning databases
+    """
+    # 1. Create base tables
+    conn.executescript(TABLES_SQL)
+
+    # 2. Create version tracking table
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS schema_version (
+            version     INTEGER PRIMARY KEY,
+            description TEXT NOT NULL,
+            applied_at  TEXT NOT NULL
+        )
+    """)
+
+    # 3. Determine which migrations are already applied
+    applied = {
+        row[0]
+        for row in conn.execute("SELECT version FROM schema_version").fetchall()
+    }
+
+    # 4. Apply pending migrations in order
+    pending = sorted(v for v in MIGRATIONS if v not in applied)
+    if pending:
+        log.info("Applying %d schema migration(s): %s", len(pending), pending)
+
+    for version in pending:
+        desc, sql = MIGRATIONS[version]
+        try:
+            conn.execute(sql)
+        except sqlite3.OperationalError as e:
+            # Column may already exist from pre-versioning era — safe to skip
+            if "duplicate column" not in str(e).lower():
+                log.error("Schema migration v%d failed: %s — %s", version, desc, e)
+                raise
+            log.debug("Migration v%d skipped (column already exists): %s", version, desc)
+
+        # Record migration as applied
+        conn.execute(
+            "INSERT INTO schema_version (version, description, applied_at) VALUES (?, ?, ?)",
+            (version, desc, datetime.now(timezone.utc).isoformat()),
+        )
+
+    conn.commit()
+    if pending:
+        log.info("Schema up to date (version %d)", SCHEMA_VERSION)
