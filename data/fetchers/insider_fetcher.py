@@ -185,11 +185,12 @@ def _parse_form4_xml(
                     "shares": int(shares),
                     "value": round(shares * price, 2),
                 })
-            except Exception:
+            except Exception as e:
+                log.debug("Skipping Form 4 transaction for CIK %s: %s", cik, e)
                 continue
 
-    except ElementTree.ParseError:
-        log.debug("XML parse error for CIK %s accession %s", cik, accession)
+    except ElementTree.ParseError as e:
+        log.debug("XML parse error for CIK %s accession %s: %s", cik, accession, e)
 
     return transactions
 

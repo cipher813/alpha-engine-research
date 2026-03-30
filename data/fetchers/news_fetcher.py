@@ -152,7 +152,34 @@ def fetch_all_news(
     Convenience function: fetches Yahoo Finance news + EDGAR 8-Ks for a ticker.
     Returns {"yahoo": [...], "edgar_8k": [...]}
     """
-    return {
-        "yahoo": fetch_yahoo_news(ticker, hours=hours),
-        "edgar_8k": fetch_edgar_8k(ticker, days=max(2, hours // 24 + 1)),
-    }
+    yahoo = fetch_yahoo_news(ticker, hours=hours)
+    edgar = fetch_edgar_8k(ticker, days=max(2, hours // 24 + 1))
+    if not yahoo and not edgar:
+        logger.info("No news found for %s (Yahoo: 0, EDGAR: 0)", ticker)
+    return {"yahoo": yahoo, "edgar_8k": edgar}
+
+
+def fetch_news_batch(
+    tickers: list[str],
+    hours: int = 48,
+) -> dict[str, dict]:
+    """
+    Fetch news for multiple tickers with aggregate failure logging.
+    Returns {ticker: {"yahoo": [...], "edgar_8k": [...]}}
+    """
+    results = {}
+    n_empty = 0
+    for ticker in tickers:
+        data = fetch_all_news(ticker, hours=hours)
+        results[ticker] = data
+        if not data["yahoo"] and not data["edgar_8k"]:
+            n_empty += 1
+    if n_empty == len(tickers) and len(tickers) > 0:
+        logger.warning(
+            "ALL %d tickers returned zero news articles — "
+            "Yahoo RSS or EDGAR may be down",
+            len(tickers),
+        )
+    elif n_empty > 0:
+        logger.info("News fetch: %d/%d tickers had zero articles", n_empty, len(tickers))
+    return results
