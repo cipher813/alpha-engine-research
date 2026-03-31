@@ -166,89 +166,54 @@ def fetch_macro_data() -> dict:
     # CPI YoY: compare current to 12 months ago
     macro["cpi_yoy"] = _fred_cpi_yoy(api_key)
 
-    # ── Commodities + indices (polygon primary, yfinance fallback) ───────────
-    # Polygon free tier doesn't support futures (CL=F etc.) — use ETF proxies.
-    # Commodity mapping: CL=F→USO (oil), GC=F→GLD (gold), HG=F→CPER (copper)
-    _POLYGON_TICKERS = ["USO", "GLD", "CPER", "SPY", "QQQ", "IWM"]
-    _COMMODITY_MAP = {"USO": "oil_wti", "GLD": "gold", "CPER": "copper"}
-    _INDEX_MAP = {"SPY": "sp500_close", "QQQ": "qqq", "IWM": "iwm"}
+    # ── yfinance: commodities + indices ───────────────────────────────────────
+    # yfinance batch download is more efficient here (1 call for 6 tickers)
+    # than polygon per-ticker calls (6 calls at 5/min rate limit).
+    commodity_tickers = ["CL=F", "GC=F", "HG=F"]
+    index_tickers = ["SPY", "QQQ", "IWM"]
+    all_tickers = commodity_tickers + index_tickers
 
-    polygon_ok = False
     try:
-        from polygon_client import polygon_client
-        client = polygon_client()
-        # Fetch 35 trading days for 30d return calc
-        from datetime import timedelta as _td
-        _end = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        _start = (datetime.now(timezone.utc) - _td(days=50)).strftime("%Y-%m-%d")
+        df = yf.download(
+            all_tickers,
+            period="35d",
+            interval="1d",
+            auto_adjust=True,
+            progress=False,
+            group_by="ticker",
+            threads=True,
+        )
 
-        poly_data: dict[str, pd.DataFrame] = {}
-        for t in _POLYGON_TICKERS:
-            bars = client.get_daily_bars(t, _start, _end)
-            if not bars.empty:
-                poly_data[t] = bars
-
-        if len(poly_data) >= 4:  # at least most tickers succeeded
-            polygon_ok = True
-            for t, key in _COMMODITY_MAP.items():
-                if t in poly_data and not poly_data[t].empty:
-                    macro[key] = float(poly_data[t]["Close"].iloc[-1])
-            if "SPY" in poly_data and not poly_data["SPY"].empty:
-                macro["sp500_close"] = float(poly_data["SPY"]["Close"].iloc[-1])
-            for t in ["SPY", "QQQ", "IWM"]:
-                if t in poly_data and len(poly_data[t]) >= 20:
-                    s = poly_data[t]["Close"]
-                    ret = round(((float(s.iloc[-1]) / float(s.iloc[-20])) - 1) * 100, 2)
-                    macro[f"{_INDEX_MAP.get(t, t.lower())}_30d_return"] = ret
-            logger.info("Macro prices fetched from polygon (%d tickers)", len(poly_data))
-    except Exception as e:
-        logger.warning("Polygon macro fetch failed: %s", e)
-
-    if not polygon_ok:
-        # Fallback to yfinance with futures tickers
-        commodity_tickers = ["CL=F", "GC=F", "HG=F"]
-        index_tickers = ["SPY", "QQQ", "IWM"]
-        all_tickers = commodity_tickers + index_tickers
-        try:
-            df = yf.download(
-                all_tickers,
-                period="35d",
-                interval="1d",
-                auto_adjust=True,
-                progress=False,
-                group_by="ticker",
-                threads=True,
-            )
-
-            def _last_close(ticker: str) -> Optional[float]:
-                try:
-                    s = df[ticker]["Close"].dropna()
-                    return float(s.iloc[-1]) if not s.empty else None
-                except Exception as e:
-                    logger.debug("_last_close failed for %s: %s", ticker, e)
-                    return None
-
-            def _return_30d(ticker: str) -> Optional[float]:
-                try:
-                    s = df[ticker]["Close"].dropna()
-                    if len(s) >= 20:
-                        return round(((s.iloc[-1] / s.iloc[-20]) - 1) * 100, 2)
-                except Exception as e:
-                    logger.debug("_return_30d failed for %s: %s", ticker, e)
+        def _last_close(ticker: str) -> Optional[float]:
+            try:
+                s = df[ticker]["Close"].dropna()
+                return float(s.iloc[-1]) if not s.empty else None
+            except Exception as e:
+                logger.debug("_last_close failed for %s: %s", ticker, e)
                 return None
 
-            macro["oil_wti"] = _last_close("CL=F")
-            macro["gold"] = _last_close("GC=F")
-            macro["copper"] = _last_close("HG=F")
-            macro["sp500_close"] = _last_close("SPY")
-            macro["sp500_30d_return"] = _return_30d("SPY")
-            macro["qqq_30d_return"] = _return_30d("QQQ")
-            macro["iwm_30d_return"] = _return_30d("IWM")
-        except Exception as e:
-            logger.warning("yfinance macro download failed: %s", e)
-            for k in ["oil_wti", "gold", "copper", "sp500_close",
-                      "sp500_30d_return", "qqq_30d_return", "iwm_30d_return"]:
-                macro.setdefault(k, None)
+        def _return_30d(ticker: str) -> Optional[float]:
+            try:
+                s = df[ticker]["Close"].dropna()
+                if len(s) >= 20:
+                    return round(((s.iloc[-1] / s.iloc[-20]) - 1) * 100, 2)
+            except Exception as e:
+                logger.debug("_return_30d failed for %s: %s", ticker, e)
+            return None
+
+        macro["oil_wti"] = _last_close("CL=F")
+        macro["gold"] = _last_close("GC=F")
+        macro["copper"] = _last_close("HG=F")
+        macro["sp500_close"] = _last_close("SPY")
+        macro["sp500_30d_return"] = _return_30d("SPY")
+        macro["qqq_30d_return"] = _return_30d("QQQ")
+        macro["iwm_30d_return"] = _return_30d("IWM")
+
+    except Exception as e:
+        logger.warning("yfinance macro download failed: %s", e)
+        for k in ["oil_wti", "gold", "copper", "sp500_close",
+                  "sp500_30d_return", "qqq_30d_return", "iwm_30d_return"]:
+            macro.setdefault(k, None)
 
     macro["fetched_at"] = datetime.now(timezone.utc).isoformat()
     return macro
