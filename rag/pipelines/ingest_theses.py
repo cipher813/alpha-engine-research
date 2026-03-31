@@ -1,11 +1,15 @@
-"""Ingest Alpha Engine thesis history into the RAG vector store.
+"""Ingest Alpha Engine research history into the RAG vector store.
 
-Embeds bull_case, bear_case, catalysts, and risks from the thesis_history
-table in research.db. Enables semantic search over prior reasoning across
-weeks (e.g., "What were the bearish catalysts for AAPL last quarter?").
+Embeds agent reports (news briefs, research briefs, macro reports) and
+investment thesis summaries from research.db. Enables semantic search over
+prior analysis (e.g., "What were the risks for AAPL last month?").
+
+Data sources:
+    - agent_reports: per-ticker news/research markdown briefs from LLM agents
+    - investment_thesis: composite scores, ratings, thesis summaries
 
 Usage:
-    # Ingest all thesis records from research.db
+    # Ingest all records from research.db
     python -m rag.pipelines.ingest_theses --db-path /path/to/research.db
 
     # Ingest only new records since last run
@@ -22,170 +26,327 @@ from datetime import date
 
 logger = logging.getLogger(__name__)
 
+_CHUNK_SIZE = 400
+_CHUNK_OVERLAP = 50
 
-def _load_theses(db_path: str, since: str | None = None) -> list[dict]:
-    """Load thesis records from SQLite thesis_history table."""
+
+def _chunk_text(text: str, chunk_size: int = _CHUNK_SIZE, overlap: int = _CHUNK_OVERLAP) -> list[str]:
+    """Split text into overlapping chunks by approximate token count."""
+    words = text.split()
+    words_per_chunk = int(chunk_size / 1.3)
+    overlap_words = int(overlap / 1.3)
+
+    chunks = []
+    start = 0
+    while start < len(words):
+        end = start + words_per_chunk
+        chunk = " ".join(words[start:end])
+        if chunk.strip():
+            chunks.append(chunk)
+        start = end - overlap_words
+        if start >= len(words):
+            break
+    return chunks
+
+
+def _load_agent_reports(db_path: str, since: str | None = None) -> list[dict]:
+    """Load agent reports from research.db."""
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
 
-    sql = "SELECT * FROM thesis_history"
+    sql = "SELECT symbol, date, agent_type, report_md, word_count FROM agent_reports WHERE length(report_md) > 100"
     params = []
     if since:
-        sql += " WHERE run_date >= ?"
+        sql += " AND date >= ?"
         params.append(since)
-    sql += " ORDER BY run_date DESC"
+    sql += " ORDER BY date DESC"
 
     rows = [dict(r) for r in conn.execute(sql, params).fetchall()]
     conn.close()
     return rows
 
 
-def _thesis_to_chunks(thesis: dict) -> list[dict]:
-    """Convert a thesis record into text chunks with section labels."""
-    ticker = thesis.get("ticker", "UNKNOWN")
-    run_date = thesis.get("run_date", "")
-    author = thesis.get("author", "")
+def _load_investment_theses(db_path: str, since: str | None = None) -> list[dict]:
+    """Load investment thesis records from research.db."""
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
 
-    chunks = []
+    sql = """SELECT symbol, date, rating, score, thesis_summary, conviction, signal,
+                    technical_score, news_score, research_score
+             FROM investment_thesis WHERE length(thesis_summary) > 50"""
+    params = []
+    if since:
+        sql += " AND date >= ?"
+        params.append(since)
+    sql += " ORDER BY date DESC"
 
-    # Bull case
-    bull = thesis.get("bull_case", "")
-    if bull and len(bull) > 50:
-        chunks.append({
-            "content": f"[{ticker} Bull Case — {run_date} by {author}]\n{bull}",
-            "section_label": "bull_case",
-        })
+    rows = [dict(r) for r in conn.execute(sql, params).fetchall()]
+    conn.close()
+    return rows
 
-    # Bear case
-    bear = thesis.get("bear_case", "")
-    if bear and len(bear) > 50:
-        chunks.append({
-            "content": f"[{ticker} Bear Case — {run_date} by {author}]\n{bear}",
-            "section_label": "bear_case",
-        })
 
-    # Catalysts
-    catalysts = thesis.get("catalysts", "")
-    if catalysts:
-        if isinstance(catalysts, str):
-            try:
-                catalysts = json.loads(catalysts)
-            except json.JSONDecodeError:
-                pass
-        if isinstance(catalysts, list):
-            catalysts_text = "\n".join(f"- {c}" for c in catalysts)
-        else:
-            catalysts_text = str(catalysts)
-        if len(catalysts_text) > 30:
-            chunks.append({
-                "content": f"[{ticker} Catalysts — {run_date} by {author}]\n{catalysts_text}",
-                "section_label": "catalysts",
-            })
-
-    # Risks
-    risks = thesis.get("risks", "")
-    if risks:
-        if isinstance(risks, str):
-            try:
-                risks = json.loads(risks)
-            except json.JSONDecodeError:
-                pass
-        if isinstance(risks, list):
-            risks_text = "\n".join(f"- {r}" for r in risks)
-        else:
-            risks_text = str(risks)
-        if len(risks_text) > 30:
-            chunks.append({
-                "content": f"[{ticker} Risks — {run_date} by {author}]\n{risks_text}",
-                "section_label": "risks",
-            })
-
-    # Conviction rationale
-    rationale = thesis.get("rationale", "") or thesis.get("conviction_rationale", "")
-    if rationale and len(rationale) > 30:
-        chunks.append({
-            "content": f"[{ticker} Conviction Rationale — {run_date} by {author}]\n{rationale}",
-            "section_label": "conviction_rationale",
-        })
-
-    return chunks
+def _agent_type_to_section(agent_type: str) -> str:
+    """Map agent_type to a section label for retrieval filtering."""
+    return {
+        "news": "news_brief",
+        "research": "research_brief",
+        "macro": "macro_report",
+        "consolidator": "weekly_consolidation",
+    }.get(agent_type, agent_type)
 
 
 def ingest_theses(
     db_path: str,
     since: str | None = None,
     dry_run: bool = False,
-) -> int:
-    """Ingest thesis records from research.db into RAG store.
+) -> dict:
+    """Ingest agent reports and investment theses into RAG store.
 
-    Returns number of thesis documents ingested.
+    Returns summary dict with counts.
     """
     from rag.embeddings import embed_texts
     from rag.retrieval import ingest_document, document_exists
 
-    theses = _load_theses(db_path, since)
-    logger.info("Loaded %d thesis records from %s", len(theses), db_path)
+    results = {"agent_reports": 0, "investment_theses": 0, "skipped_dedup": 0, "chunks_total": 0}
 
-    ingested = 0
-    for thesis in theses:
-        ticker = thesis.get("ticker", "")
-        run_date_str = thesis.get("run_date", "")
-        if not ticker or not run_date_str:
+    # ── Agent reports (news/research/macro briefs) ───────────────────────────
+    reports = _load_agent_reports(db_path, since)
+    logger.info("Loaded %d agent reports from %s", len(reports), db_path)
+
+    for report in reports:
+        ticker = report.get("symbol", "")
+        date_str = report.get("date", "")
+        agent_type = report.get("agent_type", "")
+        content = report.get("report_md", "")
+
+        if not ticker or not date_str or not content:
             continue
 
         try:
-            filed_date = date.fromisoformat(run_date_str[:10])
+            filed_date = date.fromisoformat(date_str[:10])
         except ValueError:
             continue
 
-        author = thesis.get("author", "")
-        doc_type = "thesis"
+        # Use agent_type as part of doc_type for dedup granularity
+        doc_type = f"thesis_{agent_type}"
         source = "alpha_engine"
 
         if document_exists(ticker, doc_type, filed_date, source):
-            continue
-
-        chunks = _thesis_to_chunks(thesis)
-        if not chunks:
+            results["skipped_dedup"] += 1
             continue
 
         if dry_run:
-            logger.info("[DRY RUN] Would ingest %s thesis %s (%d chunks)", ticker, filed_date, len(chunks))
-            ingested += 1
+            logger.info("[DRY RUN] Would ingest %s %s %s", ticker, doc_type, filed_date)
+            results["agent_reports"] += 1
             continue
 
+        # Chunk the markdown report
+        text_chunks = _chunk_text(content)
+        if not text_chunks:
+            continue
+
+        section_label = _agent_type_to_section(agent_type)
+        all_chunks = [{"content": c, "section_label": section_label} for c in text_chunks]
+
         # Embed
+        embeddings = embed_texts([c["content"] for c in all_chunks])
+        for chunk, emb in zip(all_chunks, embeddings):
+            chunk["embedding"] = emb
+
+        doc_id = ingest_document(
+            ticker=ticker,
+            sector=None,
+            doc_type=doc_type,
+            source=source,
+            filed_date=filed_date,
+            title=f"{ticker} {agent_type} brief — {filed_date}",
+            url=None,
+            chunks=all_chunks,
+        )
+        if doc_id:
+            results["agent_reports"] += 1
+            results["chunks_total"] += len(all_chunks)
+
+    # ── Investment thesis summaries ──────────────────────────────────────────
+    theses = _load_investment_theses(db_path, since)
+    logger.info("Loaded %d investment thesis records from %s", len(theses), db_path)
+
+    for thesis in theses:
+        ticker = thesis.get("symbol", "")
+        date_str = thesis.get("date", "")
+        summary = thesis.get("thesis_summary", "")
+
+        if not ticker or not date_str or len(summary) < 50:
+            continue
+
+        try:
+            filed_date = date.fromisoformat(date_str[:10])
+        except ValueError:
+            continue
+
+        doc_type = "thesis_score"
+        source = "alpha_engine"
+
+        if document_exists(ticker, doc_type, filed_date, source):
+            results["skipped_dedup"] += 1
+            continue
+
+        if dry_run:
+            results["investment_theses"] += 1
+            continue
+
+        # Build enriched content with score context
+        rating = thesis.get("rating", "")
+        score = thesis.get("score", "")
+        conviction = thesis.get("conviction", "")
+        signal = thesis.get("signal", "")
+        enriched = (
+            f"[{ticker} | {filed_date} | Rating: {rating} | Score: {score} | "
+            f"Conviction: {conviction} | Signal: {signal}]\n{summary}"
+        )
+
+        chunks = [{"content": enriched, "section_label": "thesis_summary"}]
         embeddings = embed_texts([c["content"] for c in chunks])
         for chunk, emb in zip(chunks, embeddings):
             chunk["embedding"] = emb
 
         doc_id = ingest_document(
             ticker=ticker,
-            sector=thesis.get("sector"),
+            sector=None,
             doc_type=doc_type,
             source=source,
             filed_date=filed_date,
-            title=f"{ticker} thesis — {filed_date} ({author})",
+            title=f"{ticker} thesis {rating} ({score}) — {filed_date}",
             url=None,
             chunks=chunks,
         )
         if doc_id:
-            ingested += 1
+            results["investment_theses"] += 1
+            results["chunks_total"] += len(chunks)
 
-    return ingested
+    logger.info(
+        "Ingestion complete: %d agent reports, %d theses, %d chunks, %d dedup skipped",
+        results["agent_reports"], results["investment_theses"],
+        results["chunks_total"], results["skipped_dedup"],
+    )
+    return results
+
+
+def ingest_signals_theses(
+    bucket: str = "alpha-engine-research",
+    since: str | None = None,
+    dry_run: bool = False,
+) -> dict:
+    """Ingest thesis summaries from v2 signals.json files on S3.
+
+    The v2 sector-team architecture (quant + qual sub-scores) writes thesis
+    content to signals/{date}/signals.json rather than SQLite agent_reports.
+
+    Returns summary dict with counts.
+    """
+    import boto3
+    from rag.embeddings import embed_texts
+    from rag.retrieval import ingest_document, document_exists
+
+    s3 = boto3.client("s3")
+    results = {"signals_theses": 0, "skipped_dedup": 0, "chunks_total": 0}
+
+    # List signal dates
+    resp = s3.list_objects_v2(Bucket=bucket, Prefix="signals/", Delimiter="/")
+    prefixes = sorted([p["Prefix"] for p in resp.get("CommonPrefixes", [])])
+
+    for prefix in prefixes:
+        date_str = prefix.strip("/").split("/")[-1]
+        if since and date_str < since:
+            continue
+
+        try:
+            filed_date = date.fromisoformat(date_str)
+        except ValueError:
+            continue
+
+        # Load signals.json
+        try:
+            obj = s3.get_object(Bucket=bucket, Key=f"{prefix}signals.json")
+            data = json.loads(obj["Body"].read())
+        except Exception:
+            continue
+
+        universe = data.get("universe", [])
+        market_regime = data.get("market_regime", "")
+
+        for entry in universe:
+            ticker = entry.get("ticker", "")
+            thesis = entry.get("thesis_summary", "")
+            if not ticker or len(thesis) < 50:
+                continue
+
+            doc_type = "thesis_signal"
+            if document_exists(ticker, doc_type, filed_date, "alpha_engine"):
+                results["skipped_dedup"] += 1
+                continue
+
+            if dry_run:
+                results["signals_theses"] += 1
+                continue
+
+            score = entry.get("score", "")
+            signal = entry.get("signal", "")
+            conviction = entry.get("conviction", "")
+            sub_scores = entry.get("sub_scores", {})
+            quant = sub_scores.get("quant", "")
+            qual = sub_scores.get("qual", "")
+
+            enriched = (
+                f"[{ticker} | {filed_date} | Signal: {signal} | Score: {score} | "
+                f"Conviction: {conviction} | Quant: {quant} | Qual: {qual} | "
+                f"Regime: {market_regime}]\n{thesis}"
+            )
+
+            chunks = [{"content": enriched, "section_label": "thesis_quant_qual"}]
+            embeddings = embed_texts([c["content"] for c in chunks])
+            for chunk, emb in zip(chunks, embeddings):
+                chunk["embedding"] = emb
+
+            doc_id = ingest_document(
+                ticker=ticker,
+                sector=entry.get("sector"),
+                doc_type=doc_type,
+                source="alpha_engine",
+                filed_date=filed_date,
+                title=f"{ticker} {signal} ({score}) quant={quant} qual={qual} — {filed_date}",
+                url=None,
+                chunks=chunks,
+            )
+            if doc_id:
+                results["signals_theses"] += 1
+                results["chunks_total"] += 1
+
+    logger.info(
+        "Signals thesis ingestion: %d theses, %d chunks, %d dedup skipped",
+        results["signals_theses"], results["chunks_total"], results["skipped_dedup"],
+    )
+    return results
 
 
 def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
     parser = argparse.ArgumentParser(description="Ingest thesis history into RAG store")
-    parser.add_argument("--db-path", required=True, help="Path to research.db")
-    parser.add_argument("--since", type=str, help="Only ingest theses from this date forward (YYYY-MM-DD)")
+    parser.add_argument("--db-path", type=str, help="Path to research.db (for legacy agent_reports)")
+    parser.add_argument("--signals", action="store_true", help="Ingest v2 theses from signals.json on S3")
+    parser.add_argument("--since", type=str, help="Only ingest records from this date forward (YYYY-MM-DD)")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
-    n = ingest_theses(args.db_path, since=args.since, dry_run=args.dry_run)
-    logger.info("Ingested %d thesis documents", n)
+    if args.signals:
+        results = ingest_signals_theses(since=args.since, dry_run=args.dry_run)
+        print(json.dumps(results, indent=2))
+    elif args.db_path:
+        results = ingest_theses(args.db_path, since=args.since, dry_run=args.dry_run)
+        print(json.dumps(results, indent=2))
+    else:
+        parser.error("Provide --db-path (legacy) or --signals (v2)")
 
 
 if __name__ == "__main__":

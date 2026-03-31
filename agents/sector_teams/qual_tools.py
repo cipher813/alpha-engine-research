@@ -8,8 +8,26 @@ Tools are created via factory that closes over shared context (prior_theses).
 from __future__ import annotations
 
 import json
+import logging
 
 from langchain_core.tools import tool
+
+log = logging.getLogger(__name__)
+
+# ── RAG usage metrics (module-level, reset per pipeline run) ─────────────────
+_rag_stats = {"attempted": 0, "succeeded": 0, "failed": 0}
+
+
+def get_rag_stats() -> dict:
+    """Return RAG query statistics for the current run."""
+    return dict(_rag_stats)
+
+
+def reset_rag_stats() -> None:
+    """Reset RAG stats (call at the start of each pipeline run)."""
+    _rag_stats["attempted"] = 0
+    _rag_stats["succeeded"] = 0
+    _rag_stats["failed"] = 0
 
 
 def create_qual_tools(context: dict) -> list:
@@ -163,6 +181,7 @@ def create_qual_tools(context: dict) -> list:
             from rag.retrieval import retrieve
             from datetime import date, timedelta
 
+            _rag_stats["attempted"] += 1
             results = retrieve(
                 query=query,
                 tickers=[ticker],
@@ -173,6 +192,7 @@ def create_qual_tools(context: dict) -> list:
             if not results:
                 return f"No filing data found for {ticker}."
 
+            _rag_stats["succeeded"] += 1
             formatted = []
             for r in results:
                 formatted.append(
@@ -180,7 +200,8 @@ def create_qual_tools(context: dict) -> list:
                 )
             return "\n\n---\n\n".join(formatted)
         except Exception as e:
-            log.debug("RAG query_filings unavailable: %s", e)
+            _rag_stats["failed"] += 1
+            log.warning("RAG_UNAVAILABLE ticker=%s error_type=%s error=%s", ticker, type(e).__name__, e)
             return f"Filing search temporarily unavailable for {ticker}."
 
     @tool
