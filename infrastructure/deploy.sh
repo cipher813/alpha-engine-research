@@ -192,6 +192,38 @@ build_and_deploy_main() {
     --function-version "$VERSION" \
     --region "$REGION"
   echo "  Alias 'live' → version $VERSION"
+
+  # Canary invocation
+  echo "  Running canary (dry_run=true)..."
+  CANARY_OUT=$(mktemp)
+  aws lambda invoke \
+    --function-name "${FUNCTION_MAIN}:live" \
+    --payload '{"dry_run": true}' \
+    --cli-binary-format raw-in-base64-out \
+    --region "$REGION" \
+    "$CANARY_OUT" > /dev/null
+
+  # Handler returns {"status": "OK|SKIPPED|ERROR"} or {"statusCode": 500} on env var failure.
+  # Accept OK or SKIPPED (wrong_time / already_run / market_holiday are expected).
+  CANARY_STATUS=$(python3 -c "
+import json, sys
+d = json.load(open('$CANARY_OUT'))
+s = d.get('status', '')
+if s in ('OK', 'SKIPPED'):
+    print(s)
+elif d.get('statusCode') == 500:
+    print('ENV_ERROR')
+else:
+    print(d.get('errorMessage', 'UNKNOWN'))
+" 2>/dev/null || echo "PARSE_ERROR")
+  rm -f "$CANARY_OUT"
+
+  if [ "$CANARY_STATUS" != "OK" ] && [ "$CANARY_STATUS" != "SKIPPED" ]; then
+    echo "  ERROR: Canary returned status '$CANARY_STATUS' — auto-rolling back!"
+    bash "$(dirname "$0")/rollback.sh"
+    exit 1
+  fi
+  echo "  Canary passed (status=$CANARY_STATUS)"
 }
 
 # ── Alerts function: container image deployment ───────────────────────────────
