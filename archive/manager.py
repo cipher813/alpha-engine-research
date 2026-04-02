@@ -415,6 +415,67 @@ class ArchiveManager:
                 ),
             )
 
+    def write_scanner_evaluations(self, evaluations: list[dict]) -> None:
+        """Log all ~900 stocks from the scanner with pass/fail flags."""
+        if not self.db_conn:
+            return
+        for e in evaluations:
+            self.db_conn.execute(
+                """INSERT OR REPLACE INTO scanner_evaluations
+                   (ticker, eval_date, sector, tech_score, scan_path,
+                    quant_filter_pass, liquidity_pass, volatility_pass,
+                    balance_sheet_pass, filter_fail_reason, rsi_14, atr_pct,
+                    price_vs_ma200, current_price, avg_volume_20d)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    e["ticker"], e["eval_date"], e.get("sector"),
+                    e.get("tech_score"), e.get("scan_path"),
+                    e.get("quant_filter_pass", 0), e.get("liquidity_pass", 1),
+                    e.get("volatility_pass", 1), e.get("balance_sheet_pass", 1),
+                    e.get("filter_fail_reason"), e.get("rsi_14"),
+                    e.get("atr_pct"), e.get("price_vs_ma200"),
+                    e.get("current_price"), e.get("avg_volume_20d"),
+                ),
+            )
+
+    def write_team_candidates(self, candidates: list[dict]) -> None:
+        """Log quant analyst top-10 per team with qual scores and recommendation flag."""
+        if not self.db_conn:
+            return
+        for c in candidates:
+            self.db_conn.execute(
+                """INSERT OR REPLACE INTO team_candidates
+                   (ticker, eval_date, team_id, quant_rank, quant_score,
+                    qual_score, team_recommended)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    c["ticker"], c["eval_date"], c["team_id"],
+                    c.get("quant_rank"), c.get("quant_score"),
+                    c.get("qual_score"), c.get("team_recommended", 0),
+                ),
+            )
+
+    def write_cio_evaluations(self, evaluations: list[dict]) -> None:
+        """Log all CIO decisions (ADVANCE/REJECT/DEADLOCK) for evaluation."""
+        if not self.db_conn:
+            return
+        for e in evaluations:
+            self.db_conn.execute(
+                """INSERT OR REPLACE INTO cio_evaluations
+                   (ticker, eval_date, team_id, quant_score, qual_score,
+                    combined_score, macro_shift, final_score, cio_decision,
+                    cio_conviction, cio_rank, rationale)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    e["ticker"], e["eval_date"], e.get("team_id"),
+                    e.get("quant_score"), e.get("qual_score"),
+                    e.get("combined_score"), e.get("macro_shift"),
+                    e.get("final_score"), e["cio_decision"],
+                    e.get("cio_conviction"), e.get("cio_rank"),
+                    e.get("rationale"),
+                ),
+            )
+
     def write_candidate_tenure_entry(self, tenure: dict) -> None:
         if not self.db_conn:
             return

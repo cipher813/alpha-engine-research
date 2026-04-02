@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 # ── Table Definitions ────────────────────────────────────────────────────────
 
@@ -253,6 +253,55 @@ CREATE TABLE IF NOT EXISTS memory_semantic (
     created_date    TEXT NOT NULL,
     reinforced_date TEXT
 );
+
+CREATE TABLE IF NOT EXISTS scanner_evaluations (
+    id                  INTEGER PRIMARY KEY,
+    ticker              TEXT NOT NULL,
+    eval_date           TEXT NOT NULL,
+    sector              TEXT,
+    tech_score          REAL,
+    scan_path           TEXT,
+    quant_filter_pass   INTEGER NOT NULL DEFAULT 0,
+    liquidity_pass      INTEGER NOT NULL DEFAULT 1,
+    volatility_pass     INTEGER NOT NULL DEFAULT 1,
+    balance_sheet_pass  INTEGER NOT NULL DEFAULT 1,
+    filter_fail_reason  TEXT,
+    rsi_14              REAL,
+    atr_pct             REAL,
+    price_vs_ma200      REAL,
+    current_price       REAL,
+    avg_volume_20d      REAL,
+    UNIQUE(ticker, eval_date)
+);
+
+CREATE TABLE IF NOT EXISTS team_candidates (
+    id                  INTEGER PRIMARY KEY,
+    ticker              TEXT NOT NULL,
+    eval_date           TEXT NOT NULL,
+    team_id             TEXT NOT NULL,
+    quant_rank          INTEGER,
+    quant_score         REAL,
+    qual_score          REAL,
+    team_recommended    INTEGER NOT NULL DEFAULT 0,
+    UNIQUE(ticker, eval_date, team_id)
+);
+
+CREATE TABLE IF NOT EXISTS cio_evaluations (
+    id                  INTEGER PRIMARY KEY,
+    ticker              TEXT NOT NULL,
+    eval_date           TEXT NOT NULL,
+    team_id             TEXT,
+    quant_score         REAL,
+    qual_score          REAL,
+    combined_score      REAL,
+    macro_shift         REAL,
+    final_score         REAL,
+    cio_decision        TEXT NOT NULL,
+    cio_conviction      INTEGER,
+    cio_rank            INTEGER,
+    rationale           TEXT,
+    UNIQUE(ticker, eval_date)
+);
 """
 
 # ── Versioned Migrations ─────────────────────────────────────────────────────
@@ -277,6 +326,8 @@ MIGRATIONS: dict[int, tuple[str, str]] = {
         "ALTER TABLE investment_thesis ADD COLUMN predicted_direction TEXT"),
     7: ("Add prediction_confidence to investment_thesis",
         "ALTER TABLE investment_thesis ADD COLUMN prediction_confidence REAL"),
+    8: ("Add evaluation tables (scanner_evaluations, team_candidates, cio_evaluations)",
+        "SELECT 1"),  # Tables created via CREATE IF NOT EXISTS above
 }
 
 
