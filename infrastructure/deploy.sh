@@ -32,7 +32,11 @@ TARGET="${1:-both}"
 # ── Lambda env vars from lambda.env ──────────────────────────────────────────
 # Reads lambda.env (gitignored) and builds the JSON for --environment.
 
-LAMBDA_ENV_FILE=".env"
+# Master .env lives in alpha-engine-data; fall back to local .env
+LAMBDA_ENV_FILE="$(dirname "$(pwd)")/alpha-engine-data/.env"
+if [ ! -f "$LAMBDA_ENV_FILE" ]; then
+  LAMBDA_ENV_FILE=".env"
+fi
 
 build_lambda_env_json() {
   if [ ! -f "$LAMBDA_ENV_FILE" ]; then
