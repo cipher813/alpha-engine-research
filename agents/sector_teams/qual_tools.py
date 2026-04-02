@@ -3,16 +3,40 @@ Tools for the Qualitative Analyst agent — LangChain @tool wrappers.
 
 The qual analyst reviews the quant's top 5 picks using qualitative data sources.
 Tools are created via factory that closes over shared context (prior_theses).
+
+S3-first: tries pre-collected alternative data from alpha-engine-data repo,
+falls back to direct API calls if S3 data is missing.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import os
 
 from langchain_core.tools import tool
 
 log = logging.getLogger(__name__)
+
+_S3_BUCKET = os.environ.get("RESEARCH_BUCKET", "alpha-engine-research")
+_MARKET_DATA_PREFIX = "market_data/"
+
+
+def _load_alternative_from_s3(ticker: str) -> dict | None:
+    """Try to load pre-collected alternative data for a ticker from S3."""
+    try:
+        import boto3
+        s3 = boto3.client("s3")
+        ptr = s3.get_object(Bucket=_S3_BUCKET, Key=f"{_MARKET_DATA_PREFIX}latest_weekly.json")
+        pointer = json.loads(ptr["Body"].read())
+        prefix = pointer.get("s3_prefix", "")
+        if not prefix:
+            return None
+        key = f"{prefix}alternative/{ticker}.json"
+        obj = s3.get_object(Bucket=_S3_BUCKET, Key=key)
+        return json.loads(obj["Body"].read())
+    except Exception:
+        return None
 
 # ── RAG usage metrics (module-level, reset per pipeline run) ─────────────────
 _rag_stats = {"attempted": 0, "succeeded": 0, "failed": 0}
@@ -48,6 +72,19 @@ def create_qual_tools(context: dict) -> list:
     @tool
     def get_news_articles(ticker: str, days: int = 7) -> str:
         """Get recent news headlines and excerpts for a ticker. Useful for understanding market narrative."""
+        # S3-first
+        s3_data = _load_alternative_from_s3(ticker)
+        if s3_data and s3_data.get("news"):
+            news = s3_data["news"]
+            articles = news.get("articles", [])
+            if articles:
+                trimmed = [
+                    {"headline": a.get("headline", ""), "source": a.get("source", ""),
+                     "published": a.get("published_utc", ""), "excerpt": ""}
+                    for a in articles[:10]
+                ]
+                return json.dumps({"ticker": ticker, "article_count": len(articles), "articles": trimmed})
+
         from data.fetchers.news_fetcher import fetch_news_for_ticker
 
         try:
@@ -65,6 +102,20 @@ def create_qual_tools(context: dict) -> list:
     @tool
     def get_analyst_reports(ticker: str) -> str:
         """Get analyst consensus, price target, rating changes, earnings surprises for a ticker."""
+        # S3-first: try pre-collected data
+        s3_data = _load_alternative_from_s3(ticker)
+        if s3_data and s3_data.get("analyst_consensus"):
+            ac = s3_data["analyst_consensus"]
+            return json.dumps({
+                "ticker": ticker,
+                "consensus_rating": ac.get("rating", "N/A"),
+                "num_analysts": ac.get("num_analysts", 0),
+                "mean_target": ac.get("target_price"),
+                "upside_pct": None,
+                "rating_changes": [],
+                "earnings_surprises": ac.get("earnings_surprises", [])[:4],
+            })
+
         from data.fetchers.analyst_fetcher import fetch_analyst_consensus
 
         try:
@@ -88,6 +139,19 @@ def create_qual_tools(context: dict) -> list:
     @tool
     def get_insider_activity(ticker: str) -> str:
         """Get insider transactions and cluster buying signals. Cluster buying (3+ insiders in 30d) is strongly bullish."""
+        # S3-first
+        s3_data = _load_alternative_from_s3(ticker)
+        if s3_data and s3_data.get("insider_activity"):
+            ia = s3_data["insider_activity"]
+            return json.dumps({
+                "ticker": ticker,
+                "cluster_buy": ia.get("cluster_buying", False),
+                "unique_buyers_30d": 0,
+                "total_buy_value_30d": 0,
+                "net_sentiment": 0,
+                "recent_transactions": ia.get("transactions", [])[:5],
+            })
+
         from data.fetchers.insider_fetcher import fetch_insider_activity as _fetch
 
         try:
@@ -135,6 +199,18 @@ def create_qual_tools(context: dict) -> list:
     @tool
     def get_options_flow(ticker: str) -> str:
         """Get options market signals: put/call ratio, IV rank, expected move."""
+        # S3-first
+        s3_data = _load_alternative_from_s3(ticker)
+        if s3_data and s3_data.get("options_flow"):
+            of = s3_data["options_flow"]
+            if of.get("put_call_ratio") is not None:
+                return json.dumps({
+                    "ticker": ticker,
+                    "put_call_ratio": round(of.get("put_call_ratio", 1.0), 2),
+                    "iv_rank": round(of.get("iv_rank", 50), 1),
+                    "expected_move_pct": round(of.get("expected_move_pct", 0), 2),
+                })
+
         from data.fetchers.options_fetcher import fetch_options_data
 
         try:
@@ -151,6 +227,17 @@ def create_qual_tools(context: dict) -> list:
     @tool
     def get_institutional_activity(ticker: str) -> str:
         """Get 13F institutional accumulation signals. Shows if large funds are building positions."""
+        # S3-first
+        s3_data = _load_alternative_from_s3(ticker)
+        if s3_data and s3_data.get("institutional"):
+            inst = s3_data["institutional"]
+            return json.dumps({
+                "ticker": ticker,
+                "n_funds_accumulating": inst.get("funds_increasing", 0),
+                "accumulation_signal": inst.get("accumulation", False),
+                "total_new_shares": 0,
+            })
+
         from data.fetchers.institutional_fetcher import fetch_institutional_activity as _fetch
 
         try:

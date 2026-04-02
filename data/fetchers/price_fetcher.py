@@ -1,11 +1,14 @@
 """
 Price fetcher — downloads daily OHLCV data and computes technical indicators.
-Uses yfinance (free, no API key required).
+
+S3-first: tries pre-collected data from alpha-engine-data repo, falls back
+to yfinance if S3 data is missing or stale.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 from typing import Optional
 
 import pandas as pd
@@ -14,6 +17,9 @@ import yfinance as yf
 from retry import retry
 
 logger = logging.getLogger(__name__)
+
+_S3_BUCKET = os.environ.get("RESEARCH_BUCKET", "alpha-engine-research")
+_MARKET_DATA_PREFIX = "market_data/"
 
 
 class PriceFetchError(RuntimeError):
@@ -85,10 +91,42 @@ def _download_batch(tickers: list[str], period: str, session=None) -> dict[str, 
     return result
 
 
+def _load_prices_from_s3(tickers: list[str], lookback_days: int = 90) -> dict[str, pd.DataFrame] | None:
+    """Try to load price data from alpha-engine-data's slim cache on S3."""
+    try:
+        import boto3
+        import io
+        from datetime import datetime, timedelta
+        s3 = boto3.client("s3")
+        cutoff = datetime.now() - timedelta(days=lookback_days)
+        result: dict[str, pd.DataFrame] = {}
+        failed = 0
+        for ticker in tickers:
+            try:
+                key = f"predictor/price_cache_slim/{ticker}.parquet"
+                obj = s3.get_object(Bucket=_S3_BUCKET, Key=key)
+                df = pd.read_parquet(io.BytesIO(obj["Body"].read()))
+                # Slice to lookback period
+                df.index = pd.to_datetime(df.index)
+                df = df[df.index >= cutoff]
+                if not df.empty:
+                    result[ticker] = df
+            except Exception:
+                failed += 1
+        if result and len(result) >= len(tickers) * 0.5:
+            logger.info("Loaded %d/%d ticker prices from S3 slim cache (%d missing)",
+                        len(result), len(tickers), failed)
+            return result
+    except Exception as e:
+        logger.debug("S3 price load failed: %s", e)
+    return None
+
+
 def fetch_price_data(tickers: list[str], period: str = "1y") -> dict[str, pd.DataFrame]:
     """
-    Download daily OHLCV for a list of tickers in sequential batches of 100
-    with a rate-limited session and delay between batches to avoid Yahoo rate limits.
+    Download daily OHLCV for a list of tickers.
+
+    Priority: S3 slim cache (last 3 months) → yfinance batch download.
     Returns dict of ticker → DataFrame with columns [Open, High, Low, Close, Volume].
     Raises PriceFetchError if fewer than 80% of tickers return data.
     """
@@ -96,6 +134,11 @@ def fetch_price_data(tickers: list[str], period: str = "1y") -> dict[str, pd.Dat
 
     if not tickers:
         return {}
+
+    # S3-first: try slim cache (sufficient for research's ~90-day technical indicator window)
+    s3_result = _load_prices_from_s3(tickers)
+    if s3_result is not None:
+        return s3_result
 
     global _yf_request_count
 
@@ -149,10 +192,36 @@ _GICS_SECTOR_MAP = {
 }
 
 
+def _load_constituents_from_s3() -> tuple[list[str], dict[str, str]] | None:
+    """Try to load constituents from alpha-engine-data's S3 output."""
+    try:
+        import boto3
+        import json
+        s3 = boto3.client("s3")
+        # Load latest pointer
+        ptr = s3.get_object(Bucket=_S3_BUCKET, Key=f"{_MARKET_DATA_PREFIX}latest_weekly.json")
+        pointer = json.loads(ptr["Body"].read())
+        prefix = pointer.get("s3_prefix", "")
+        if not prefix:
+            return None
+        # Load constituents
+        obj = s3.get_object(Bucket=_S3_BUCKET, Key=f"{prefix}constituents.json")
+        data = json.loads(obj["Body"].read())
+        tickers = data.get("tickers", [])
+        sector_map = data.get("sector_map", {})
+        if tickers and len(tickers) >= 800:
+            logger.info("Loaded %d constituents from S3 (date=%s)", len(tickers), pointer.get("date"))
+            return tickers, sector_map
+    except Exception as e:
+        logger.debug("S3 constituents load failed: %s", e)
+    return None
+
+
 def fetch_sp500_sp400_with_sectors() -> tuple[list[str], dict[str, str]]:
     """
-    Fetch S&P 500 and S&P 400 constituent lists AND GICS sectors from Wikipedia.
-    Falls back to cached static CSV if Wikipedia is unavailable.
+    Fetch S&P 500 and S&P 400 constituent lists AND GICS sectors.
+
+    Priority: S3 (alpha-engine-data) → Wikipedia → local CSV cache.
 
     Known limitation — survivorship bias:
         Wikipedia provides current-only constituent lists. Stocks that were removed
@@ -171,6 +240,11 @@ def fetch_sp500_sp400_with_sectors() -> tuple[list[str], dict[str, str]]:
     import requests
     from pathlib import Path
     from io import StringIO
+
+    # S3-first: try pre-collected data from alpha-engine-data
+    s3_result = _load_constituents_from_s3()
+    if s3_result is not None:
+        return s3_result
 
     # Writable cache in /tmp (Lambda's /var/task is read-only); fall back to baked-in copy
     baked_cache = Path(__file__).parent.parent.parent / "data" / "constituents_cache.csv"

@@ -122,9 +122,34 @@ def compute_market_breadth(price_data: dict[str, pd.DataFrame]) -> dict:
     return result
 
 
+def _load_macro_from_s3() -> dict | None:
+    """Try to load macro data from alpha-engine-data's S3 output."""
+    try:
+        import boto3
+        import json
+        bucket = os.environ.get("RESEARCH_BUCKET", "alpha-engine-research")
+        prefix = "market_data/"
+        s3 = boto3.client("s3")
+        ptr = s3.get_object(Bucket=bucket, Key=f"{prefix}latest_weekly.json")
+        pointer = json.loads(ptr["Body"].read())
+        s3_prefix = pointer.get("s3_prefix", "")
+        if not s3_prefix:
+            return None
+        obj = s3.get_object(Bucket=bucket, Key=f"{s3_prefix}macro.json")
+        data = json.loads(obj["Body"].read())
+        if data and data.get("fed_funds_rate") is not None:
+            logger.info("Loaded macro data from S3 (date=%s)", pointer.get("date"))
+            return data
+    except Exception as e:
+        logger.debug("S3 macro load failed: %s", e)
+    return None
+
+
 def fetch_macro_data() -> dict:
     """
-    Fetch current macro data from FRED and yfinance.
+    Fetch current macro data.
+
+    Priority: S3 (alpha-engine-data) → FRED + yfinance.
 
     Returns dict with:
       fed_funds_rate, treasury_2yr, treasury_10yr, yield_curve_slope,
@@ -133,6 +158,11 @@ def fetch_macro_data() -> dict:
       sp500_close, sp500_30d_return, qqq_30d_return, iwm_30d_return,
       oil_wti, gold, copper
     """
+    # S3-first: try pre-collected data from alpha-engine-data
+    s3_data = _load_macro_from_s3()
+    if s3_data is not None:
+        return s3_data
+
     api_key = os.environ.get("FRED_API_KEY", "")
     if not api_key:
         raise RuntimeError("FRED_API_KEY environment variable not set.")
