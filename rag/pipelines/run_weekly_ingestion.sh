@@ -87,3 +87,13 @@ echo ""
 echo "========================================"
 echo "RAG Weekly Ingestion Complete — $(date -u '+%Y-%m-%d %H:%M UTC')"
 echo "========================================"
+
+# Emit CloudWatch heartbeat on successful completion
+aws cloudwatch put-metric-data \
+  --namespace "AlphaEngine" \
+  --metric-name "Heartbeat" \
+  --dimensions "Process=rag-ingestion" \
+  --value 1 --unit "Count" \
+  --region "${AWS_REGION:-us-east-1}" 2>/dev/null \
+  && echo "Heartbeat emitted: rag-ingestion" \
+  || echo "WARNING: Failed to emit heartbeat (non-fatal)"
