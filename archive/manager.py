@@ -251,10 +251,9 @@ class ArchiveManager:
     def write_signals_json(self, run_date: str, run_time: str, signals: dict) -> None:
         """Write the machine-readable signals.json to S3 for executor consumption (§A.1)."""
         payload = {"date": run_date, "run_time": run_time, **signals}
-        self._s3_put(
-            f"signals/{run_date}/signals.json",
-            json.dumps(payload, indent=2, default=str),
-        )
+        body = json.dumps(payload, indent=2, default=str)
+        self._s3_put(f"signals/{run_date}/signals.json", body)
+        self._s3_put("signals/latest.json", body)
 
     def load_predictions_json(self) -> dict[str, dict]:
         """
