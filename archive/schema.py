@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 # ── Table Definitions ────────────────────────────────────────────────────────
 
@@ -328,6 +328,15 @@ MIGRATIONS: dict[int, tuple[str, str]] = {
         "ALTER TABLE investment_thesis ADD COLUMN prediction_confidence REAL"),
     8: ("Add evaluation tables (scanner_evaluations, team_candidates, cio_evaluations)",
         "SELECT 1"),  # Tables created via CREATE IF NOT EXISTS above
+    9: ("Add indexes for common query patterns",
+        """
+        CREATE INDEX IF NOT EXISTS idx_thesis_symbol_date ON investment_thesis(symbol, date);
+        CREATE INDEX IF NOT EXISTS idx_score_perf_date ON score_performance(score_date);
+        CREATE INDEX IF NOT EXISTS idx_scanner_eval_date ON scanner_evaluations(eval_date);
+        CREATE INDEX IF NOT EXISTS idx_population_hist_date ON population_history(date);
+        CREATE INDEX IF NOT EXISTS idx_agent_reports_symbol_date ON agent_reports(symbol, date);
+        CREATE INDEX IF NOT EXISTS idx_macro_date ON macro_snapshots(date);
+        """),
 }
 
 
