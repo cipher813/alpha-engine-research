@@ -88,10 +88,6 @@ This repo is open-source, but files containing prompts, scoring logic, and orche
 | `config/universe.yaml` | Population size, thresholds, LLM models |
 | `graph/research_graph.py` | LangGraph orchestrator (Send fan-out, sector teams) |
 | `agents/macro_agent.py` | Macro economist with reflection loop |
-| `agents/news_agent.py` | News sentiment agent |
-| `agents/research_agent.py` | Research analysis agent |
-| `agents/scanner_ranking_agent.py` | Scanner ranking agent |
-| `agents/consolidator.py` | Email brief synthesizer |
 | `agents/investment_committee/ic_cio.py` | CIO batch evaluator |
 | `agents/sector_teams/quant_analyst.py` | Quant analyst ReAct agent |
 | `agents/sector_teams/qual_analyst.py` | Qual analyst ReAct agent |
@@ -262,7 +258,7 @@ python local/run.py --offline --date 2026-03-23
 | Analyst | `fetch_analyst_consensus`, `fetch_revisions` | Randomized consensus ratings + targets |
 | Macro | `fetch_macro_data`, `compute_market_breadth` | Hardcoded neutral macro environment |
 | Insider/Options | `fetch_insider_activity`, `fetch_options_signals`, `fetch_short_interest`, `fetch_institutional_accumulation` | Empty or minimal synthetic data |
-| LLM agents | `run_news_agent`, `run_research_agent`, `run_macro_agent_with_reflection`, `run_scanner_ranking_agent`, `run_consolidator_agent` | Deterministic scores (40-75 range), stub reports |
+| LLM agents | `run_macro_agent_with_reflection`, `run_sector_team`, `run_cio` | Deterministic scores (40-75 range), stub reports |
 | Sector teams | `run_sector_team`, `run_quant_analyst`, `run_qual_analyst`, `run_peer_review` | Synthetic picks with randomized quant/qual scores |
 | CIO | `run_cio` | Advances candidates up to open slot count |
 | S3 / Archive | `download_db`, `upload_db`, `load_predictions_json`, `write_signals_json`, `upload_population_json` | Uses local SQLite (creates empty if none exists), skips all S3 I/O |

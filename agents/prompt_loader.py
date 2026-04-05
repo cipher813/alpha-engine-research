@@ -22,7 +22,7 @@ def load_prompt(agent_name: str) -> str:
     Load a prompt template from config/prompts/{agent_name}.txt.
 
     Args:
-        agent_name: filename without extension (e.g. "news_agent")
+        agent_name: filename without extension (e.g. "macro_agent")
 
     Returns:
         The prompt template string with {placeholders} for .format().

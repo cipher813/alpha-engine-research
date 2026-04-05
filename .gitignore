@@ -32,24 +32,7 @@ run.log
 
 # ── Proprietary source (prompts, scoring, orchestration) ──────────
 # Agents (contain prompts)
-agents/consolidator.py
-agents/macro_agent.py
-agents/news_agent.py
-agents/research_agent.py
-agents/scanner_ranking_agent.py
-agents/investment_committee/ic_cio.py
-agents/sector_teams/quant_analyst.py
-agents/sector_teams/qual_analyst.py
-agents/sector_teams/peer_review.py
-agents/sector_teams/sector_team.py
 # Scoring, orchestration, config
-scoring/technical.py
-scoring/aggregator.py
-scoring/performance_tracker.py
-data/scanner.py
-data/population_selector.py
-graph/research_graph.py
-thesis/updater.py
 config.py
 
 CLAUDE.md
