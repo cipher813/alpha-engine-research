@@ -33,7 +33,6 @@ run.log
 # ── Proprietary source (prompts, scoring, orchestration) ──────────
 # Agents (contain prompts)
 # Scoring, orchestration, config
-scoring/technical.py
 config.py
 
 CLAUDE.md
