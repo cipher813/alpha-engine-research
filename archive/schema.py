@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 # ── Table Definitions ────────────────────────────────────────────────────────
 
@@ -337,6 +337,11 @@ MIGRATIONS: dict[int, tuple[str, str]] = {
         CREATE INDEX IF NOT EXISTS idx_agent_reports_symbol_date ON agent_reports(symbol, date);
         CREATE INDEX IF NOT EXISTS idx_macro_date ON macro_snapshots(date);
         """),
+    10: ("Add quant_score/qual_score columns to investment_thesis",
+         """
+         ALTER TABLE investment_thesis ADD COLUMN quant_score REAL;
+         ALTER TABLE investment_thesis ADD COLUMN qual_score REAL;
+         """),
 }
 
 
@@ -378,7 +383,10 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     for version in pending:
         desc, sql = MIGRATIONS[version]
         try:
-            conn.execute(sql)
+            if ";" in sql.strip().rstrip(";"):
+                conn.executescript(sql)
+            else:
+                conn.execute(sql)
         except sqlite3.OperationalError as e:
             # Column may already exist from pre-versioning era — safe to skip
             if "duplicate column" not in str(e).lower():

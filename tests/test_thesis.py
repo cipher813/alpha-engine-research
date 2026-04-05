@@ -4,7 +4,11 @@ All functions are pure (no I/O, no LLM) — straightforward unit tests.
 """
 
 import pytest
-from thesis.updater import build_thesis_record, check_rating_change, _build_summary
+
+_updater = pytest.importorskip("thesis.updater", reason="thesis.updater is gitignored")
+build_thesis_record = _updater.build_thesis_record
+check_rating_change = _updater.check_rating_change
+_build_summary = _updater._build_summary
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

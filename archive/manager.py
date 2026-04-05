@@ -144,7 +144,8 @@ class ArchiveManager:
         try:
             rows = self.db_conn.execute(
                 f"""SELECT t.symbol, t.rating, t.score, t.conviction, t.signal,
-                           t.thesis_summary, t.technical_score, t.price_target_upside
+                           t.thesis_summary, t.technical_score, t.price_target_upside,
+                           t.quant_score, t.qual_score
                     FROM investment_thesis t
                     INNER JOIN (
                         SELECT symbol, MAX(id) as max_id
@@ -163,6 +164,8 @@ class ArchiveManager:
                     "thesis_summary": row["thesis_summary"] or "",
                     "technical_score": row["technical_score"],
                     "price_target_upside": row["price_target_upside"],
+                    "quant_score": row["quant_score"],
+                    "qual_score": row["qual_score"],
                 }
         except Exception as e:
             log.warning("Failed to load latest theses from SQLite: %s", e)
@@ -327,13 +330,14 @@ class ArchiveManager:
                 research_score, macro_modifier, thesis_summary, prev_rating, prev_score,
                 last_material_change_date, stale_days, consistency_flag,
                 conviction, signal, score_velocity_5d, price_target_upside,
-                predicted_direction, prediction_confidence)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                predicted_direction, prediction_confidence,
+                quant_score, qual_score)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 thesis["ticker"], thesis["date"], run_time, thesis["rating"],
                 thesis["final_score"], thesis.get("technical_score"),
-                thesis.get("quant_score") or thesis.get("news_score"),
-                thesis.get("qual_score") or thesis.get("research_score"),
+                thesis.get("news_score"),
+                thesis.get("research_score"),
                 thesis.get("macro_modifier"), thesis.get("thesis_summary"),
                 thesis.get("prior_rating"), thesis.get("prior_score"),
                 thesis.get("last_material_change_date"), thesis.get("stale_days"),
@@ -344,6 +348,8 @@ class ArchiveManager:
                 thesis.get("price_target_upside"),
                 thesis.get("predicted_direction"),
                 thesis.get("prediction_confidence"),
+                thesis.get("quant_score"),
+                thesis.get("qual_score"),
             ),
         )
 

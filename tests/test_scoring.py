@@ -1,14 +1,15 @@
 """Tests for the technical scoring engine and aggregator."""
 
 import pytest
-from scoring.technical import (
-    _score_rsi,
-    _score_macd,
-    _score_price_vs_ma,
-    _score_momentum,
-    compute_technical_score,
-    compute_momentum_percentiles,
-)
+
+_technical = pytest.importorskip("scoring.technical", reason="scoring.technical is gitignored")
+_score_rsi = _technical._score_rsi
+_score_macd = _technical._score_macd
+_score_price_vs_ma = _technical._score_price_vs_ma
+_score_momentum = _technical._score_momentum
+compute_technical_score = _technical.compute_technical_score
+compute_momentum_percentiles = _technical.compute_momentum_percentiles
+
 from scoring.composite import (
     compute_composite_score,
     score_to_rating,

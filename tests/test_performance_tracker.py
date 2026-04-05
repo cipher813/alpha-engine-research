@@ -9,13 +9,12 @@ import pytest
 import pandas as pd
 from unittest.mock import patch
 
-from scoring.performance_tracker import (
-    get_trading_day_offset,
-    record_new_buy_scores,
-    run_performance_checks,
-    _get_spy_price_on_date,
-    _compute_accuracy_stats,
-)
+_pt = pytest.importorskip("scoring.performance_tracker", reason="scoring.performance_tracker is gitignored")
+get_trading_day_offset = _pt.get_trading_day_offset
+record_new_buy_scores = _pt.record_new_buy_scores
+run_performance_checks = _pt.run_performance_checks
+_get_spy_price_on_date = _pt._get_spy_price_on_date
+_compute_accuracy_stats = _pt._compute_accuracy_stats
 
 
 # ── Fixture ───────────────────────────────────────────────────────────────────

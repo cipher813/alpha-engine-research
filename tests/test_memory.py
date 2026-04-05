@@ -2,7 +2,8 @@
 
 import sqlite3
 import pytest
-from archive.manager import ArchiveManager
+
+ArchiveManager = pytest.importorskip("archive.manager", reason="archive.manager requires gitignored config").ArchiveManager
 
 
 @pytest.fixture
