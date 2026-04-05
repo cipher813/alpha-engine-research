@@ -32,7 +32,6 @@ run.log
 
 # ── Proprietary source (prompts, scoring, orchestration) ──────────
 # Agents (contain prompts)
-agents/consolidator.py
 agents/macro_agent.py
 agents/news_agent.py
 agents/research_agent.py
