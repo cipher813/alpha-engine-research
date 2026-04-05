@@ -158,48 +158,6 @@ def _stub_fetch_institutional_accumulation(tickers):
 
 # ── LLM agent stubs ─────────────────────────────────────────────────────────
 
-def _stub_run_news_agent(ticker, company_name, prior_report, prior_date,
-                         new_articles, recurring_themes=None, sec_filings=None,
-                         current_price=0, price_change_pct=0, price_change_date="",
-                         **kwargs):
-    logger.info("[offline] stub run_news_agent: %s", ticker)
-    rng = random.Random(hash(ticker) + 1)
-    score_st = rng.randint(40, 75)
-    score_lt = rng.randint(40, 75)
-    return {
-        "ticker": ticker,
-        "report_md": f"[OFFLINE STUB] News report for {ticker}. Sentiment is moderately positive based on synthetic data.",
-        "news_json": {
-            "news_score_short": score_st,
-            "news_score_long": score_lt,
-            "sentiment": "moderately_positive",
-            "material_changes": False,
-        },
-        "news_score": float(score_st),
-        "news_score_lt": float(score_lt),
-    }
-
-
-def _stub_run_research_agent(ticker, company_name, prior_report, prior_date,
-                             analyst_data, insider_summary="", **kwargs):
-    logger.info("[offline] stub run_research_agent: %s", ticker)
-    rng = random.Random(hash(ticker) + 2)
-    score_st = rng.randint(40, 75)
-    score_lt = rng.randint(40, 75)
-    return {
-        "ticker": ticker,
-        "report_md": f"[OFFLINE STUB] Research report for {ticker}. Analyst consensus is moderately bullish.",
-        "research_json": {
-            "research_score_short": score_st,
-            "research_score_long": score_lt,
-            "consensus_direction": "moderately_bullish",
-            "material_changes": False,
-        },
-        "research_score": float(score_st),
-        "research_score_lt": float(score_lt),
-    }
-
-
 def _stub_run_macro_agent_with_reflection(prior_report, prior_date, macro_data,
                                           max_iterations=2, api_key=None, **kwargs):
     logger.info("[offline] stub run_macro_agent_with_reflection")
@@ -215,44 +173,6 @@ def _stub_run_macro_agent_with_reflection(prior_report, prior_date, macro_data,
         "sector_modifiers": {s: 1.0 for s in ALL_SECTORS},
         "sector_ratings": {s: {"rating": "market_weight", "rationale": "Synthetic data"} for s in ALL_SECTORS},
     }
-
-
-def _stub_run_scanner_ranking_agent(candidates, market_regime="neutral",
-                                    api_key=None, top_n=10):
-    logger.info("[offline] stub run_scanner_ranking_agent: %d candidates, top_n=%d", len(candidates), top_n)
-    ranked = []
-    for i, c in enumerate(candidates[:top_n]):
-        ranked.append({
-            "rank": i + 1,
-            "ticker": c.get("ticker", ""),
-            "path": c.get("path", "momentum"),
-            "rationale": f"[OFFLINE] Ranked #{i+1} based on synthetic quant scores",
-        })
-    return ranked
-
-
-def _stub_run_consolidator_agent(run_date, macro_report, universe_news_reports,
-                                 universe_research_reports, candidate_full_news,
-                                 candidate_full_research, investment_theses,
-                                 active_candidates, performance_summary,
-                                 sector_ratings=None, is_early_close=False,
-                                 api_key=None, **kwargs):
-    logger.info("[offline] stub run_consolidator_agent")
-    n_theses = len(investment_theses)
-    n_candidates = len(active_candidates)
-    return (
-        f"# Alpha Engine Research — {run_date} [OFFLINE DRY RUN]\n\n"
-        f"**This report was generated with synthetic data (no API/LLM calls).**\n\n"
-        f"## Summary\n"
-        f"- Tickers analyzed: {n_theses}\n"
-        f"- Buy candidates: {n_candidates}\n"
-        f"- Market regime: neutral (synthetic)\n\n"
-        f"## Macro\n{macro_report}\n\n"
-        f"## Population\n"
-        + "\n".join(f"- {t}: score {th.get('final_score', 'N/A')}" for t, th in list(investment_theses.items())[:10])
-    )
-
-
 
 
 def _stub_run_macro_agent(prior_report, prior_date, macro_data, api_key=None, **kwargs):
@@ -432,12 +352,8 @@ def install_offline_stubs():
         ("data.fetchers.insider_fetcher.cache_insider_to_s3", _stub_cache_insider_to_s3),
 
         # LLM agents
-        ("agents.news_agent.run_news_agent", _stub_run_news_agent),
-        ("agents.research_agent.run_research_agent", _stub_run_research_agent),
         ("agents.macro_agent.run_macro_agent_with_reflection", _stub_run_macro_agent_with_reflection),
         ("agents.macro_agent.run_macro_agent", _stub_run_macro_agent),
-        ("agents.scanner_ranking_agent.run_scanner_ranking_agent", _stub_run_scanner_ranking_agent),
-        ("agents.consolidator.run_consolidator_agent", _stub_run_consolidator_agent),
 
         # Sector teams + CIO
         ("agents.sector_teams.quant_analyst.run_quant_analyst", _stub_run_quant_analyst),
@@ -528,12 +444,8 @@ def patch_graph_modules():
         "cache_options_to_s3": _stub_cache_options_to_s3,
         "fetch_insider_activity": _stub_fetch_insider_activity,
         "cache_insider_to_s3": _stub_cache_insider_to_s3,
-        # V1 LLM agents
-        "run_news_agent": _stub_run_news_agent,
-        "run_research_agent": _stub_run_research_agent,
+        # LLM agents
         "run_macro_agent_with_reflection": _stub_run_macro_agent_with_reflection,
-        "run_scanner_ranking_agent": _stub_run_scanner_ranking_agent,
-        "run_consolidator_agent": _stub_run_consolidator_agent,
         "send_email": _stub_send_email,
         # Sector teams + CIO
         "run_sector_team": _stub_run_sector_team,
