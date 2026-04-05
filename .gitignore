@@ -39,7 +39,6 @@ agents/research_agent.py
 agents/scanner_ranking_agent.py
 # Scoring, orchestration, config
 scoring/technical.py
-data/population_selector.py
 config.py
 
 CLAUDE.md
