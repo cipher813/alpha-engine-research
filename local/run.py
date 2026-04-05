@@ -30,6 +30,16 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from dotenv import load_dotenv
 load_dotenv(override=True)
 
+# Disable LangSmith tracing for local runs. The tracer tries to serialize
+# the LangGraph state (which contains pandas DataFrames in price_data) and
+# fails on Timestamp-keyed dicts, spamming warnings on every node transition.
+# Prod runs through the Lambda handler, not this script, so this is
+# local-only and does not affect any production tracing setup.
+os.environ["LANGCHAIN_TRACING_V2"] = "false"
+os.environ["LANGSMITH_TRACING"] = "false"
+os.environ.pop("LANGCHAIN_API_KEY", None)
+os.environ.pop("LANGSMITH_API_KEY", None)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s — %(message)s",
