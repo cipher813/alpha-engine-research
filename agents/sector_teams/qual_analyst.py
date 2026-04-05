@@ -74,18 +74,10 @@ def run_qual_analyst(
         for i, p in enumerate(quant_top5)
     )
 
-    user_message = (
-        f"Today is {run_date}. Market regime: {market_regime}.\n\n"
-        f"The Quant Analyst's top 5 picks for your sector:\n{picks_text}\n\n"
-        f"Review each stock using your qualitative tools. For each, produce:\n"
-        f"- qual_score (0-100): your holistic qualitative conviction\n"
-        f"- bull_case: key bullish argument (1-2 sentences)\n"
-        f"- bear_case: key bearish risk (1-2 sentences)\n"
-        f"- conviction: high/medium/low\n"
-        f"- resources_used: which tools most influenced your assessment\n\n"
-        f"You may add 1 additional candidate if you identify a strong story the quant missed.\n\n"
-        f"Respond with your final assessment as a JSON object:\n"
-        f'{{"assessments": [...], "additional_candidate": {{...}} or null}}'
+    user_message = load_prompt("qual_analyst_user").format(
+        run_date=run_date,
+        market_regime=market_regime,
+        picks_text=picks_text,
     )
 
     log.info("[qual:%s] starting ReAct agent with %d picks", team_id, len(quant_top5))

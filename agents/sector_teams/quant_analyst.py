@@ -70,12 +70,12 @@ def run_quant_analyst(
 
     # Build input message
     ticker_list = ", ".join(sector_tickers[:MAX_TICKERS_IN_PROMPT])
-    user_message = (
-        f"Today is {run_date}. Market regime: {market_regime}.\n"
-        f"Your sector has {len(sector_tickers)} stocks: {ticker_list}\n\n"
-        f"Screen these stocks and identify the top {QUANT_TOP_N} most quantitatively attractive candidates. "
-        f"For each, provide a quant_score (0-100) and rationale. "
-        f"When done, respond with your final ranked list as a JSON array."
+    user_message = load_prompt("quant_analyst_user").format(
+        run_date=run_date,
+        market_regime=market_regime,
+        universe_size=len(sector_tickers),
+        ticker_list=ticker_list,
+        quant_top_n=QUANT_TOP_N,
     )
 
     log.info("[quant:%s] starting ReAct agent with %d tickers", team_id, len(sector_tickers))
