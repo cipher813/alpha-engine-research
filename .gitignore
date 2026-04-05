@@ -33,9 +33,6 @@ run.log
 # ── Proprietary source (prompts, scoring, orchestration) ──────────
 # Agents (contain prompts)
 agents/macro_agent.py
-agents/news_agent.py
-agents/research_agent.py
-agents/scanner_ranking_agent.py
 # Scoring, orchestration, config
 scoring/technical.py
 config.py
