@@ -6,7 +6,8 @@ import sqlite3
 import tempfile
 import pytest
 from unittest.mock import MagicMock, patch
-from archive.manager import ArchiveManager
+
+ArchiveManager = pytest.importorskip("archive.manager", reason="archive.manager requires gitignored config").ArchiveManager
 
 
 @pytest.fixture
