@@ -15,11 +15,17 @@ from __future__ import annotations
 import datetime
 import logging
 import os
+import sys
 import time
 
 import pytz
 
 from exchange_calendars import get_calendar
+
+# Load secrets from SSM Parameter Store (must run before any os.environ.get)
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+from ssm_secrets import load_secrets
+load_secrets()
 
 logger = logging.getLogger(__name__)
 
