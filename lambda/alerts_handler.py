@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import datetime
 import os
+import sys
 import tempfile
 from typing import Optional
 
@@ -20,6 +21,11 @@ import pytz
 import yfinance as yf
 from botocore.exceptions import ClientError
 from exchange_calendars import get_calendar
+
+# Load secrets from SSM Parameter Store (must run before any os.environ.get)
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+from ssm_secrets import load_secrets
+load_secrets()
 
 from config import (
     PRICE_MOVE_THRESHOLD_PCT,
