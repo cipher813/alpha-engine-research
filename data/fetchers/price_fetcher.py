@@ -91,6 +91,43 @@ def _download_batch(tickers: list[str], period: str, session=None) -> dict[str, 
     return result
 
 
+def _load_prices_from_arcticdb(tickers: list[str], lookback_days: int = 90) -> dict[str, pd.DataFrame] | None:
+    """Try to load price data from ArcticDB universe library."""
+    try:
+        import os
+        import arcticdb as adb
+        from datetime import datetime, timedelta
+
+        region = os.environ.get("AWS_REGION", "us-east-1")
+        uri = f"s3s://s3.{region}.amazonaws.com:{_S3_BUCKET}?path_prefix=arcticdb&aws_auth=true"
+        arctic = adb.Arctic(uri)
+        universe = arctic.get_library("universe")
+
+        cutoff = (datetime.now() - timedelta(days=lookback_days)).strftime("%Y-%m-%d")
+        result: dict[str, pd.DataFrame] = {}
+        failed = 0
+
+        for ticker in tickers:
+            try:
+                df = universe.read(ticker, date_range=(cutoff, None)).data
+                if not df.empty:
+                    # Keep only OHLCV columns for compatibility
+                    ohlcv = [c for c in ["Open", "High", "Low", "Close", "Volume"] if c in df.columns]
+                    result[ticker] = df[ohlcv]
+            except Exception:
+                failed += 1
+
+        if result and len(result) >= len(tickers) * 0.5:
+            logger.info("[data_source=arcticdb] Loaded %d/%d ticker prices (%d missing)",
+                        len(result), len(tickers), failed)
+            return result
+    except ImportError:
+        logger.debug("arcticdb not installed — trying S3 slim cache")
+    except Exception as e:
+        logger.debug("[data_source=arcticdb] ArcticDB price load failed: %s", e)
+    return None
+
+
 def _load_prices_from_s3(tickers: list[str], lookback_days: int = 90) -> dict[str, pd.DataFrame] | None:
     """Try to load price data from alpha-engine-data's slim cache on S3."""
     try:
@@ -114,7 +151,7 @@ def _load_prices_from_s3(tickers: list[str], lookback_days: int = 90) -> dict[st
             except Exception:
                 failed += 1
         if result and len(result) >= len(tickers) * 0.5:
-            logger.info("Loaded %d/%d ticker prices from S3 slim cache (%d missing)",
+            logger.info("[data_source=legacy] Loaded %d/%d ticker prices from S3 slim cache (%d missing)",
                         len(result), len(tickers), failed)
             return result
     except Exception as e:
@@ -135,7 +172,11 @@ def fetch_price_data(tickers: list[str], period: str = "1y") -> dict[str, pd.Dat
     if not tickers:
         return {}
 
-    # S3-first: try slim cache (sufficient for research's ~90-day technical indicator window)
+    # ArcticDB first, then S3 slim cache, then yfinance
+    arctic_result = _load_prices_from_arcticdb(tickers)
+    if arctic_result is not None:
+        return arctic_result
+
     s3_result = _load_prices_from_s3(tickers)
     if s3_result is not None:
         return s3_result
