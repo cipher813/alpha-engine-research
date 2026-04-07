@@ -36,3 +36,8 @@ run.log
 config.py
 
 CLAUDE.md
+
+# Gitleaks config (symlink to shared config)
+.gitleaks.toml
+
+.gitleaksbaseline.json
