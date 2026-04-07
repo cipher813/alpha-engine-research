@@ -32,8 +32,7 @@ run.log
 
 # ── Proprietary source (prompts, scoring, orchestration) ──────────
 # Agents (contain prompts)
-# Scoring, orchestration, config
-config.py
+# config.py is now a loader only — proprietary values are in alpha-engine-config (private repo)
 
 CLAUDE.md
 
