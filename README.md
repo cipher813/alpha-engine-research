@@ -2,7 +2,8 @@
 
 [![Python](https://img.shields.io/badge/python-3.13+-blue.svg)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-172_passing-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/tests-261_passing-brightgreen.svg)]()
+[![Coverage](https://img.shields.io/badge/coverage-80%25-green.svg)]()
 
 > Autonomous investment research pipeline for US equities. 6 sector teams with ReAct tool-calling agents screen the S&P 900 weekly, maintain rolling investment theses, and submit recommendations to a CIO for population selection.
 
