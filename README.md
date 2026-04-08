@@ -1,8 +1,25 @@
-# Alpha Engine Research
+# alpha-engine-research
 
-Autonomous investment research pipeline for US equities. 6 sector teams with ReAct tool-calling agents screen the S&P 900 weekly, maintain rolling investment theses, and submit recommendations to a CIO for population selection. Delivers a consolidated morning research brief via email.
+[![Python](https://img.shields.io/badge/python-3.13+-blue.svg)]()
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Tests](https://img.shields.io/badge/tests-172_passing-brightgreen.svg)]()
 
-> Part of [Nous Ergon: Alpha Engine](https://github.com/cipher813/alpha-engine).
+> Autonomous investment research pipeline for US equities. 6 sector teams with ReAct tool-calling agents screen the S&P 900 weekly, maintain rolling investment theses, and submit recommendations to a CIO for population selection.
+
+**Part of the [Nous Ergon](https://nousergon.ai) autonomous trading system.**
+See the [system overview](https://github.com/cipher813/alpha-engine#readme) for how all modules connect, or the [full documentation index](https://github.com/cipher813/alpha-engine-docs#readme).
+
+## Table of Contents
+
+- [Role in the System](#role-in-the-system)
+- [Architecture](#architecture)
+- [How Scoring Works](#how-scoring-works)
+- [Population Management](#population-management)
+- [Quick Start](#quick-start)
+- [Database Tables](#database-tables)
+- [S3 Contract](#s3-contract)
+- [Testing](#testing)
+- [Related Modules](#related-modules)
 
 ---
 
@@ -224,7 +241,7 @@ pip install -r requirements.txt
 cp .env.example .env
 # Edit .env — add API keys, AWS config, email settings
 
-# 2. Configuration files
+# 2. Configuration files (module searches alpha-engine-config repo first, falls back to local)
 cp config/universe.sample.yaml config/universe.yaml
 # Edit universe.yaml — set LLM models, thresholds, population config
 
@@ -325,59 +342,36 @@ python local/run.py --offline --date 2026-03-24
 
 ---
 
-## Opportunities
+## S3 Contract
 
-### Validation (needs live data)
-- **Quant-only ablation**: Run system without LLM agents to prove multi-agent value
-- **Sector balancing hypothesis**: Compare Sharpe with vs without sector constraints
-- **Debate conviction vs performance**: Track whether CIO conviction correlates with outperformance (needs 200+ samples, ~20 weeks)
-- **Agent tool refinement**: Analyze `analyst_resources` table to understand which tools each sector uses most
+### Reads
+| Path | Source | Content |
+|------|--------|---------|
+| `config/scoring_weights.json` | Backtester | Auto-optimized quant/qual weights |
+| `predictor/predictions/{date}.json` | Predictor | Merged into signals for downstream |
+| `market_data/weekly/{date}/` | Data | Constituents, macro, alternative data |
 
-### Architecture Enhancements
-- **Adaptive slot allocation**: Weight team recommendations by historical accuracy
-- **Backtester team performance**: Per-team signal accuracy at 10d/30d, fed back to CIO
-- **IC critic**: Add a Haiku critic to challenge CIO selections before finalization
-- ~~**Thesis maintenance optimization**: Only update theses for stocks with material news~~ ✅ Implemented — material triggers check all held stocks weekly, carryover thesis for unchanged stocks
-
-### Performance
-- **Feature store integration**: Research computes its own technical indicators (RSI, MACD, MAs, momentum) in `fetch_data`, duplicating logic the predictor already has in its feature store (`s3://alpha-engine-research/features/{date}/`). Two options: (A) research reads the predictor's Friday feature store snapshot over the weekend — avoids duplicate computation but couples the modules and uses slightly stale data; (B) research writes its own weekend indicators into the feature store — keeps research independent but makes it a feature store contributor. Either way, the current duplication should be resolved so the feature store is the single source of truth for technical signals.
-- **Price history window**: `fetch_data` pulls only 3 months of price history (`period="3mo"`). This is sufficient for RSI(14), MACD, and MA50 but insufficient for MA200 or 52-week high/low — indicators the predictor feature store already computes. Resolving the feature store integration above would address this gap.
-- ~~**S3 price caching**: Cache weekly price data to avoid re-downloading 900 tickers from yfinance~~ ✅ Predictor maintains S3 price cache; research uses sequential rate-limited batches
-- **Batch S3 I/O**: Consolidated JSON alongside per-ticker files
-- **LangGraph state optimization**: Return only changed keys from memory-intensive nodes
-
-### AI Agent Evals
-- **LangSmith tracing** (Phase 1, deployed): Full execution traces for every Monday run — per-agent token usage, latency, tool calls. Set `LANGCHAIN_TRACING_V2=true` in `.env`.
-- **Trajectory validation** (Phase 2, deployed): Post-pipeline check that the graph executed all 11 required nodes in the correct order with 6 sector teams. Failures logged to CloudWatch.
-- **Trajectory failure alerting** (Phase 2.5, future): Surface trajectory validation failures via Telegram message or morning briefing email rather than relying on CloudWatch log inspection. Currently failures are silent unless logs are manually checked.
-- **Output quality evaluation** (Phase 3, future): LLM-as-judge faithfulness checks on agent theses using DeepEval — verify claims trace back to actual fetcher data. Custom evaluators for thesis consistency, score calibration, macro regime accuracy. ~1-2 weeks lift.
-- **Feedback loop closure** (Phase 4, future): Retroactively label research outputs with backtester outcome data (5d/10d returns). Correlate eval quality scores with actual alpha contribution. Build growing eval dataset for regression testing. ~2-4 weeks lift.
-
-### Agent Memory
-- **Macro memory fix + structured prior context** (Phase 1, deployed): Macro agent now receives prior report and last 3 macro snapshots for incremental updates. CIO receives prior week's IC decisions for portfolio continuity.
-- **Episodic memory from outcomes** (Phase 2, deployed): Failed BUY signals are extracted into lessons via Haiku and stored in `memory_episodes` table. Qual analysts retrieve relevant lessons when analyzing stocks with similar patterns. Cost-capped at 15 Haiku calls/run.
-- **Cross-agent semantic memory** (Phase 3, deployed): Sector teams share observations and the macro agent accumulates regime reasoning via `memory_semantic` table. Auto-pruned after 8 weeks. Cost-capped at 10 Haiku calls/run.
-- **Procedural memory** (Phase 4, future): Consolidated sector-specific strategies learned from 3+ months of episodic data (e.g., "biotech theses degrade after 3 days without material events"). Requires episodic memory running 8-12 weeks first. ~3-4 weeks lift.
-
-### Operational Gaps
-- **Token usage tracking**: Agent token consumption (Haiku/Sonnet) not logged for cost monitoring. Add LangChain callback handler to track `prompt_tokens` + `completion_tokens` per agent, aggregate in consolidator, include in health status and email footer.
-- **Wikipedia constituent cache**: Fallback CSV (`data/constituents_cache.csv`) could become stale. Refresh periodically or add a staleness warning when CSV age exceeds 90 days.
-
-### Data Gaps
-- **Survivorship bias**: Wikipedia S&P constituents are current-only — need append-only log
-- **Sub-sector analysis**: Semiconductors and SaaS treated identically as "Technology"
-- **Archive TTL**: Old theses remain indefinitely — add configurable expiration
+### Writes
+| Path | Content |
+|------|---------|
+| `signals/{date}/signals.json` | Per-ticker signal, score, conviction, sector |
+| `signals/latest.json` | Pointer to most recent signals |
+| `archive/universe/{TICKER}/` | Per-ticker thesis (never overwritten) |
+| `archive/candidates/{TICKER}/` | Buy candidate theses |
+| `archive/macro/` | Macro environment reports |
+| `consolidated/{date}/morning.md` | Email content |
+| `research.db` | SQLite (investment_thesis, score_performance, macro_snapshots, scanner_evaluations, team_candidates, cio_evaluations) |
 
 ---
 
 ## Related Modules
 
-- [`alpha-engine`](https://github.com/cipher813/alpha-engine) — Executor (trade execution + system overview)
-- [`alpha-engine-predictor`](https://github.com/cipher813/alpha-engine-predictor) — GBM predictor (5-day alpha predictions)
-- [`alpha-engine-backtester`](https://github.com/cipher813/alpha-engine-backtester) — Signal quality analysis and parameter optimization
+- [`alpha-engine`](https://github.com/cipher813/alpha-engine) — Executor + system overview
+- [`alpha-engine-predictor`](https://github.com/cipher813/alpha-engine-predictor) — Meta-model predictor
+- [`alpha-engine-backtester`](https://github.com/cipher813/alpha-engine-backtester) — Evaluation framework and parameter optimization
 - [`alpha-engine-dashboard`](https://github.com/cipher813/alpha-engine-dashboard) — Streamlit monitoring dashboard
-
----
+- [`alpha-engine-data`](https://github.com/cipher813/alpha-engine-data) — Centralized data collection and ArcticDB
+- [`alpha-engine-docs`](https://github.com/cipher813/alpha-engine-docs) — Documentation index
 
 ## License
 
