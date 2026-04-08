@@ -226,6 +226,7 @@ class TestRunPerformanceChecks:
         assert "accuracy_10d" in result
         assert "recalibration_flag" in result
 
+    @patch.dict("sys.modules", {"polygon_client": None})
     @patch("scoring.performance_tracker.yf.download")
     def test_skips_when_yfinance_fails(self, mock_dl, db):
         db.execute(
@@ -236,6 +237,7 @@ class TestRunPerformanceChecks:
         result = run_performance_checks(db, "2026-03-05")
         assert "accuracy_10d" in result  # falls back gracefully
 
+    @patch.dict("sys.modules", {"polygon_client": None})
     @patch("scoring.performance_tracker.yf.download")
     def test_evaluates_10d_window(self, mock_dl, db):
         score_date = "2025-12-01"
@@ -268,6 +270,7 @@ class TestRunPerformanceChecks:
         assert row[0] == 115.0
         assert abs(row[1] - 15.0) < 0.1  # (115/100 - 1) * 100 = 15%
 
+    @patch.dict("sys.modules", {"polygon_client": None})
     @patch("scoring.performance_tracker.yf.download")
     def test_beat_spy_flag_set(self, mock_dl, db):
         score_date = "2025-12-01"
@@ -294,6 +297,7 @@ class TestRunPerformanceChecks:
         ).fetchone()
         assert row[0] == 1
 
+    @patch.dict("sys.modules", {"polygon_client": None})
     @patch("scoring.performance_tracker.yf.download")
     def test_missing_current_price_skips_row(self, mock_dl, db):
         score_date = "2025-12-01"

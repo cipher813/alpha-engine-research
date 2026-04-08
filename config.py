@@ -29,8 +29,16 @@ _logger = logging.getLogger(__name__)
 
 
 def _load() -> dict:
-    with open(_CONFIG_PATH) as f:
-        return yaml.safe_load(f)
+    if _CONFIG_PATH.exists():
+        with open(_CONFIG_PATH) as f:
+            return yaml.safe_load(f)
+    # Fall back to sample config (CI / fresh clone without local config)
+    sample = _CONFIG_PATH.parent / "universe.sample.yaml"
+    if sample.exists():
+        _logger.warning("config/universe.yaml not found — using universe.sample.yaml")
+        with open(sample) as f:
+            return yaml.safe_load(f)
+    return {}
 
 
 def _load_scoring() -> dict:
