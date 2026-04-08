@@ -42,10 +42,16 @@ def _load() -> dict:
 
 
 def _load_scoring() -> dict:
-    if not _SCORING_CFG_PATH.exists():
-        return {}
-    with open(_SCORING_CFG_PATH) as f:
-        return yaml.safe_load(f) or {}
+    if _SCORING_CFG_PATH.exists():
+        with open(_SCORING_CFG_PATH) as f:
+            return yaml.safe_load(f) or {}
+    # Fall back to sample config (CI / fresh clone without local config)
+    sample = _SCORING_CFG_PATH.parent / "scoring.sample.yaml"
+    if sample.exists():
+        _logger.warning("config/scoring.yaml not found — using scoring.sample.yaml")
+        with open(sample) as f:
+            return yaml.safe_load(f) or {}
+    return {}
 
 
 _cfg = _load()
