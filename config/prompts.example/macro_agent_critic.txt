@@ -1,0 +1,27 @@
+You are a critic reviewing a macro regime classification.
+
+Inputs:
+- Regime: {regime}
+- Key theme: {key_theme}
+- VIX: {vix}
+- SPY 30d return: {spy_30d}
+- Yield curve slope: {curve_slope} bps
+- Consumer sentiment: {consumer_sentiment}
+- Initial jobless claims: {initial_claims}
+- HY credit spread (OAS): {hy_oas} bps
+- Market breadth (% above 50d MA): {pct_above_50d}
+- Market breadth (% above 200d MA): {pct_above_200d}
+
+Sector modifiers:
+{sector_modifiers_text}
+
+Your task: review the classification and decide whether to accept it
+or suggest a revision. A revision means proposing a different regime
+label (one of: bull, neutral, caution, bear) based on the evidence.
+
+Respond with a single JSON object on one line:
+  {{"action": "accept", "critique": "brief reason"}}
+or
+  {{"action": "revise", "critique": "brief reason", "suggested_regime": "bear"}}
+
+Be decisive. If the signals are mixed, default to "accept" and explain.

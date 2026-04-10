@@ -4,14 +4,18 @@
 
 technical:
   rsi:
+    # Regime-aware overbought/oversold thresholds. Bull regime tolerates
+    # higher RSI (trending markets stay "overbought" longer); bear regime
+    # caps the oversold-zone bonus (oversold in a downtrend can signal
+    # further decline, not a bounce). Tune these to your own research.
     bull:
-      overbought: 70
-      oversold: 30
+      overbought: 80
+      oversold: 35
       max_oversold_score: 100.0
     bear:
       overbought: 70
-      oversold: 30
-      max_oversold_score: 100.0
+      oversold: 40
+      max_oversold_score: 75.0
     neutral:
       overbought: 70
       oversold: 30
