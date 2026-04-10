@@ -278,11 +278,29 @@ def _update_thesis_for_held_stock(
         text = response.content
         match = re.search(r"\{.*\}", text, re.DOTALL)
         if match:
-            result = json.loads(match.group())
+            llm_update = json.loads(match.group())
+            # Held-stock updates only revise narrative fields. Scoring fields
+            # (final_score, quant_score, qual_score, rating, sector, team_id)
+            # come from the prior thesis — the LLM is not authoritative on
+            # scores and does not re-run the quant tools for held stocks.
+            # Without this merge, the LLM's partial JSON replaces the full
+            # thesis and downstream code emits signals with score=null.
+            # Root cause of the 2026-04-04 incident where LNTH/KR/PR/HAL
+            # emitted as ENTER with null scores.
+            if prior_thesis:
+                result = {**prior_thesis, **llm_update}
+            else:
+                result = llm_update
+                result["score_failed"] = True
             result["last_updated"] = run_date
             result["triggers"] = triggers
             result["stale_days"] = 0
             return result
+        else:
+            log.warning(
+                "[thesis_update:%s] LLM returned no JSON block — using fallback",
+                ticker,
+            )
     except Exception as e:
         log.warning("[thesis_update:%s] failed: %s", ticker, e)
 
