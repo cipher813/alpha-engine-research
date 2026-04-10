@@ -149,3 +149,77 @@ class TestTechnicalScoreWrite:
         ).fetchone()
         assert row is not None
         assert abs(row["rsi_14"] - 42.5) < 0.01
+
+
+class TestWriteSignalsJson:
+    """Regression tests for the signals/latest.json pointer write.
+
+    The executor's signal_reader tries signals/latest.json first and falls
+    back to date-scanning only if the pointer is missing. Without this
+    pointer, every executor boot does multiple S3 GETs against dated
+    signals files before finding one that exists. These tests pin both
+    the dated write and the latest.json pointer so the behavior cannot
+    silently regress.
+    """
+
+    def test_writes_both_dated_and_latest(self, archive_in_memory):
+        """write_signals_json must put to both the dated key and latest.json."""
+        signals = {
+            "market_regime": "neutral",
+            "universe": [{"ticker": "AAPL", "score": 75.0}],
+            "buy_candidates": [],
+        }
+        archive_in_memory.write_signals_json(
+            run_date="2026-04-11",
+            run_time="00:15:00",
+            signals=signals,
+        )
+
+        put_calls = archive_in_memory.s3.put_object.call_args_list
+        put_keys = [call.kwargs.get("Key") for call in put_calls]
+
+        assert "signals/2026-04-11/signals.json" in put_keys, (
+            f"Dated signals.json not written. Keys: {put_keys}"
+        )
+        assert "signals/latest.json" in put_keys, (
+            f"latest.json pointer not written. Keys: {put_keys}"
+        )
+
+    def test_latest_and_dated_have_same_content(self, archive_in_memory):
+        """Both writes must contain the same JSON payload."""
+        signals = {"market_regime": "bull", "universe": []}
+        archive_in_memory.write_signals_json(
+            run_date="2026-04-11",
+            run_time="00:15:00",
+            signals=signals,
+        )
+
+        put_calls = archive_in_memory.s3.put_object.call_args_list
+        bodies_by_key = {
+            call.kwargs["Key"]: call.kwargs["Body"].decode("utf-8")
+            for call in put_calls
+        }
+
+        dated_body = bodies_by_key["signals/2026-04-11/signals.json"]
+        latest_body = bodies_by_key["signals/latest.json"]
+        assert dated_body == latest_body, (
+            "Dated and latest.json bodies must match — the latter is a "
+            "pointer copy, not a derived summary."
+        )
+
+    def test_payload_includes_run_metadata(self, archive_in_memory):
+        """The payload must include date and run_time at the top level."""
+        signals = {"market_regime": "neutral"}
+        archive_in_memory.write_signals_json(
+            run_date="2026-04-11",
+            run_time="00:15:00",
+            signals=signals,
+        )
+
+        put_calls = archive_in_memory.s3.put_object.call_args_list
+        body_str = put_calls[-1].kwargs["Body"].decode("utf-8")
+        payload = json.loads(body_str)
+
+        assert payload["date"] == "2026-04-11"
+        assert payload["run_time"] == "00:15:00"
+        assert payload["market_regime"] == "neutral"
