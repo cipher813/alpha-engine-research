@@ -1,0 +1,1 @@
+# SAMPLE PLACEHOLDER — not a functional prompt. This file exists only so CI tests can import agents.macro_agent without FileNotFoundError. To actually run alpha-engine-research you must create config/prompts/macro_agent_critic.txt (gitignored) and populate all other required prompt files. See repo README for full setup.

@@ -1090,7 +1090,21 @@ def _build_signals_payload(state: ResearchState) -> dict:
     # First: tickers with fresh theses from this run
     for ticker, thesis in theses.items():
         rating = thesis.get("rating", "HOLD")
+        final_score = thesis.get("final_score")
         in_pop = ticker in pop_tickers
+
+        # Safety gate: a BUY rating with no final_score is a broken thesis
+        # (e.g., held-stock LLM update that dropped scoring fields). Downgrade
+        # to HOLD so the executor does not attempt to ENTER on null score.
+        # Root cause mitigation for the 2026-04-04 incident where
+        # LNTH/KR/PR/HAL leaked through as ENTER with score=null.
+        if rating == "BUY" and final_score is None:
+            logger.warning(
+                "[signals] %s has rating=BUY but final_score is None — "
+                "downgrading to HOLD (broken thesis)",
+                ticker,
+            )
+            rating = "HOLD"
 
         # Determine signal
         if rating == "BUY" and ticker in advanced_tickers:

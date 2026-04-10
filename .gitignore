@@ -1,7 +1,9 @@
 .env
 config/universe.yaml
 config/prompts/
-config/prompts.example/
+# config/prompts.example/ IS tracked — it's the template directory that
+# mirrors scoring.sample.yaml. Real prompts (gitignored above) override
+# the examples at runtime via the agents/prompt_loader.py fallback.
 config/scoring.yaml
 *.db
 .coverage
