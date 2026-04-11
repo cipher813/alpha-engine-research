@@ -172,8 +172,9 @@ def run_macro_agent(
 
     prior_text = _truncate_prior(prior_report) if prior_report else "NONE — initial report"
 
-    # Breadth data (may be None if not yet computed)
-    breadth = macro_data.get("breadth", {})
+    # Breadth data (may be None if not yet computed, or the key may be
+    # present with a null value from an older macro.json pre-breadth fix).
+    breadth = macro_data.get("breadth") or {}
 
     prompt = _PROMPT_TEMPLATE.format(
         prior_date=prior_date,
@@ -319,7 +320,7 @@ def run_macro_critic(
         max_tokens=512,
     )
     macro_json = initial_result.get("macro_json", {})
-    breadth = macro_data.get("breadth", {})
+    breadth = macro_data.get("breadth") or {}
 
     mods = macro_json.get("sector_modifiers", {})
     mod_lines = [f"  {s}: {v:.2f}" for s, v in sorted(mods.items())]
