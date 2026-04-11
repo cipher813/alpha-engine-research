@@ -52,6 +52,17 @@ jobs:
           repository: cipher813/flow-doctor
           path: flow-doctor
 
+      # deploy.sh also stages proprietary prompt templates from
+      # cipher813/alpha-engine-config into the build context. That repo is
+      # private so we need a fine-grained PAT with read-only Contents access.
+      # The token is stored as the ALPHA_ENGINE_CONFIG_TOKEN repository secret.
+      - name: Checkout alpha-engine-config
+        uses: actions/checkout@v4
+        with:
+          repository: cipher813/alpha-engine-config
+          path: alpha-engine-config
+          token: ${{ secrets.ALPHA_ENGINE_CONFIG_TOKEN }}
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
@@ -70,11 +81,12 @@ jobs:
       - name: Deploy main Lambda (alpha-engine-research-runner)
         working-directory: alpha-engine-research
         env:
-          # deploy.sh defaults FLOW_DOCTOR_DIR to $(dirname $(pwd))/flow-doctor
-          # which resolves to $GITHUB_WORKSPACE/flow-doctor — exactly where
-          # the second checkout above placed it. The explicit export is
-          # belt-and-suspenders for readers.
+          # deploy.sh defaults FLOW_DOCTOR_DIR and CONFIG_REPO_DIR to
+          # $(dirname $(pwd))/<name>, which resolves to $GITHUB_WORKSPACE/<name>
+          # — exactly where the checkout steps above placed them. Explicit
+          # exports here are belt-and-suspenders for readers.
           FLOW_DOCTOR_DIR: ${{ github.workspace }}/flow-doctor
+          CONFIG_REPO_DIR: ${{ github.workspace }}/alpha-engine-config
         run: bash infrastructure/deploy.sh main
 
       - name: Report deployed version

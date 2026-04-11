@@ -93,10 +93,42 @@ build_and_deploy_main() {
     exit 1
   fi
 
+  # Stage proprietary prompt templates from the private alpha-engine-config
+  # repo into the build context. Prompts are gitignored in this repo (see
+  # .gitignore for rationale) so a fresh GitHub Actions checkout has no
+  # prompts — the image would ship broken. Local dev workflow also uses
+  # this path: if config/prompts/ already has .txt files (local dev) we
+  # keep those; otherwise we stage from the config repo sibling.
+  PROMPTS_STAGED_FROM_CONFIG_REPO=0
+  if [ -d "config/prompts" ] && ls config/prompts/*.txt &>/dev/null; then
+    echo "Using existing config/prompts/ (local dev workflow)"
+  else
+    CONFIG_REPO_DIR="${CONFIG_REPO_DIR:-$(dirname "$(pwd)")/alpha-engine-config}"
+    if [ -d "$CONFIG_REPO_DIR/research/prompts" ]; then
+      echo "Staging research prompts from $CONFIG_REPO_DIR/research/prompts/..."
+      mkdir -p config/prompts
+      cp "$CONFIG_REPO_DIR/research/prompts/"*.txt config/prompts/
+      PROMPTS_STAGED_FROM_CONFIG_REPO=1
+    else
+      echo "ERROR: research prompts not found — tried:"
+      echo "  config/prompts/ (local dev)"
+      echo "  $CONFIG_REPO_DIR/research/prompts/ (config repo sibling)"
+      echo "Hint: clone cipher813/alpha-engine-config as a sibling directory,"
+      echo "      or set CONFIG_REPO_DIR=/path/to/alpha-engine-config"
+      exit 1
+    fi
+  fi
+
   # Build Docker image
   echo "Building Docker image..."
   docker build --platform linux/amd64 --provenance=false -t "$FUNCTION_MAIN:latest" .
   rm -rf flow-doctor-pkg
+
+  # Only remove the staged prompts — never touch a local dev checkout that
+  # already had real prompts in config/prompts/.
+  if [ "$PROMPTS_STAGED_FROM_CONFIG_REPO" = "1" ]; then
+    rm -rf config/prompts
+  fi
 
   # Authenticate with ECR
   echo "Authenticating with ECR..."
