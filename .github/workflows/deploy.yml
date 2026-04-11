@@ -37,8 +37,20 @@ jobs:
     timeout-minutes: 20
 
     steps:
-      - name: Checkout
+      - name: Checkout research repo
         uses: actions/checkout@v4
+        with:
+          path: alpha-engine-research
+
+      # deploy.sh bundles flow-doctor from a sibling directory into the
+      # Docker build context. The GitHub-hosted runner does not carry the
+      # local ~/Development layout, so we check it out explicitly here.
+      # flow-doctor is a public repo and requires no additional auth.
+      - name: Checkout flow-doctor
+        uses: actions/checkout@v4
+        with:
+          repository: cipher813/flow-doctor
+          path: flow-doctor
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -56,6 +68,13 @@ jobs:
         uses: aws-actions/amazon-ecr-login@v2
 
       - name: Deploy main Lambda (alpha-engine-research-runner)
+        working-directory: alpha-engine-research
+        env:
+          # deploy.sh defaults FLOW_DOCTOR_DIR to $(dirname $(pwd))/flow-doctor
+          # which resolves to $GITHUB_WORKSPACE/flow-doctor — exactly where
+          # the second checkout above placed it. The explicit export is
+          # belt-and-suspenders for readers.
+          FLOW_DOCTOR_DIR: ${{ github.workspace }}/flow-doctor
         run: bash infrastructure/deploy.sh main
 
       - name: Report deployed version
