@@ -172,9 +172,19 @@ def run_macro_agent(
 
     prior_text = _truncate_prior(prior_report) if prior_report else "NONE — initial report"
 
-    # Breadth data (may be None if not yet computed, or the key may be
-    # present with a null value from an older macro.json pre-breadth fix).
-    breadth = macro_data.get("breadth") or {}
+    # Breadth data — observability matters here. A missing or null breadth
+    # means the upstream alpha-engine-data collector regressed and the
+    # macro report will use N/A placeholders. Log loudly so silent
+    # degradation shows up in CloudWatch.
+    breadth = macro_data.get("breadth")
+    if not breadth:
+        logger.warning(
+            "macro_agent[strategic]: breadth missing or null (key_present=%s, value_type=%s) — "
+            "emitting N/A placeholders to LLM. Check alpha-engine-data macro collector.",
+            "breadth" in macro_data,
+            type(macro_data.get("breadth")).__name__,
+        )
+        breadth = {}
 
     prompt = _PROMPT_TEMPLATE.format(
         prior_date=prior_date,
@@ -320,7 +330,15 @@ def run_macro_critic(
         max_tokens=512,
     )
     macro_json = initial_result.get("macro_json", {})
-    breadth = macro_data.get("breadth") or {}
+    breadth = macro_data.get("breadth")
+    if not breadth:
+        logger.warning(
+            "macro_agent[critic]: breadth missing or null (key_present=%s, value_type=%s) — "
+            "emitting N/A placeholders to LLM. Check alpha-engine-data macro collector.",
+            "breadth" in macro_data,
+            type(macro_data.get("breadth")).__name__,
+        )
+        breadth = {}
 
     mods = macro_json.get("sector_modifiers", {})
     mod_lines = [f"  {s}: {v:.2f}" for s, v in sorted(mods.items())]
