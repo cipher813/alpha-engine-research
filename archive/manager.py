@@ -90,18 +90,28 @@ class ArchiveManager:
     # ── S3 object helpers ─────────────────────────────────────────────────────
 
     def _s3_get(self, key: str) -> Optional[str]:
-        """Download S3 object and return as string. Returns None if not found."""
-        try:
-            return self._s3_get_inner(key)
-        except ClientError as e:
-            if e.response["Error"]["Code"] in ("NoSuchKey", "404"):
-                return None
-            raise
+        """Download S3 object and return as string. Returns None if not found.
 
-    @retry(max_attempts=3, retryable=(Exception,), label="s3_get")
-    def _s3_get_inner(self, key: str) -> str:
-        obj = self.s3.get_object(Bucket=self.bucket, Key=key)
-        return obj["Body"].read().decode("utf-8")
+        Fast-exits on NoSuchKey — the generic retry decorator would otherwise
+        waste ~6s (2s + 4s backoff) on a foregone-conclusion retry for every
+        missing archive lookup, burning Lambda time on cold tickers.
+        """
+        import time
+        for attempt in range(3):
+            try:
+                obj = self.s3.get_object(Bucket=self.bucket, Key=key)
+                return obj["Body"].read().decode("utf-8")
+            except ClientError as e:
+                if e.response["Error"]["Code"] in ("NoSuchKey", "404"):
+                    return None
+                if attempt == 2:
+                    raise
+                time.sleep(2 ** attempt)
+            except Exception:
+                if attempt == 2:
+                    raise
+                time.sleep(2 ** attempt)
+        return None  # unreachable
 
     @retry(max_attempts=3, retryable=(Exception,), label="s3_put")
     def _s3_put(self, key: str, body: str) -> None:
