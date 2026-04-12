@@ -182,6 +182,13 @@ def run_sector_team(team_id: str, ctx: SectorTeamContext) -> dict:
     log.info("[team:%s] done — %d recommendations, %d thesis updates",
              team_id, len(peer_output.get("recommendations", [])), len(thesis_updates))
 
+    # Propagate the first analyst error (if any) to the team level so the
+    # score_aggregator can hard-fail loudly. Quant errors take precedence —
+    # a broken quant stage guarantees a broken qual stage.
+    team_error = quant_output.get("error") or qual_output.get("error")
+    if team_error:
+        team_error = f"[team:{team_id}] {team_error}"
+
     return {
         "team_id": team_id,
         "recommendations": peer_output.get("recommendations", []),
@@ -190,10 +197,17 @@ def run_sector_team(team_id: str, ctx: SectorTeamContext) -> dict:
         "qual_output": qual_output,
         "peer_review_output": peer_output,
         "tool_calls": all_tool_calls,
+        "error": team_error,
     }
 
 
-def _empty_result(team_id: str, quant_output: dict | None = None) -> dict:
+def _empty_result(team_id: str, quant_output: dict | None = None,
+                  error: str | None = None) -> dict:
+    # If quant produced an error and no explicit error was passed, surface
+    # it so the aggregator sees the failure rather than an empty team that
+    # looks identical to "no sector tickers in universe".
+    if error is None and quant_output is not None:
+        error = quant_output.get("error")
     return {
         "team_id": team_id,
         "recommendations": [],
@@ -202,6 +216,7 @@ def _empty_result(team_id: str, quant_output: dict | None = None) -> dict:
         "qual_output": {},
         "peer_review_output": {},
         "tool_calls": [],
+        "error": error,
     }
 
 

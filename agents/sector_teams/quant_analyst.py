@@ -123,15 +123,20 @@ def run_quant_analyst(
             "ranked_picks": picks,
             "tool_calls": tool_calls,
             "iterations": len(tool_calls),
+            "error": None,
         }
 
     except Exception as e:
+        # Record the error so downstream (score_aggregator) can hard-fail
+        # loudly instead of treating an exception as equivalent to the LLM
+        # legitimately producing zero picks.
         log.error("[quant:%s] ReAct agent failed: %s", team_id, e)
         return {
             "team_id": team_id,
             "ranked_picks": [],
             "tool_calls": [],
             "iterations": 0,
+            "error": f"{type(e).__name__}: {e}",
         }
 
 
