@@ -14,11 +14,20 @@ from typing import Optional
 import yaml
 
 def _find_config(filename: str, subdir: str = "research") -> Path:
-    """Search alpha-engine-config repo in the usual local and CI locations.
+    """Locate real config yaml across local, CI, and Lambda environments.
 
     `.sample.yaml` files in ./config/ are documentation for open-source viewers
     ONLY — never loaded by runtime. Real config lives in the private
-    alpha-engine-config repo. Hard-fail if not found.
+    alpha-engine-config repo and is staged into the Lambda image at build
+    time via deploy.sh (see infrastructure/deploy.sh:130+). Hard-fail if
+    none of the known locations has the file.
+
+    Search order:
+      1. ~/alpha-engine-config/<subdir>/<file>      (local dev with sibling clone)
+      2. <repo>/../alpha-engine-config/<subdir>/<file>  (local dev with repo parent)
+      3. $GITHUB_WORKSPACE/alpha-engine-config/<subdir>/<file>  (CI checkout)
+      4. <repo>/config/<file>                       (Lambda image: deploy.sh
+         stages config repo yaml into this directory, subdir-flattened)
     """
     ws = os.environ.get("GITHUB_WORKSPACE")
     search = [
@@ -27,13 +36,17 @@ def _find_config(filename: str, subdir: str = "research") -> Path:
     ]
     if ws:
         search.append(Path(ws) / "alpha-engine-config" / subdir / filename)
+    # Lambda image: deploy.sh flattens <subdir>/<file> → config/<file>
+    search.append(Path(__file__).parent / "config" / filename)
     found = next((p for p in search if p.exists()), None)
     if found is None:
         raise FileNotFoundError(
             f"Could not locate {subdir}/{filename} in alpha-engine-config. "
             f"Searched: {[str(p) for p in search]}. "
             "Checkout the config repo at ~/alpha-engine-config (local) or "
-            "$GITHUB_WORKSPACE/alpha-engine-config (CI)."
+            "$GITHUB_WORKSPACE/alpha-engine-config (CI). On Lambda the "
+            "config is staged into config/ by deploy.sh; if this is firing "
+            "in Lambda the image was built without the staging step."
         )
     return found
 
