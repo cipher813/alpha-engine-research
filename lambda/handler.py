@@ -18,6 +18,34 @@ import os
 import sys
 import time
 
+# Disable LangSmith tracing before any langchain/langgraph imports.
+#
+# The research graph state includes `price_data: dict[str, pd.DataFrame]`,
+# and pandas DataFrames have a DatetimeIndex. When LangSmith's tracer tries
+# to serialize node inputs/outputs to JSON, pandas converts the index to a
+# dict keyed by pd.Timestamp — which json.dumps rejects with
+# `TypeError: keys must be str, int, float, bool or None, not Timestamp`.
+# Every callback on every node crashes, flooding CloudWatch with thousands
+# of warnings and leaving LangSmith with zero trace data.
+#
+# Side effect: `evals/trajectory.py` then reports 11 missing nodes
+# because it has no trace data to inspect — a false positive that masks
+# actual pipeline health on the 2026-04-11 Saturday run.
+#
+# Disabling tracing here:
+#   - Silences the callback errors (no more CloudWatch noise)
+#   - Makes the trajectory validator cleanly skip (logs "Trajectory
+#     validation skipped — LANGCHAIN_TRACING_V2 not set" instead of
+#     reporting false failures)
+#   - Has no effect on graph execution — the LLM agents and tool calls
+#     still work; only the optional LangSmith submission layer is off.
+#
+# The proper fix is to make pd.Timestamp JSON-serializable for the
+# LangSmith tracer (either by stripping DataFrames from node returns
+# before tracing, or by registering a custom serializer hook in
+# langsmith/orjson). That's deferred to a separate investigation.
+os.environ["LANGCHAIN_TRACING_V2"] = "false"
+
 import pytz
 
 from exchange_calendars import get_calendar
