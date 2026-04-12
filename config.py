@@ -77,10 +77,15 @@ SECTOR_MAP: dict[str, str] = {s["ticker"]: s["sector"] for s in UNIVERSE}
 SCORING_WEIGHTS: dict[str, float] = _cfg["scoring_weights"]
 # Horizon separation: Research uses quant + qual only (6–12 month fundamental).
 # Technical analysis is handled by Predictor (GBM) and Executor (ATR/time exits).
-# NOTE: v1 used "news"/"research" keys — renamed to quant/qual in v2.
-# Backward-compat: falls back to old keys if new ones missing.
-WEIGHT_QUANT: float = SCORING_WEIGHTS.get("quant", SCORING_WEIGHTS.get("news", 0.50))
-WEIGHT_QUAL: float = SCORING_WEIGHTS.get("qual", SCORING_WEIGHTS.get("research", 0.50))
+# Hard-fail if legacy keys linger — silent fallback is how the NULL-archive
+# bug survived for weeks. Config repo must ship quant/qual keys.
+if "news" in SCORING_WEIGHTS or "research" in SCORING_WEIGHTS:
+    raise ValueError(
+        f"scoring_weights uses deprecated keys (news/research) in {_CONFIG_PATH}. "
+        "Rename to quant/qual — see alpha-engine-config."
+    )
+WEIGHT_QUANT: float = SCORING_WEIGHTS["quant"]
+WEIGHT_QUAL: float = SCORING_WEIGHTS["qual"]
 
 RATING_BUY_THRESHOLD: float = _cfg["rating_thresholds"]["buy"]
 RATING_SELL_THRESHOLD: float = _cfg["rating_thresholds"]["sell"]
