@@ -231,7 +231,7 @@ def check_consistency(
         return False
 
     rp = get_research_params()
-    divergence_threshold = rp.get("consistency_divergence_threshold", 30)
+    divergence_threshold = rp["consistency_divergence_threshold"]
 
     if abs(quant_score - qual_score) >= divergence_threshold:
         if (quant_score > RATING_BUY_THRESHOLD and qual_score < RATING_SELL_THRESHOLD) or \
@@ -582,7 +582,7 @@ def aggregate_all(
             pead_boost + revision_boost + options_adj
             + insider_boost + short_interest_adj + institutional_boost
         )
-        max_boost = get_research_params().get("max_aggregate_boost", 10.0)
+        max_boost = get_research_params()["max_aggregate_boost"]
         total_boost = max(-max_boost, min(max_boost, total_boost_raw))
         adjusted_score = base_final + total_boost
         result["final_score"] = round(max(0.0, min(100.0, adjusted_score)), 2)

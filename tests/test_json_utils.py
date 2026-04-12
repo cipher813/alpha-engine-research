@@ -50,3 +50,29 @@ class TestExtractJsonArray:
     def test_returns_none_on_no_json(self):
         result = extract_json_array("No arrays here.")
         assert result is None
+
+    def test_fallback_preserves_nested_objects(self):
+        # Regression: old regex r'\{[^{}]+\}' matched only innermost objects,
+        # dropping the outer pick with its catalyst sub-object. Simulate a
+        # malformed array (trailing commas) that trips the array parser.
+        text = (
+            'Picks:\n'
+            '{"ticker": "AAPL", "catalyst": {"reason": "strong"}},\n'
+            '{"ticker": "MSFT", "catalyst": {"reason": "stable"}},\n'
+        )
+        result = extract_json_array(text)
+        assert result is not None
+        assert {o["ticker"] for o in result if "ticker" in o} == {"AAPL", "MSFT"}
+
+    def test_require_key_filters_inner_objects(self):
+        # When we require a "ticker" key, the nested catalyst sub-object is
+        # dropped, leaving only the outer picks. This is what the sector-team
+        # analysts use.
+        text = (
+            '{"ticker": "AAPL", "catalyst": {"reason": "strong"}},\n'
+            '{"ticker": "MSFT", "catalyst": {"reason": "stable"}},\n'
+        )
+        result = extract_json_array(text, require_key="ticker")
+        assert result is not None
+        assert len(result) == 2
+        assert all("ticker" in o for o in result)

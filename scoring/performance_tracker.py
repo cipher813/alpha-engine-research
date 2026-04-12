@@ -191,7 +191,12 @@ def record_new_buy_scores(
     cursor = db_conn.cursor()
 
     for ticker, thesis in investment_theses.items():
-        score = thesis.get("final_score", 0)
+        if "final_score" not in thesis:
+            raise KeyError(
+                f"Thesis for {ticker} missing final_score — build_thesis_record "
+                "must set it. Silent default=0 would skip performance tracking."
+            )
+        score = thesis["final_score"]
         if score < RATING_BUY_THRESHOLD:
             continue
 

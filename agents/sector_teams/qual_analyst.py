@@ -135,8 +135,9 @@ def _parse_assessments(text: str) -> dict:
     if result and "assessments" in result:
         return result
 
-    # Try JSON array directly
-    arr = extract_json_array(text)
+    # Try JSON array directly. Require "ticker" on each object so that a
+    # malformed array doesn't produce nested sub-objects via the fallback.
+    arr = extract_json_array(text, require_key="ticker")
     if arr:
         return {"assessments": arr, "additional_candidate": None}
 
