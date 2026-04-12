@@ -536,12 +536,31 @@ def merge_results_node(state: ResearchState) -> dict:
 
 
 def score_aggregator(state: ResearchState) -> dict:
-    """Compute composite scores for all team recommendations."""
+    """Compute composite scores for all team recommendations.
+
+    Hard-fails if any sector team reported a non-None error — an exception
+    inside a team's ReAct agent was previously silently swallowed, making
+    a crashed team indistinguishable from a team that legitimately had
+    zero picks. Per the hard-fail rule, surface the failure here so
+    flow-doctor catches it at the Lambda boundary.
+    """
     logger.info("[score_aggregator] starting")
 
     team_outputs = state.get("sector_team_outputs", {})
     sector_modifiers = state.get("sector_modifiers", {})
     sector_map = state.get("sector_map", {})
+
+    failed_teams = {
+        tid: out.get("error")
+        for tid, out in team_outputs.items()
+        if out.get("error")
+    }
+    if failed_teams:
+        msg = "sector team(s) failed: " + "; ".join(
+            f"{tid}: {err}" for tid, err in failed_teams.items()
+        )
+        logger.error("[score_aggregator] %s", msg)
+        raise RuntimeError(msg)
 
     investment_theses = {}
 
