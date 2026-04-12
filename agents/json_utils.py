@@ -41,12 +41,15 @@ def extract_json_object(text: str, hint_key: str | None = None) -> dict | None:
         return None
 
 
-def extract_json_array(text: str) -> list | None:
+def extract_json_array(text: str, require_key: str | None = None) -> list | None:
     """
     Extract a JSON array from mixed text.
 
-    Falls back to finding individual objects with common keys if array
-    extraction fails.
+    Falls back to balanced-brace scanning for top-level objects when array
+    extraction fails. If `require_key` is set, only objects containing that
+    key at the top level are kept — prevents the scanner from returning
+    nested sub-objects (e.g., {"reason": "..."} from inside a pick) when
+    the outer array is malformed.
 
     Returns:
         Parsed list, or None if extraction fails.
@@ -60,14 +63,27 @@ def extract_json_array(text: str) -> list | None:
         except json.JSONDecodeError:
             pass
 
-    # Fallback: find individual JSON objects
+    # Fallback: balanced-brace scan for top-level objects.
+    # The previous regex r'\{[^{}]+\}' matched innermost objects, which
+    # meant nested sub-objects (e.g., {"reason": "strong"}) were returned
+    # instead of the outer picks when the array syntax was malformed —
+    # silently producing empty picks downstream.
     objects = []
-    for m in re.finditer(r'\{[^{}]+\}', text):
+    i = 0
+    while i < len(text):
+        brace = text.find("{", i)
+        if brace == -1:
+            break
+        obj_start, obj_end = _scan_balanced(text, brace, "{", "}")
+        if obj_start < 0:
+            break
         try:
-            obj = json.loads(m.group())
-            objects.append(obj)
+            obj = json.loads(text[obj_start:obj_end + 1])
+            if isinstance(obj, dict) and (require_key is None or require_key in obj):
+                objects.append(obj)
         except json.JSONDecodeError:
             pass
+        i = obj_end + 1
 
     return objects if objects else None
 

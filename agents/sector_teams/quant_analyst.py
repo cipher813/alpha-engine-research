@@ -159,8 +159,13 @@ from agents.json_utils import extract_json_array
 
 
 def _parse_picks_from_response(text: str) -> list[dict]:
-    """Parse ranked picks from the agent's final response."""
-    result = extract_json_array(text)
+    """Parse ranked picks from the agent's final response.
+
+    Requires each parsed object to contain a "ticker" key so that a
+    malformed array which trips the balanced-brace fallback doesn't
+    return nested sub-objects (e.g., {"reason": ...}) as picks.
+    """
+    result = extract_json_array(text, require_key="ticker")
     if result:
         return result[:QUANT_TOP_N]
     return []
