@@ -93,17 +93,24 @@ build_and_deploy_main() {
     exit 1
   fi
 
-  # Stage proprietary prompt templates from the private alpha-engine-config
-  # repo into the build context. Prompts are gitignored in this repo (see
-  # .gitignore for rationale) so a fresh GitHub Actions checkout has no
-  # prompts — the image would ship broken. Local dev workflow also uses
-  # this path: if config/prompts/ already has .txt files (local dev) we
-  # keep those; otherwise we stage from the config repo sibling.
+  # Stage proprietary configs from the private alpha-engine-config repo
+  # into the build context. Prompts, scoring.yaml, and universe.yaml are
+  # gitignored in this repo (see .gitignore) so a fresh GitHub Actions
+  # checkout has none of them — the image would ship broken (or worse,
+  # silently fall back to the committed *.sample.yaml files and run on
+  # trivial placeholder data, which is exactly what happened on the
+  # 2026-04-11 research Lambda run).
+  #
+  # Local dev workflow is preserved: if the real files already exist in
+  # config/ on the laptop, we use them as-is.
+  CONFIG_REPO_DIR="${CONFIG_REPO_DIR:-$(dirname "$(pwd)")/alpha-engine-config}"
   PROMPTS_STAGED_FROM_CONFIG_REPO=0
+  YAMLS_STAGED_FROM_CONFIG_REPO=()
+
+  # -- prompts -------------------------------------------------------------
   if [ -d "config/prompts" ] && ls config/prompts/*.txt &>/dev/null; then
     echo "Using existing config/prompts/ (local dev workflow)"
   else
-    CONFIG_REPO_DIR="${CONFIG_REPO_DIR:-$(dirname "$(pwd)")/alpha-engine-config}"
     if [ -d "$CONFIG_REPO_DIR/research/prompts" ]; then
       echo "Staging research prompts from $CONFIG_REPO_DIR/research/prompts/..."
       mkdir -p config/prompts
@@ -119,16 +126,40 @@ build_and_deploy_main() {
     fi
   fi
 
+  # -- scoring.yaml + universe.yaml ---------------------------------------
+  for yaml in scoring.yaml universe.yaml; do
+    if [ -f "config/$yaml" ]; then
+      echo "Using existing config/$yaml (local dev workflow)"
+    else
+      src="$CONFIG_REPO_DIR/research/$yaml"
+      if [ -f "$src" ]; then
+        echo "Staging config/$yaml from $src..."
+        cp "$src" "config/$yaml"
+        YAMLS_STAGED_FROM_CONFIG_REPO+=("$yaml")
+      else
+        echo "ERROR: config/$yaml not found — tried:"
+        echo "  config/$yaml (local dev)"
+        echo "  $src (config repo sibling)"
+        echo "Hint: clone cipher813/alpha-engine-config as a sibling directory,"
+        echo "      or set CONFIG_REPO_DIR=/path/to/alpha-engine-config"
+        exit 1
+      fi
+    fi
+  done
+
   # Build Docker image
   echo "Building Docker image..."
   docker build --platform linux/amd64 --provenance=false -t "$FUNCTION_MAIN:latest" .
   rm -rf flow-doctor-pkg
 
-  # Only remove the staged prompts — never touch a local dev checkout that
-  # already had real prompts in config/prompts/.
+  # Only remove staged files — never touch a local dev checkout that
+  # already had real files present.
   if [ "$PROMPTS_STAGED_FROM_CONFIG_REPO" = "1" ]; then
     rm -rf config/prompts
   fi
+  for yaml in "${YAMLS_STAGED_FROM_CONFIG_REPO[@]}"; do
+    rm -f "config/$yaml"
+  done
 
   # Authenticate with ECR
   echo "Authenticating with ECR..."

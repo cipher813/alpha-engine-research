@@ -283,14 +283,23 @@ def _update_thesis_for_held_stock(
             # (final_score, quant_score, qual_score, rating, sector, team_id)
             # come from the prior thesis — the LLM is not authoritative on
             # scores and does not re-run the quant tools for held stocks.
-            # Without this merge, the LLM's partial JSON replaces the full
-            # thesis and downstream code emits signals with score=null.
-            # Root cause of the 2026-04-04 incident where LNTH/KR/PR/HAL
-            # emitted as ENTER with null scores.
+            #
+            # Strip None values from llm_update BEFORE merging so that an
+            # LLM that emits `"final_score": null` (seen on LNTH/LLY/PFE/
+            # VRTX/CME/JHG/COKE/HSY/KR in the 2026-04-11 run) can't
+            # overwrite valid prior scores with nulls. The merge order
+            # `{**prior_thesis, **llm_update}` still lets the LLM override
+            # narrative fields with real values, but nulls are dropped.
+            #
+            # Prior mitigation was a downstream downgrade in
+            # research_graph._build_signals_payload that catches broken
+            # theses at emit time — this is the upstream fix for the same
+            # 2026-04-04 / 2026-04-11 root cause.
+            llm_update_clean = {k: v for k, v in llm_update.items() if v is not None}
             if prior_thesis:
-                result = {**prior_thesis, **llm_update}
+                result = {**prior_thesis, **llm_update_clean}
             else:
-                result = llm_update
+                result = llm_update_clean
                 result["score_failed"] = True
             result["last_updated"] = run_date
             result["triggers"] = triggers
