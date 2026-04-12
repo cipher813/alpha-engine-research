@@ -72,7 +72,7 @@ def _load_investment_theses(db_path: str, since: str | None = None) -> list[dict
     conn.row_factory = sqlite3.Row
 
     sql = """SELECT symbol, date, rating, score, thesis_summary, conviction, signal,
-                    technical_score, news_score, research_score
+                    technical_score, quant_score, qual_score
              FROM investment_thesis WHERE length(thesis_summary) > 50"""
     params = []
     if since:

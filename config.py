@@ -75,10 +75,12 @@ SECTOR_MAP: dict[str, str] = {s["ticker"]: s["sector"] for s in UNIVERSE}
 
 # ── Scoring ───────────────────────────────────────────────────────────────────
 SCORING_WEIGHTS: dict[str, float] = _cfg["scoring_weights"]
-# Horizon separation: Research uses news + research only (6–12 month fundamental).
+# Horizon separation: Research uses quant + qual only (6–12 month fundamental).
 # Technical analysis is handled by Predictor (GBM) and Executor (ATR/time exits).
-WEIGHT_NEWS: float = SCORING_WEIGHTS.get("news", 0.50)
-WEIGHT_RESEARCH: float = SCORING_WEIGHTS.get("research", 0.50)
+# NOTE: v1 used "news"/"research" keys — renamed to quant/qual in v2.
+# Backward-compat: falls back to old keys if new ones missing.
+WEIGHT_QUANT: float = SCORING_WEIGHTS.get("quant", SCORING_WEIGHTS.get("news", 0.50))
+WEIGHT_QUAL: float = SCORING_WEIGHTS.get("qual", SCORING_WEIGHTS.get("research", 0.50))
 
 RATING_BUY_THRESHOLD: float = _cfg["rating_thresholds"]["buy"]
 RATING_SELL_THRESHOLD: float = _cfg["rating_thresholds"]["sell"]

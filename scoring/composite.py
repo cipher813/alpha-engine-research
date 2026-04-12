@@ -1,8 +1,7 @@
 """
 Composite scoring for sector-team architecture.
 
-Replaces the old news_score × w_news + research_score × w_research formula
-with quant_score × w_quant + qual_score × w_qual + macro_shift + boosts.
+Formula: quant_score × w_quant + qual_score × w_qual + macro_shift + boosts.
 
 Weights are loaded from S3 config (auto-tuned by backtester) with YAML defaults.
 """

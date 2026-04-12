@@ -28,8 +28,8 @@ import logging
 import os
 
 from config import (
-    WEIGHT_NEWS,
-    WEIGHT_RESEARCH,
+    WEIGHT_QUANT,
+    WEIGHT_QUAL,
     RATING_BUY_THRESHOLD,
     RATING_SELL_THRESHOLD,
     SECTOR_MAP,
@@ -39,10 +39,6 @@ from config import (
 )
 
 logger = logging.getLogger(__name__)
-
-# Aliases: config.py uses NEWS/RESEARCH names from universe.yaml; we use quant/qual
-WEIGHT_QUANT = WEIGHT_NEWS
-WEIGHT_QUAL = WEIGHT_RESEARCH
 
 DEFAULT_SECTOR_MODIFIER = 1.0   # fallback if sector or macro data unavailable
 
