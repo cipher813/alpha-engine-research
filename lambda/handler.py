@@ -18,12 +18,20 @@ import os
 import sys
 import time
 
+# Install the LangSmith pandas DataFrame serializer patch before any
+# langchain/langgraph imports trigger a trace event. Without this patch,
+# every agent callback crashes when LangSmith tries to serialize the
+# research graph state (which contains pd.DataFrame via price_data) —
+# see graph/langsmith_pandas_patch.py for the full diagnosis.
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+from graph.langsmith_pandas_patch import install as _install_ls_patch
+_install_ls_patch()
+
 import pytz
 
 from exchange_calendars import get_calendar
 
 # Load secrets from SSM Parameter Store (must run before any os.environ.get)
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from ssm_secrets import load_secrets
 load_secrets()
 
