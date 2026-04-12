@@ -18,20 +18,47 @@ import os
 import sys
 import time
 
-import pytz
-
-from exchange_calendars import get_calendar
-
-# Load secrets from SSM Parameter Store (must run before any os.environ.get)
+# Ensure the project root is on sys.path so sibling modules can be
+# imported from the handler paths below.
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
-from ssm_secrets import load_secrets
-load_secrets()
 
 logger = logging.getLogger(__name__)
+
+# Lazy-imported during first handler invocation to keep the Lambda init
+# phase under the 10-second hard timeout. Previously `pytz`,
+# `exchange_calendars`, and the SSM secrets fetch ran at module import
+# time, and a cold-start container timed out on 2026-04-11 with
+# "Init Duration: 9999.47 ms — Status: timeout".
+#
+# Moving these to the handler pays roughly the same wall-clock cost on
+# the first invocation (a few extra seconds of handler time, which the
+# handler budget tolerates) instead of during init, where the 10s wall
+# is rigid and not configurable.
+_init_done = False
+
+
+def _ensure_init() -> None:
+    """Run expensive init once, on the first handler invocation."""
+    global _init_done
+    if _init_done:
+        return
+    # exchange_calendars is heavy (~3-5s) because it materializes the
+    # full NYSE session schedule at import time. Kept in the module
+    # namespace after first import so subsequent get_calendar() calls
+    # don't re-import.
+    import exchange_calendars  # noqa: F401
+    # pytz is fast but imported here for symmetry.
+    import pytz  # noqa: F401
+    # SSM secrets: ~1-2s depending on parameter count. Safe to run
+    # inside the handler — nothing at module top reads env vars.
+    from ssm_secrets import load_secrets
+    load_secrets()
+    _init_done = True
 
 
 def is_trading_day(date: datetime.date | None = None) -> bool:
     """Return True if date (default: today) is an NYSE trading day."""
+    from exchange_calendars import get_calendar
     nyse = get_calendar("XNYS")
     d = date or datetime.date.today()
     return nyse.is_session(d)
@@ -43,6 +70,7 @@ def is_early_close(date: datetime.date | None = None) -> bool:
     Early closes: day before July 4th, Black Friday, Christmas Eve.
     These still run — the morning report executes normally.
     """
+    from exchange_calendars import get_calendar
     nyse = get_calendar("XNYS")
     d = date or datetime.date.today()
     try:
@@ -67,6 +95,7 @@ def _is_scheduled_run_time() -> bool:
     Used by the weekday EventBridge rule (12:45+13:45 UTC).
     Only the invocation that lands in 5:45am PT proceeds.
     """
+    import pytz
     pt = datetime.datetime.now(pytz.timezone("America/Los_Angeles"))
     return pt.hour == 5 and 40 <= pt.minute <= 55
 
@@ -83,6 +112,9 @@ def handler(event, context):
     Returns:
         dict with status: "OK" | "SKIPPED" | "ERROR"
     """
+    # Run one-time expensive imports + SSM secrets fetch. First call
+    # pays ~3-5s; subsequent warm-container calls are a no-op.
+    _ensure_init()
     os.environ.setdefault("XDG_CACHE_HOME", "/tmp")
 
     force = event.get("force", False)
