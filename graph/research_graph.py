@@ -845,6 +845,12 @@ def archive_writer(state: ResearchState) -> dict:
     logger.info("[archive_writer] starting")
     am: ArchiveManager = state["archive_manager"]
     run_date = state["run_date"]
+    # Bind once at the top so the scanner evaluations and team candidates
+    # blocks below can reference it. Previously lines 945 and 975 referenced
+    # a bare `team_outputs` that was never defined in this scope, causing
+    # NameError and leaving team_candidates empty — which cascaded downstream
+    # to the backtester evaluator on 2026-04-11.
+    team_outputs = state.get("sector_team_outputs", {})
 
     # Save IC decisions
     for decision in state.get("ic_decisions", []):
