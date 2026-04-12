@@ -95,6 +95,29 @@ def run_quant_analyst(
         log.info("[quant:%s] completed — %d picks, %d tool calls",
                  team_id, len(picks), len(tool_calls))
 
+        # Diagnostic logging for the "no valid picks" case. 2-3 sector
+        # teams have been returning zero picks per weekly run since at
+        # least 2026-04-04 and we don't know whether it's (a) the LLM
+        # producing no JSON, (b) _parse_picks_from_response failing to
+        # extract it, (c) the ReAct agent hitting the recursion limit
+        # before producing final text, or (d) all tool calls failing
+        # and the LLM having no data to work with. Log enough context
+        # to tell these apart on the next run.
+        if not picks:
+            last_tool = tool_calls[-1].get("tool") if tool_calls else "<none>"
+            recursion_limit_hit = len(tool_calls) >= QUANT_MAX_ITERATIONS * 2 - 1
+            text_tail = (final_text[-500:] if final_text else "<empty>").replace("\n", " ")
+            log.warning(
+                "[quant:%s] produced 0 picks — tool_calls=%d "
+                "(recursion_limit_hit=%s) last_tool=%s "
+                "final_text_tail=%r",
+                team_id,
+                len(tool_calls),
+                recursion_limit_hit,
+                last_tool,
+                text_tail,
+            )
+
         return {
             "team_id": team_id,
             "ranked_picks": picks,
