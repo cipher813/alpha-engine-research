@@ -29,6 +29,41 @@ def create_quant_tools(context: dict) -> list:
     price_data = context.get("price_data", {})
     technical_scores = context.get("technical_scores", {})
 
+    # Set of valid tickers the LLM can reference. Used to reject
+    # hallucinated tickers before they hit external APIs. Observed
+    # 2026-04-11: a quant ReAct agent called get_balance_sheet(
+    # tickers=["CARRIER"]) instead of ["CARR"] and yfinance returned
+    # 404 on Carrier Global. Validating here returns a clear error
+    # to the LLM so it can retry with the correct symbol.
+    _valid_tickers = set(price_data.keys()) if price_data else set()
+
+    def _validate_tickers(tickers: list[str], tool_name: str) -> tuple[list[str], dict[str, str]]:
+        """Split incoming tickers into (valid, errors_dict).
+
+        The errors dict maps the rejected ticker to an error message
+        suitable for returning directly to the LLM as a tool result.
+        """
+        valid: list[str] = []
+        errors: dict[str, str] = {}
+        for t in tickers:
+            if not isinstance(t, str) or not t.strip():
+                errors[str(t)] = "empty or non-string ticker"
+                continue
+            t_clean = t.strip().upper()
+            if _valid_tickers and t_clean not in _valid_tickers:
+                errors[t] = (
+                    f"unknown ticker '{t}' — not in the current sector "
+                    f"universe. Re-check the ticker symbol (e.g. Carrier "
+                    f"Global is CARR, not CARRIER). Valid tickers only."
+                )
+                log.warning(
+                    "[%s] LLM passed unknown ticker '%s' — rejecting",
+                    tool_name, t,
+                )
+                continue
+            valid.append(t_clean)
+        return valid, errors
+
     @tool
     def screen_by_volume(tickers: list[str], min_volume: float) -> str:
         """Filter tickers by minimum 20-day average daily volume. Returns tickers meeting threshold."""
@@ -66,8 +101,9 @@ def create_quant_tools(context: dict) -> list:
         """Get analyst ratings, price targets, earnings surprises for up to 5 tickers (FMP daily limit). Pass your top candidates only. Returns consensus_rating, num_analysts, mean_target, upside_pct."""
         from data.fetchers.analyst_fetcher import fetch_analyst_consensus as _fetch
 
-        results = {}
-        for t in tickers[:5]:
+        valid, errors = _validate_tickers(tickers, "get_analyst_consensus")
+        results: dict = dict(errors)
+        for t in valid[:5]:
             try:
                 # Pass yfinance close price to avoid a separate FMP quote call
                 cp = None
@@ -90,8 +126,9 @@ def create_quant_tools(context: dict) -> list:
         """Get balance sheet metrics: debt/equity, current ratio, PE, revenue growth, gross margins."""
         import yfinance as yf
 
-        results = {}
-        for t in tickers[:20]:
+        valid, errors = _validate_tickers(tickers, "get_balance_sheet")
+        results: dict = dict(errors)
+        for t in valid[:20]:
             try:
                 info = yf.Ticker(t).info
                 results[t] = {
