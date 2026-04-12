@@ -38,6 +38,12 @@ _TIMEOUT = 15
 _EDGAR_BASE = "https://data.sec.gov"
 _EFTS_BASE = "https://efts.sec.gov/LATEST"
 
+# Process-lifetime cache for the company_tickers.json file (~12 MB). SEC
+# rate-limits IPs that fetch this too often; 2026-04-11 saw a 429 on the
+# Saturday run. Caching keeps the insider fetcher to one fetch per Lambda
+# container lifetime instead of one per invocation per call site.
+_COMPANY_TICKERS_CACHE: dict[str, str] | None = None
+
 
 def _get_headers() -> dict[str, str]:
     """Build SEC-compliant request headers from EDGAR_IDENTITY env var."""
@@ -50,22 +56,60 @@ def _get_headers() -> dict[str, str]:
     }
 
 
+def _fetch_company_tickers(headers: dict) -> dict[str, str]:
+    """Fetch + cache the SEC company_tickers.json file as {TICKER: CIK}.
+
+    Returns an empty dict on failure after 3 retries with exponential
+    backoff. Shared by _lookup_cik and the batch fetch_insider_activity
+    path so we only make one round-trip per Lambda container lifetime.
+    """
+    global _COMPANY_TICKERS_CACHE
+    if _COMPANY_TICKERS_CACHE is not None:
+        return _COMPANY_TICKERS_CACHE
+
+    tickers_url = "https://www.sec.gov/files/company_tickers.json"
+    last_exc: Exception | None = None
+    for attempt in range(1, 4):
+        try:
+            resp = requests.get(tickers_url, headers=headers, timeout=_TIMEOUT)
+            # 429 is retryable; raise_for_status() throws HTTPError for it
+            resp.raise_for_status()
+            data = resp.json()
+            cache: dict[str, str] = {}
+            for entry in data.values():
+                t = entry.get("ticker", "").upper()
+                if t:
+                    cache[t] = str(entry["cik_str"]).zfill(10)
+            _COMPANY_TICKERS_CACHE = cache
+            log.debug("Cached %d SEC ticker→CIK entries", len(cache))
+            return cache
+        except requests.HTTPError as e:
+            last_exc = e
+            status = e.response.status_code if e.response is not None else None
+            if status == 429 and attempt < 3:
+                # 2**attempt: 2s, 4s, 8s. Exponential backoff keeps us
+                # well clear of SEC's burst window on the next try.
+                delay = 2 ** attempt
+                log.warning(
+                    "SEC company_tickers 429 (attempt %d/3) — backing off %ds",
+                    attempt, delay,
+                )
+                time.sleep(delay)
+                continue
+            break
+        except Exception as e:
+            last_exc = e
+            break
+
+    log.warning("Failed to fetch SEC company tickers after 3 attempts: %s", last_exc)
+    _COMPANY_TICKERS_CACHE = {}
+    return _COMPANY_TICKERS_CACHE
+
+
 def _lookup_cik(ticker: str, headers: dict) -> Optional[str]:
     """Look up CIK number for a ticker symbol via SEC EDGAR company tickers JSON."""
-    try:
-        url = f"{_EDGAR_BASE}/submissions/CIK{ticker.upper()}.json"
-        # SEC doesn't support direct ticker lookup at this URL; use the tickers file
-        tickers_url = "https://www.sec.gov/files/company_tickers.json"
-        resp = requests.get(tickers_url, headers=headers, timeout=_TIMEOUT)
-        resp.raise_for_status()
-        data = resp.json()
-        for entry in data.values():
-            if entry.get("ticker", "").upper() == ticker.upper():
-                cik = str(entry["cik_str"])
-                return cik.zfill(10)  # pad to 10 digits
-    except Exception as e:
-        log.debug("CIK lookup failed for %s: %s", ticker, e)
-    return None
+    cache = _fetch_company_tickers(headers)
+    return cache.get(ticker.upper())
 
 
 def _get_form4_filings(
@@ -231,20 +275,11 @@ def fetch_insider_activity(
         log.warning("SEC EDGAR headers error: %s", e)
         return {t: _empty_result() for t in tickers}
 
-    # Cache the company tickers file (one request for all tickers)
-    cik_map: dict[str, str] = {}
-    try:
-        tickers_url = "https://www.sec.gov/files/company_tickers.json"
-        resp = requests.get(tickers_url, headers=headers, timeout=_TIMEOUT)
-        resp.raise_for_status()
-        for entry in resp.json().values():
-            t = entry.get("ticker", "").upper()
-            if t:
-                cik_map[t] = str(entry["cik_str"]).zfill(10)
-        time.sleep(_RATE_LIMIT_DELAY)
-    except Exception as e:
-        log.warning("Failed to fetch SEC company tickers: %s", e)
+    # Use the shared cache so batch + single-ticker lookup share one round-trip
+    cik_map = _fetch_company_tickers(headers)
+    if not cik_map:
         return {t: _empty_result() for t in tickers}
+    time.sleep(_RATE_LIMIT_DELAY)
 
     for ticker in tickers:
         try:
