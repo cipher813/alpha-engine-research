@@ -583,6 +583,28 @@ def score_aggregator(state: ResearchState) -> dict:
         # Merge thesis updates from held stocks
         for ticker, thesis in output.get("thesis_updates", {}).items():
             if ticker not in investment_theses:
+                # Skip thesis_updates that lack final_score. Without one,
+                # the downstream _build_signals_payload safety gate will
+                # downgrade the stock from BUY to HOLD with a
+                # "broken thesis" warning (observed for 9 held tickers on
+                # the 2026-04-11 run). The upstream cause is usually a
+                # held-stock thesis that was saved without final_score —
+                # either from a first-time held-stock update path that
+                # never ran the aggregator, or a historic archive entry
+                # that predates the current schema. Either way, skipping
+                # here prevents the broken record from entering
+                # investment_theses and fail loudly via the logger so the
+                # archive row can be backfilled.
+                if thesis.get("final_score") is None:
+                    logger.error(
+                        "[score_aggregator] thesis_update for %s is missing "
+                        "final_score — skipping investment_theses entry to "
+                        "prevent broken-thesis downgrade downstream. "
+                        "Upstream fix required: backfill the archive thesis "
+                        "for this ticker or re-run the aggregator path.",
+                        ticker,
+                    )
+                    continue
                 investment_theses[ticker] = {
                     "ticker": ticker,
                     "team_id": team_id,
