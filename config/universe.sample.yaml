@@ -15,9 +15,8 @@ universe:
     sector: Consumer Discretionary
 
 scoring_weights:
-  technical: 0.40
-  news: 0.30
-  research: 0.30
+  quant: 0.50
+  qual: 0.50
 
 rating_thresholds:
   buy: 65             # 12-month horizon: conviction holds should rate BUY by default

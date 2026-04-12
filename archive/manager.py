@@ -336,18 +336,18 @@ class ArchiveManager:
             return
         self.db_conn.execute(
             """INSERT OR REPLACE INTO investment_thesis
-               (symbol, date, run_time, rating, score, technical_score, news_score,
-                research_score, macro_modifier, thesis_summary, prev_rating, prev_score,
+               (symbol, date, run_time, rating, score, technical_score,
+                quant_score, qual_score,
+                macro_modifier, thesis_summary, prev_rating, prev_score,
                 last_material_change_date, stale_days, consistency_flag,
                 conviction, signal, score_velocity_5d, price_target_upside,
-                predicted_direction, prediction_confidence,
-                quant_score, qual_score)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                predicted_direction, prediction_confidence)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 thesis["ticker"], thesis["date"], run_time, thesis["rating"],
                 thesis["final_score"], thesis.get("technical_score"),
-                thesis.get("news_score"),
-                thesis.get("research_score"),
+                thesis.get("quant_score"),
+                thesis.get("qual_score"),
                 thesis.get("macro_modifier"), thesis.get("thesis_summary"),
                 thesis.get("prior_rating"), thesis.get("prior_score"),
                 thesis.get("last_material_change_date"), thesis.get("stale_days"),
@@ -358,8 +358,6 @@ class ArchiveManager:
                 thesis.get("price_target_upside"),
                 thesis.get("predicted_direction"),
                 thesis.get("prediction_confidence"),
-                thesis.get("quant_score"),
-                thesis.get("qual_score"),
             ),
         )
 
@@ -420,12 +418,12 @@ class ArchiveManager:
         for a in appearances:
             self.db_conn.execute(
                 """INSERT OR REPLACE INTO scanner_appearances
-                   (symbol, date, scanner_rank, scan_path, tech_score, news_score,
-                    research_score, final_score, selected, selection_reason)
+                   (symbol, date, scanner_rank, scan_path, tech_score, quant_score,
+                    qual_score, final_score, selected, selection_reason)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     a["symbol"], a["date"], a["scanner_rank"], a.get("scan_path"),
-                    a.get("tech_score"), a.get("news_score"), a.get("research_score"),
+                    a.get("tech_score"), a.get("quant_score"), a.get("qual_score"),
                     a.get("final_score"), a.get("selected", 0), a.get("selection_reason"),
                 ),
             )

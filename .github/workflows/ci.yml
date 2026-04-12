@@ -11,19 +11,34 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout research repo
+        uses: actions/checkout@v4
+        with:
+          path: alpha-engine-research
+
+      # Tests import config.py, which reads yaml from the private config repo.
+      # Sample files in ./config/ are documentation-only and never loaded by
+      # runtime — hard-fail enforces this.
+      - name: Checkout alpha-engine-config
+        uses: actions/checkout@v4
+        with:
+          repository: cipher813/alpha-engine-config
+          path: alpha-engine-config
+          token: ${{ secrets.ALPHA_ENGINE_CONFIG_TOKEN }}
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
       - name: Install dependencies
+        working-directory: alpha-engine-research
         run: |
           pip install --upgrade pip
           pip install -r requirements.txt
           pip install pytest
 
       - name: Run tests
+        working-directory: alpha-engine-research
         run: pytest tests/ -v
         env:
           PYTHONPATH: .

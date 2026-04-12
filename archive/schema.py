@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 # ── Table Definitions ────────────────────────────────────────────────────────
 
@@ -32,8 +32,8 @@ CREATE TABLE IF NOT EXISTS investment_thesis (
     rating                   TEXT NOT NULL,
     score                    REAL NOT NULL,
     technical_score          REAL,
-    news_score               REAL,
-    research_score           REAL,
+    quant_score              REAL,
+    qual_score               REAL,
     macro_modifier           REAL,
     thesis_summary           TEXT,
     prev_rating              TEXT,
@@ -84,8 +84,8 @@ CREATE TABLE IF NOT EXISTS scanner_appearances (
     scanner_rank    INTEGER NOT NULL,
     scan_path       TEXT,
     tech_score      REAL,
-    news_score      REAL,
-    research_score  REAL,
+    quant_score     REAL,
+    qual_score      REAL,
     final_score     REAL,
     selected        INTEGER NOT NULL DEFAULT 0,
     selection_reason TEXT,
@@ -341,6 +341,11 @@ MIGRATIONS: dict[int, tuple[str, str]] = {
          """
          ALTER TABLE investment_thesis ADD COLUMN quant_score REAL;
          ALTER TABLE investment_thesis ADD COLUMN qual_score REAL;
+         """),
+    11: ("Add quant_score/qual_score columns to scanner_appearances",
+         """
+         ALTER TABLE scanner_appearances ADD COLUMN quant_score REAL;
+         ALTER TABLE scanner_appearances ADD COLUMN qual_score REAL;
          """),
 }
 
