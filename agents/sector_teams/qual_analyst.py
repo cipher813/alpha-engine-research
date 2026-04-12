@@ -102,9 +102,13 @@ def run_qual_analyst(
             "additional_candidate": parsed.get("additional_candidate"),
             "tool_calls": tool_calls,
             "iterations": len(tool_calls),
+            "error": None,
         }
 
     except Exception as e:
+        # Record the error so downstream (score_aggregator) can hard-fail
+        # instead of silently treating an exception the same as an LLM
+        # legitimately producing zero assessments.
         log.error("[qual:%s] ReAct agent failed: %s", team_id, e)
         return {
             "team_id": team_id,
@@ -112,6 +116,7 @@ def run_qual_analyst(
             "additional_candidate": None,
             "tool_calls": [],
             "iterations": 0,
+            "error": f"{type(e).__name__}: {e}",
         }
 
 
