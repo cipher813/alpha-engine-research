@@ -18,48 +18,62 @@ import os
 import sys
 import time
 
-# Disable LangSmith tracing before any langchain/langgraph imports.
-#
-# The research graph state includes `price_data: dict[str, pd.DataFrame]`,
-# and pandas DataFrames have a DatetimeIndex. When LangSmith's tracer tries
-# to serialize node inputs/outputs to JSON, pandas converts the index to a
-# dict keyed by pd.Timestamp — which json.dumps rejects with
-# `TypeError: keys must be str, int, float, bool or None, not Timestamp`.
-# Every callback on every node crashes, flooding CloudWatch with thousands
-# of warnings and leaving LangSmith with zero trace data.
-#
-# Side effect: `evals/trajectory.py` then reports 11 missing nodes
-# because it has no trace data to inspect — a false positive that masks
-# actual pipeline health on the 2026-04-11 Saturday run.
-#
-# Disabling tracing here:
-#   - Silences the callback errors (no more CloudWatch noise)
-#   - Makes the trajectory validator cleanly skip (logs "Trajectory
-#     validation skipped — LANGCHAIN_TRACING_V2 not set" instead of
-#     reporting false failures)
-#   - Has no effect on graph execution — the LLM agents and tool calls
-#     still work; only the optional LangSmith submission layer is off.
-#
-# The proper fix is to make pd.Timestamp JSON-serializable for the
-# LangSmith tracer (either by stripping DataFrames from node returns
-# before tracing, or by registering a custom serializer hook in
-# langsmith/orjson). That's deferred to a separate investigation.
-os.environ["LANGCHAIN_TRACING_V2"] = "false"
-
-import pytz
-
-from exchange_calendars import get_calendar
-
-# Load secrets from SSM Parameter Store (must run before any os.environ.get)
+# Ensure the project root is on sys.path so sibling modules
+# (graph.langsmith_pandas_patch, ssm_secrets) can be imported below.
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
-from ssm_secrets import load_secrets
-load_secrets()
+
+# Install the LangSmith pandas DataFrame serializer patch BEFORE any
+# langchain / langgraph import that could trigger a tracer callback.
+#
+# Background: the research graph state holds `price_data: dict[str,
+# pd.DataFrame]`. LangSmith's `_serialize_json` iterates a hardcoded
+# list of methods (including `to_dict`) on unknown objects and calls
+# `df.to_dict()` — which returns `{col: {pd.Timestamp: value}}`.
+# orjson's C-level dict-key handler does a strict type check
+# (`PyDateTime_DateTimeType`) and doesn't recognize pd.Timestamp even
+# though it subclasses datetime.datetime in Python, so it raises
+# TypeError. LangSmith then falls back to stdlib `json.dumps` which
+# rejects all non-primitive dict keys, and every agent callback
+# crashes with the flood we saw on 2026-04-11.
+#
+# Fix: graph/langsmith_pandas_patch.py monkey-patches
+# langsmith._internal._serde._serialize_json to intercept DataFrames
+# and Series before the `to_dict` path fires, returning a safe
+# summary string. Idempotent — safe to call once here and again if
+# anything else re-imports it. Supersedes the temporary
+# `LANGCHAIN_TRACING_V2=false` disable from earlier in this session.
+from graph.langsmith_pandas_patch import install as _install_ls_patch
+_install_ls_patch()
 
 logger = logging.getLogger(__name__)
+
+# Expensive init is deferred to the first handler invocation to keep
+# Lambda's cold-start init phase under the 10-second hard timeout.
+# `pytz`, `exchange_calendars` (~3-5s — materializes the full NYSE
+# schedule on import), and the SSM secrets fetch all used to run at
+# module-top, and on 2026-04-11 a cold-start container timed out with
+# `INIT_REPORT Init Duration: 9999.47 ms — Status: timeout`. Moving
+# them to the handler body pays the same cost on the first invocation
+# but in the configurable 15-minute handler budget instead of the
+# rigid 10s init wall. Idempotent via the `_init_done` flag.
+_init_done = False
+
+
+def _ensure_init() -> None:
+    """Run expensive init once, on the first handler invocation."""
+    global _init_done
+    if _init_done:
+        return
+    import exchange_calendars  # noqa: F401 — heavy; cached in sys.modules
+    import pytz  # noqa: F401
+    from ssm_secrets import load_secrets
+    load_secrets()
+    _init_done = True
 
 
 def is_trading_day(date: datetime.date | None = None) -> bool:
     """Return True if date (default: today) is an NYSE trading day."""
+    from exchange_calendars import get_calendar
     nyse = get_calendar("XNYS")
     d = date or datetime.date.today()
     return nyse.is_session(d)
@@ -71,6 +85,7 @@ def is_early_close(date: datetime.date | None = None) -> bool:
     Early closes: day before July 4th, Black Friday, Christmas Eve.
     These still run — the morning report executes normally.
     """
+    from exchange_calendars import get_calendar
     nyse = get_calendar("XNYS")
     d = date or datetime.date.today()
     try:
@@ -95,6 +110,7 @@ def _is_scheduled_run_time() -> bool:
     Used by the weekday EventBridge rule (12:45+13:45 UTC).
     Only the invocation that lands in 5:45am PT proceeds.
     """
+    import pytz
     pt = datetime.datetime.now(pytz.timezone("America/Los_Angeles"))
     return pt.hour == 5 and 40 <= pt.minute <= 55
 
@@ -111,6 +127,9 @@ def handler(event, context):
     Returns:
         dict with status: "OK" | "SKIPPED" | "ERROR"
     """
+    # Run one-time expensive imports + SSM secrets fetch on the first
+    # invocation. Warm-container calls are a no-op via the _init_done flag.
+    _ensure_init()
     os.environ.setdefault("XDG_CACHE_HOME", "/tmp")
 
     force = event.get("force", False)
