@@ -14,13 +14,28 @@ from typing import Optional
 import yaml
 
 def _find_config(filename: str, subdir: str = "research") -> Path:
-    """Search config repo first, then local config/ directory."""
+    """Search alpha-engine-config repo in the usual local and CI locations.
+
+    `.sample.yaml` files in ./config/ are documentation for open-source viewers
+    ONLY — never loaded by runtime. Real config lives in the private
+    alpha-engine-config repo. Hard-fail if not found.
+    """
+    ws = os.environ.get("GITHUB_WORKSPACE")
     search = [
         Path.home() / "alpha-engine-config" / subdir / filename,
         Path(__file__).parent.parent / "alpha-engine-config" / subdir / filename,
-        Path(__file__).parent / "config" / filename,
     ]
-    return next((p for p in search if p.exists()), Path(__file__).parent / "config" / filename)
+    if ws:
+        search.append(Path(ws) / "alpha-engine-config" / subdir / filename)
+    found = next((p for p in search if p.exists()), None)
+    if found is None:
+        raise FileNotFoundError(
+            f"Could not locate {subdir}/{filename} in alpha-engine-config. "
+            f"Searched: {[str(p) for p in search]}. "
+            "Checkout the config repo at ~/alpha-engine-config (local) or "
+            "$GITHUB_WORKSPACE/alpha-engine-config (CI)."
+        )
+    return found
 
 _CONFIG_PATH = _find_config("universe.yaml")
 _SCORING_CFG_PATH = _find_config("scoring.yaml")
@@ -29,29 +44,13 @@ _logger = logging.getLogger(__name__)
 
 
 def _load() -> dict:
-    if _CONFIG_PATH.exists():
-        with open(_CONFIG_PATH) as f:
-            return yaml.safe_load(f)
-    # Fall back to sample config (CI / fresh clone without local config)
-    sample = _CONFIG_PATH.parent / "universe.sample.yaml"
-    if sample.exists():
-        _logger.warning("config/universe.yaml not found — using universe.sample.yaml")
-        with open(sample) as f:
-            return yaml.safe_load(f)
-    return {}
+    with open(_CONFIG_PATH) as f:
+        return yaml.safe_load(f)
 
 
 def _load_scoring() -> dict:
-    if _SCORING_CFG_PATH.exists():
-        with open(_SCORING_CFG_PATH) as f:
-            return yaml.safe_load(f) or {}
-    # Fall back to sample config (CI / fresh clone without local config)
-    sample = _SCORING_CFG_PATH.parent / "scoring.sample.yaml"
-    if sample.exists():
-        _logger.warning("config/scoring.yaml not found — using scoring.sample.yaml")
-        with open(sample) as f:
-            return yaml.safe_load(f) or {}
-    return {}
+    with open(_SCORING_CFG_PATH) as f:
+        return yaml.safe_load(f) or {}
 
 
 _cfg = _load()
