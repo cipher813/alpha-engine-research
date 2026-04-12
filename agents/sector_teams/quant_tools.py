@@ -101,8 +101,9 @@ def create_quant_tools(context: dict) -> list:
         """Get analyst ratings, price targets, earnings surprises for up to 5 tickers (FMP daily limit). Pass your top candidates only. Returns consensus_rating, num_analysts, mean_target, upside_pct."""
         from data.fetchers.analyst_fetcher import fetch_analyst_consensus as _fetch
 
-        results = {}
-        for t in tickers[:5]:
+        valid, errors = _validate_tickers(tickers, "get_analyst_consensus")
+        results: dict = dict(errors)
+        for t in valid[:5]:
             try:
                 # Pass yfinance close price to avoid a separate FMP quote call
                 cp = None
