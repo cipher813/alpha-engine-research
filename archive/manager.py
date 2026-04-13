@@ -261,11 +261,24 @@ class ArchiveManager:
             result[ticker] = [r[0] for r in rows]
         return result
 
-    def write_signals_json(self, run_date: str, run_time: str, signals: dict) -> None:
-        """Write the machine-readable signals.json to S3 for executor consumption (§A.1)."""
-        payload = {"date": run_date, "run_time": run_time, **signals}
+    def write_signals_json(self, trading_date: str, generated_at: str, signals: dict) -> None:
+        """Write the machine-readable signals.json to S3 for executor consumption (§A.1).
+
+        JSON schema:
+          date     — trading day the signals are FOR (e.g. Monday for a
+                     Saturday scheduled run or Sunday recovery rerun)
+          run_date — ISO timestamp of when the Lambda actually fired
+                     (provenance — distinguishes Sat scheduled from Sun
+                     manual rerun even though both stamp the same trading
+                     day for `date`)
+
+        Internal parameter `generated_at` corresponds to graph state
+        `run_time` (kept for SQL-column compatibility — schema.py uses
+        run_time as a column name across multiple tables).
+        """
+        payload = {"date": trading_date, "run_date": generated_at, **signals}
         body = json.dumps(payload, indent=2, default=str)
-        self._s3_put(f"signals/{run_date}/signals.json", body)
+        self._s3_put(f"signals/{trading_date}/signals.json", body)
         self._s3_put("signals/latest.json", body)
 
     def load_predictions_json(self) -> dict[str, dict]:
