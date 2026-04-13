@@ -170,8 +170,8 @@ class TestWriteSignalsJson:
             "buy_candidates": [],
         }
         archive_in_memory.write_signals_json(
-            run_date="2026-04-11",
-            run_time="00:15:00",
+            trading_date="2026-04-11",
+            generated_at="00:15:00",
             signals=signals,
         )
 
@@ -189,8 +189,8 @@ class TestWriteSignalsJson:
         """Both writes must contain the same JSON payload."""
         signals = {"market_regime": "bull", "universe": []}
         archive_in_memory.write_signals_json(
-            run_date="2026-04-11",
-            run_time="00:15:00",
+            trading_date="2026-04-11",
+            generated_at="00:15:00",
             signals=signals,
         )
 
@@ -211,8 +211,8 @@ class TestWriteSignalsJson:
         """The payload must include date and run_time at the top level."""
         signals = {"market_regime": "neutral"}
         archive_in_memory.write_signals_json(
-            run_date="2026-04-11",
-            run_time="00:15:00",
+            trading_date="2026-04-11",
+            generated_at="00:15:00",
             signals=signals,
         )
 
@@ -221,5 +221,9 @@ class TestWriteSignalsJson:
         payload = json.loads(body_str)
 
         assert payload["date"] == "2026-04-11"
-        assert payload["run_time"] == "00:15:00"
+        # `run_date` field carries the timestamp of when the Lambda fired
+        # (semantically distinct from `date` which is the trading day the
+        # signals are FOR). The internal SQL column is still `run_time`;
+        # only the JSON output schema was renamed for consumer clarity.
+        assert payload["run_date"] == "00:15:00"
         assert payload["market_regime"] == "neutral"

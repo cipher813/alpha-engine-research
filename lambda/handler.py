@@ -79,6 +79,23 @@ def is_trading_day(date: datetime.date | None = None) -> bool:
     return nyse.is_session(d)
 
 
+def next_trading_day(date: datetime.date | None = None) -> datetime.date:
+    """Return the next NYSE trading day on or after the given date.
+
+    If the given date is itself a trading day, returns it unchanged.
+    Otherwise advances one day at a time until a trading day is found.
+    Used to stamp signals with the trading day they're meant for,
+    regardless of which calendar day the research Lambda happened to
+    run on (scheduled Saturday, manual Sunday rerun, etc.).
+    """
+    from exchange_calendars import get_calendar
+    nyse = get_calendar("XNYS")
+    d = date or datetime.date.today()
+    while not nyse.is_session(d):
+        d += datetime.timedelta(days=1)
+    return d
+
+
 def is_early_close(date: datetime.date | None = None) -> bool:
     """
     Return True if the NYSE has an early close today (partial session).
@@ -152,7 +169,21 @@ def handler(event, context):
             return {"status": "SKIPPED", "reason": "market_holiday", "date": str(today)}
 
     early_close = is_early_close(today) if not weekly else False
-    run_date = str(today)
+    # Stamp signals with the next actual trading day rather than today's
+    # UTC date. The Saturday scheduled run fires at 00:00 UTC Saturday
+    # (= Friday 17:00 PT) and any Sunday manual rerun recovers from a
+    # Saturday failure — both produce signals for next-Monday trading.
+    # Using today's date meant:
+    #   - Weekend-dated folders (signals/2026-04-11 + 2026-04-12) with
+    #     identical content, confusing downstream consumers.
+    #   - latest.json.date = Sunday for Monday executor, making signals
+    #     appear "1 day old" on Monday morning (executor age check).
+    #   - Backtester warning on weekend dates with no price data.
+    # Stamping with next_trading_day collapses the pair into a single
+    # signals/2026-04-13/signals.json and latest.json.date = Monday.
+    # Weekday runs unchanged (today is already the trading day).
+    trading_date = next_trading_day(today)
+    run_date = str(trading_date)
 
     # Idempotency gate: skip if signals already written for this date
     if not force:
