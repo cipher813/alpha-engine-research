@@ -1,15 +1,22 @@
 FROM --platform=linux/amd64 public.ecr.aws/lambda/python:3.12
 
-# Install dependencies
-COPY requirements.txt ${LAMBDA_TASK_ROOT}/
-RUN pip install --no-cache-dir \
-    $(grep -vE "^#|^$|^pytest|^python-dotenv|^boto3|^botocore|^s3transfer|^flow-doctor" requirements.txt) \
-    && rm -rf /root/.cache/pip
+# Stage alpha-engine-lib from a local vendor directory.
+# infrastructure/deploy.sh populates vendor/alpha-engine-lib from a
+# sibling checkout (local dev) or GitHub Actions checkout (CI) before
+# Docker build. Mirrors the alpha-engine-predictor staging pattern —
+# the private repo reaches the build context without needing a GitHub
+# PAT or Docker build secret. [arcticdb] pulls arcticdb (used by
+# data/fetchers/price_fetcher.py); [flow_doctor] pulls flow-doctor
+# for the handler's setup_logging call.
+COPY vendor/alpha-engine-lib /tmp/alpha-engine-lib
 
-# Install flow-doctor from local source (copied into build context)
-COPY flow-doctor-pkg/ /tmp/flow-doctor-pkg/
-RUN pip install --no-cache-dir --no-deps /tmp/flow-doctor-pkg/ \
-    && rm -rf /tmp/flow-doctor-pkg /root/.cache/pip
+# Install dependencies. Exclude pytest / python-dotenv / pre-installed
+# Lambda runtime deps (boto3 etc.).
+COPY requirements.txt ${LAMBDA_TASK_ROOT}/
+RUN pip install --no-cache-dir /tmp/alpha-engine-lib[arcticdb,flow_doctor] && \
+    pip install --no-cache-dir \
+    $(grep -vE "^#|^$|^pytest|^python-dotenv|^boto3|^botocore|^s3transfer|^alpha-engine-lib" requirements.txt) \
+    && rm -rf /root/.cache/pip /tmp/alpha-engine-lib
 
 # Copy application code
 COPY agents/ ${LAMBDA_TASK_ROOT}/agents/
@@ -25,6 +32,7 @@ COPY evals/ ${LAMBDA_TASK_ROOT}/evals/
 COPY memory/ ${LAMBDA_TASK_ROOT}/memory/
 COPY rag/ ${LAMBDA_TASK_ROOT}/rag/
 COPY flow-doctor.yaml ${LAMBDA_TASK_ROOT}/
+COPY preflight.py ${LAMBDA_TASK_ROOT}/
 COPY retry.py ${LAMBDA_TASK_ROOT}/
 COPY health_status.py ${LAMBDA_TASK_ROOT}/
 COPY ssm_secrets.py ${LAMBDA_TASK_ROOT}/
