@@ -158,6 +158,15 @@ def handler(event, context):
     _ensure_init()
     os.environ.setdefault("XDG_CACHE_HOME", "/tmp")
 
+    # Preflight runs AFTER _ensure_init so ANTHROPIC_API_KEY (fetched from
+    # SSM by load_secrets()) is populated in the environment. Fails fast on
+    # missing key, unreachable S3, or missing AWS_REGION.
+    from preflight import ResearchPreflight
+    ResearchPreflight(
+        bucket=os.environ.get("RESEARCH_BUCKET", "alpha-engine-research"),
+        mode="weekly",
+    ).run()
+
     force = event.get("force", False)
     weekly = event.get("weekly_run", False)
     fd = None

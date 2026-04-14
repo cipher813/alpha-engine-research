@@ -190,6 +190,12 @@ def handler(event, context):
     if not is_market_open():
         return {"status": "SKIPPED", "reason": "market_closed"}
 
+    # Preflight: AWS_REGION + S3 bucket reachable. Runs after the
+    # market-open short-circuit so we don't pay the S3 head_bucket call
+    # on ~70% of fires that land outside market hours.
+    from preflight import ResearchPreflight
+    ResearchPreflight(bucket=S3_BUCKET, mode="alerts").run()
+
     # Download research.db for prior closes + ratings
     local_db = os.path.join(tempfile.gettempdir(), "research_alerts.db")
     s3 = boto3.client("s3", region_name=AWS_REGION)
