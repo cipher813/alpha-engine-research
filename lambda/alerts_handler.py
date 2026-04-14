@@ -27,6 +27,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from ssm_secrets import load_secrets
 load_secrets()
 
+# Structured logging + flow-doctor singleton from alpha-engine-lib.
+# See lambda/handler.py for the full rationale. flow-doctor.yaml ships
+# in the Lambda task root (Dockerfile.alerts COPY).
+from alpha_engine_lib.logging import setup_logging
+_FLOW_DOCTOR_YAML = os.path.join(os.environ.get("LAMBDA_TASK_ROOT", os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "flow-doctor.yaml")
+setup_logging("research-alerts", flow_doctor_yaml=_FLOW_DOCTOR_YAML)
+
 from config import (
     PRICE_MOVE_THRESHOLD_PCT,
     EMAIL_RECIPIENTS,
@@ -182,6 +189,12 @@ def handler(event, context):
     """AWS Lambda handler for intraday price alerts."""
     if not is_market_open():
         return {"status": "SKIPPED", "reason": "market_closed"}
+
+    # Preflight: AWS_REGION + S3 bucket reachable. Runs after the
+    # market-open short-circuit so we don't pay the S3 head_bucket call
+    # on ~70% of fires that land outside market hours.
+    from preflight import ResearchPreflight
+    ResearchPreflight(bucket=S3_BUCKET, mode="alerts").run()
 
     # Download research.db for prior closes + ratings
     local_db = os.path.join(tempfile.gettempdir(), "research_alerts.db")

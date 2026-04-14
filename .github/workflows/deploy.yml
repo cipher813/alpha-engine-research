@@ -42,15 +42,18 @@ jobs:
         with:
           path: alpha-engine-research
 
-      # deploy.sh bundles flow-doctor from a sibling directory into the
-      # Docker build context. The GitHub-hosted runner does not carry the
-      # local ~/Development layout, so we check it out explicitly here.
-      # flow-doctor is a public repo and requires no additional auth.
-      - name: Checkout flow-doctor
+      # deploy.sh stages alpha-engine-lib into vendor/alpha-engine-lib
+      # so Dockerfile can COPY it. The lib is private — needs a PAT with
+      # Contents: read on cipher813/alpha-engine-lib, stored as the
+      # ALPHA_ENGINE_LIB_TOKEN repository secret. Replaces the old
+      # flow-doctor checkout; flow-doctor now ships transitively via
+      # alpha-engine-lib[flow_doctor].
+      - name: Checkout alpha-engine-lib
         uses: actions/checkout@v4
         with:
-          repository: cipher813/flow-doctor
-          path: flow-doctor
+          repository: cipher813/alpha-engine-lib
+          path: alpha-engine-lib
+          token: ${{ secrets.ALPHA_ENGINE_LIB_TOKEN }}
 
       # deploy.sh also stages proprietary prompt templates from
       # cipher813/alpha-engine-config into the build context. That repo is
@@ -81,11 +84,11 @@ jobs:
       - name: Deploy main Lambda (alpha-engine-research-runner)
         working-directory: alpha-engine-research
         env:
-          # deploy.sh defaults FLOW_DOCTOR_DIR and CONFIG_REPO_DIR to
+          # deploy.sh defaults LIB_REPO_DIR and CONFIG_REPO_DIR to
           # $(dirname $(pwd))/<name>, which resolves to $GITHUB_WORKSPACE/<name>
           # — exactly where the checkout steps above placed them. Explicit
           # exports here are belt-and-suspenders for readers.
-          FLOW_DOCTOR_DIR: ${{ github.workspace }}/flow-doctor
+          LIB_REPO_DIR: ${{ github.workspace }}/alpha-engine-lib
           CONFIG_REPO_DIR: ${{ github.workspace }}/alpha-engine-config
         run: bash infrastructure/deploy.sh main
 

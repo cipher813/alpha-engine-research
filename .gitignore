@@ -25,6 +25,13 @@ build/
 lambda/package/
 lambda-main.zip
 lambda-alerts.zip
+
+# Docker vendor staging (alpha-engine-lib copied here by
+# infrastructure/deploy.sh before build, cleaned up on exit).
+# Previous flow-doctor-pkg/ staging is obsolete — flow-doctor is now
+# pulled in transitively via alpha-engine-lib[flow_doctor].
+vendor/
+flow-doctor-pkg/
 constituents_cache.csv
 run.log
 *-design-*.md
