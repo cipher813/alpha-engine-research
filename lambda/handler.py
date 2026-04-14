@@ -45,6 +45,15 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from graph.langsmith_pandas_patch import install as _install_ls_patch
 _install_ls_patch()
 
+# Structured logging + flow-doctor singleton from alpha-engine-lib. When
+# FLOW_DOCTOR_ENABLED=1, attaches a FlowDoctorHandler at ERROR so every
+# log.error() call routes through flow-doctor's dispatch (email +
+# optional GitHub issue) without explicit fd.report() plumbing.
+# flow-doctor.yaml ships in the Lambda task root (Dockerfile COPY).
+from alpha_engine_lib.logging import setup_logging, get_flow_doctor
+_FLOW_DOCTOR_YAML = os.path.join(os.environ.get("LAMBDA_TASK_ROOT", os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "flow-doctor.yaml")
+setup_logging("research", flow_doctor_yaml=_FLOW_DOCTOR_YAML)
+
 logger = logging.getLogger(__name__)
 
 # Expensive init is deferred to the first handler invocation to keep
@@ -241,7 +250,10 @@ def handler(event, context):
             is_early_close=early_close,
         )
         initial_state["performance_summary"] = perf_summary
-        initial_state["flow_doctor"] = None
+        # Carry the shared flow-doctor instance on state so downstream
+        # graph nodes can call fd.report() explicitly when needed. None
+        # when FLOW_DOCTOR_ENABLED=0 (local dev / --dry-run).
+        initial_state["flow_doctor"] = get_flow_doctor()
 
         # Extract episodic memories from newly completed signal outcomes
         try:

@@ -27,6 +27,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from ssm_secrets import load_secrets
 load_secrets()
 
+# Structured logging + flow-doctor singleton from alpha-engine-lib.
+# See lambda/handler.py for the full rationale. flow-doctor.yaml ships
+# in the Lambda task root (Dockerfile.alerts COPY).
+from alpha_engine_lib.logging import setup_logging
+_FLOW_DOCTOR_YAML = os.path.join(os.environ.get("LAMBDA_TASK_ROOT", os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "flow-doctor.yaml")
+setup_logging("research-alerts", flow_doctor_yaml=_FLOW_DOCTOR_YAML)
+
 from config import (
     PRICE_MOVE_THRESHOLD_PCT,
     EMAIL_RECIPIENTS,
