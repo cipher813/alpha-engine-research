@@ -983,95 +983,89 @@ def archive_writer(state: ResearchState) -> dict:
 
     # ── Evaluation logging ──────────────────────────────────────────────────
     # Log all ~900 stocks with tech indicators for population baseline analysis.
-    try:
-        scanner_universe = state.get("scanner_universe", [])
-        technical_scores = state.get("technical_scores", {})
-        sector_map = state.get("sector_map", {})
-        # Build set of tickers that any team picked (quant top-10 or recommended)
-        team_picked_tickers: set[str] = set()
-        for _tid, _out in team_outputs.items():
-            for _rec in _out.get("recommendations", []):
-                team_picked_tickers.add(_rec.get("ticker", ""))
-            for _pick in _out.get("quant_output", {}).get("ranked_picks", []):
-                if isinstance(_pick, dict):
-                    team_picked_tickers.add(_pick.get("ticker", ""))
+    # These writes feed the backtester's weekly grading of scanner / sector
+    # team / CIO components against universe_returns. Must not be silently
+    # swallowed — a missed week leaves a permanent hole in grade history.
+    scanner_universe = state.get("scanner_universe", [])
+    technical_scores = state.get("technical_scores", {})
+    sector_map = state.get("sector_map", {})
+    # Build set of tickers that any team picked (quant top-10 or recommended)
+    team_picked_tickers: set[str] = set()
+    for _tid, _out in team_outputs.items():
+        for _rec in _out.get("recommendations", []):
+            team_picked_tickers.add(_rec.get("ticker", ""))
+        for _pick in _out.get("quant_output", {}).get("ranked_picks", []):
+            if isinstance(_pick, dict):
+                team_picked_tickers.add(_pick.get("ticker", ""))
 
-        scanner_evals = []
-        for ticker in scanner_universe:
-            ts = technical_scores.get(ticker, {})
-            scanner_evals.append({
-                "ticker": ticker,
-                "eval_date": run_date,
-                "sector": sector_map.get(ticker),
-                "tech_score": ts.get("technical_score"),
-                "rsi_14": ts.get("rsi_14"),
-                "atr_pct": ts.get("atr_pct") or ts.get("atr_14_pct"),
-                "price_vs_ma200": ts.get("price_vs_ma200"),
-                "current_price": ts.get("current_price"),
-                "avg_volume_20d": ts.get("avg_volume_20d"),
-                "quant_filter_pass": 1 if ticker in team_picked_tickers else 0,
-            })
-        am.write_scanner_evaluations(scanner_evals)
-        logger.info("[archive_writer] logged %d scanner evaluations", len(scanner_evals))
-    except Exception as e:
-        logger.warning("Failed to write scanner evaluations: %s", e)
+    scanner_evals = [
+        {
+            "ticker": ticker,
+            "eval_date": run_date,
+            "sector": sector_map.get(ticker),
+            "tech_score": ts.get("technical_score"),
+            "rsi_14": ts.get("rsi_14"),
+            "atr_pct": ts.get("atr_pct") or ts.get("atr_14_pct"),
+            "price_vs_ma200": ts.get("price_vs_ma200"),
+            "current_price": ts.get("current_price"),
+            "avg_volume_20d": ts.get("avg_volume_20d"),
+            "quant_filter_pass": 1 if ticker in team_picked_tickers else 0,
+        }
+        for ticker, ts in ((t, technical_scores.get(t, {})) for t in scanner_universe)
+    ]
+    am.write_scanner_evaluations(scanner_evals)
+    logger.info("[archive_writer] logged %d scanner evaluations", len(scanner_evals))
 
     # Log quant top-10 per team + final recommendations
-    try:
-        team_candidate_records = []
-        for team_id, output in team_outputs.items():
-            quant_picks = output.get("quant_output", {}).get("ranked_picks", [])
-            recommended_tickers = {
-                r.get("ticker", "") for r in output.get("recommendations", [])
-            }
-            for rank, pick in enumerate(quant_picks, 1):
-                if not isinstance(pick, dict) or "ticker" not in pick:
-                    continue
-                ticker = pick["ticker"]
-                # Find qual score from recommendations if available
-                qual_score = None
-                for rec in output.get("recommendations", []):
-                    if rec.get("ticker") == ticker:
-                        qual_score = rec.get("qual_score")
-                        break
-                team_candidate_records.append({
-                    "ticker": ticker,
-                    "eval_date": run_date,
-                    "team_id": team_id,
-                    "quant_rank": rank,
-                    "quant_score": pick.get("quant_score"),
-                    "qual_score": qual_score,
-                    "team_recommended": 1 if ticker in recommended_tickers else 0,
-                })
-        am.write_team_candidates(team_candidate_records)
-        logger.info("[archive_writer] logged %d team candidates", len(team_candidate_records))
-    except Exception as e:
-        logger.warning("Failed to write team candidates: %s", e)
-
-    # Log all CIO decisions (ADVANCE/REJECT/DEADLOCK)
-    try:
-        cio_eval_records = []
-        for decision in state.get("ic_decisions", []):
-            ticker = decision.get("ticker", "")
-            thesis = investment_theses.get(ticker, {})
-            cio_eval_records.append({
+    team_candidate_records = []
+    for team_id, output in team_outputs.items():
+        quant_picks = output.get("quant_output", {}).get("ranked_picks", [])
+        recommended_tickers = {
+            r.get("ticker", "") for r in output.get("recommendations", [])
+        }
+        for rank, pick in enumerate(quant_picks, 1):
+            if not isinstance(pick, dict) or "ticker" not in pick:
+                continue
+            ticker = pick["ticker"]
+            # Find qual score from recommendations if available
+            qual_score = None
+            for rec in output.get("recommendations", []):
+                if rec.get("ticker") == ticker:
+                    qual_score = rec.get("qual_score")
+                    break
+            team_candidate_records.append({
                 "ticker": ticker,
                 "eval_date": run_date,
-                "team_id": thesis.get("team_id"),
-                "quant_score": thesis.get("quant_score"),
-                "qual_score": thesis.get("qual_score"),
-                "combined_score": thesis.get("weighted_base"),
-                "macro_shift": thesis.get("macro_shift"),
-                "final_score": thesis.get("final_score"),
-                "cio_decision": decision.get("decision", "UNKNOWN"),
-                "cio_conviction": decision.get("conviction"),
-                "cio_rank": decision.get("rank"),
-                "rationale": decision.get("rationale"),
+                "team_id": team_id,
+                "quant_rank": rank,
+                "quant_score": pick.get("quant_score"),
+                "qual_score": qual_score,
+                "team_recommended": 1 if ticker in recommended_tickers else 0,
             })
-        am.write_cio_evaluations(cio_eval_records)
-        logger.info("[archive_writer] logged %d CIO evaluations", len(cio_eval_records))
-    except Exception as e:
-        logger.warning("Failed to write CIO evaluations: %s", e)
+    am.write_team_candidates(team_candidate_records)
+    logger.info("[archive_writer] logged %d team candidates", len(team_candidate_records))
+
+    # Log all CIO decisions (ADVANCE/REJECT/DEADLOCK)
+    cio_eval_records = []
+    for decision in state.get("ic_decisions", []):
+        ticker = decision.get("ticker", "")
+        thesis = investment_theses.get(ticker, {})
+        cio_eval_records.append({
+            "ticker": ticker,
+            "eval_date": run_date,
+            "team_id": thesis.get("team_id"),
+            "quant_score": thesis.get("quant_score"),
+            "qual_score": thesis.get("qual_score"),
+            "combined_score": thesis.get("weighted_base"),
+            "macro_shift": thesis.get("macro_shift"),
+            "final_score": thesis.get("final_score"),
+            "cio_decision": decision.get("decision", "UNKNOWN"),
+            "cio_conviction": decision.get("conviction"),
+            "cio_rank": decision.get("rank"),
+            "rationale": decision.get("rationale"),
+        })
+    am.write_cio_evaluations(cio_eval_records)
+    logger.info("[archive_writer] logged %d CIO evaluations", len(cio_eval_records))
 
     # Upload DB
     try:
