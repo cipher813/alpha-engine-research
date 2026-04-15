@@ -88,20 +88,32 @@ def is_trading_day(date: datetime.date | None = None) -> bool:
     return nyse.is_session(d)
 
 
-def next_trading_day(date: datetime.date | None = None) -> datetime.date:
-    """Return the next NYSE trading day on or after the given date.
+def most_recent_trading_day(date: datetime.date | None = None) -> datetime.date:
+    """Return the most recent NYSE trading day on or before the given date.
 
     If the given date is itself a trading day, returns it unchanged.
-    Otherwise advances one day at a time until a trading day is found.
-    Used to stamp signals with the trading day they're meant for,
-    regardless of which calendar day the research Lambda happened to
-    run on (scheduled Saturday, manual Sunday rerun, etc.).
+    Otherwise rewinds one day at a time until a trading day is found.
+
+    Used to stamp signals, scanner_evaluations, team_candidates, and
+    cio_evaluations with the data-close date research actually saw —
+    the prior trading day's close is the anchor for 5d-forward-return
+    evaluation and aligns with standard quant evaluation convention
+    (measure signals against the close that fed them).
+
+    Replaces the earlier `next_trading_day` stamping (2026-04-13,
+    commit 9a94e34), which was anchored to the Monday the signals
+    would be traded on. That fixed the executor's staleness check at
+    the cost of shifting the evaluator's 5d forward window by one
+    trading day, producing Mon->Mon returns instead of the cleaner
+    Fri->Fri window. Executor's staleness check uses a 7-day calendar
+    threshold so Friday-stamped signals read Monday morning (age=3d)
+    remain well within tolerance.
     """
     from exchange_calendars import get_calendar
     nyse = get_calendar("XNYS")
     d = date or datetime.date.today()
     while not nyse.is_session(d):
-        d += datetime.timedelta(days=1)
+        d -= datetime.timedelta(days=1)
     return d
 
 
@@ -188,20 +200,22 @@ def handler(event, context):
     ).run()
 
     early_close = is_early_close(today) if not weekly else False
-    # Stamp signals with the next actual trading day rather than today's
-    # UTC date. The Saturday scheduled run fires at 00:00 UTC Saturday
-    # (= Friday 17:00 PT) and any Sunday manual rerun recovers from a
-    # Saturday failure — both produce signals for next-Monday trading.
-    # Using today's date meant:
-    #   - Weekend-dated folders (signals/2026-04-11 + 2026-04-12) with
-    #     identical content, confusing downstream consumers.
-    #   - latest.json.date = Sunday for Monday executor, making signals
-    #     appear "1 day old" on Monday morning (executor age check).
-    #   - Backtester warning on weekend dates with no price data.
-    # Stamping with next_trading_day collapses the pair into a single
-    # signals/2026-04-13/signals.json and latest.json.date = Monday.
-    # Weekday runs unchanged (today is already the trading day).
-    trading_date = next_trading_day(today)
+    # Stamp signals with the *most recent* trading day (data close that
+    # fed this run), not today and not the next trading day. Rule:
+    # everything in the system keys on "most recent trading day with
+    # data available at run time" — scanner_evaluations, team_candidates,
+    # cio_evaluations, signal folders, latest.json, and universe_returns
+    # all anchor to the same Friday-close (or prior close if a holiday
+    # shortened the week).
+    #
+    # This superseds commit 9a94e34 (2026-04-13) which stamped with
+    # next_trading_day. That fixed executor staleness but shifted the
+    # evaluator's 5d-forward window by one trading day (Mon->Mon
+    # instead of Fri->Fri) — a less defensible measurement convention.
+    # The executor's staleness check uses a 7-day calendar threshold
+    # (signal_reader._warn_if_stale), so Friday-stamped signals read
+    # Monday morning show age=3 days, well inside tolerance.
+    trading_date = most_recent_trading_day(today)
     run_date = str(trading_date)
 
     # Idempotency gate: skip if signals already written for this date
