@@ -8,6 +8,17 @@ technical:
     # higher RSI (trending markets stay "overbought" longer); bear regime
     # caps the oversold-zone bonus (oversold in a downtrend can signal
     # further decline, not a bounce). Tune these to your own research.
+    #
+    # bear.max_oversold_score raised 75 → 85 as part of the 2026-04-16
+    # conservatism-reduction pass. The Tier 0 quant regime classifier was
+    # retired (alpha-engine-predictor PR #34), leaving the LLM macro_regime
+    # as the only regime signal — and an unvalidated one. Capping bear-regime
+    # oversold scores at 75 when the regime label itself is noisy double-
+    # penalizes every oversold name any time the macro agent says "bear",
+    # which is exactly when mean-reversion opportunities appear. 10-point
+    # lift is a moderate relaxation; full parity with bull (100) would
+    # remove the regime-conditioning entirely — not yet warranted given
+    # LLM regime signal is our only regime signal.
     bull:
       overbought: 80
       oversold: 35
@@ -15,7 +26,7 @@ technical:
     bear:
       overbought: 70
       oversold: 40
-      max_oversold_score: 75.0
+      max_oversold_score: 85.0
     neutral:
       overbought: 70
       oversold: 30
@@ -47,11 +58,20 @@ technical:
     raw_scale: 3.0
 
   composite_weights:
+    # Weights distribute the composite technical score across 5 sub-signals.
+    # Must sum to 1.0. momentum weight bumped 0.20 → 0.25 as part of the
+    # 2026-04-16 conservatism pass — the 2-year price-momentum sub-signal
+    # is what catches breakouts/trend changes, which is exactly what the
+    # low-vol portfolio has been missing. Weight pulled equally from the
+    # MA50/MA200 trend-following sub-signals (0.20 → 0.175 each): in a
+    # bull market MA-based signals already over-reward established winners
+    # and underweight the new names accelerating; trimming them redirects
+    # attention to recent momentum.
     rsi: 0.20
     macd: 0.20
-    ma50: 0.20
-    ma200: 0.20
-    momentum: 0.20
+    ma50: 0.175
+    ma200: 0.175
+    momentum: 0.25
 
   predictor_enrichment:
     confidence_gate: 0.60
