@@ -14,12 +14,32 @@ universe:
   - ticker: TSLA
     sector: Consumer Discretionary
 
+# Scoring + rating + scanner knobs. These values are the "objectives" —
+# dial them up/down to shift the system's risk posture as a whole. Defaults
+# updated 2026-04-16 after the portfolio-vs-SPY conservatism audit showed
+# the system was meaningfully underinvested relative to its benchmark,
+# with much lower realized vol than SPY.
+#
+#   buy_threshold     (lower → more BUY signals)
+#   max_atr_pct       (higher → admits more volatile names the scanner previously rejected)
+#   quant/qual split  (more quant → less LLM-thesis-dependent gatekeeping)
+#   deep_value_min_consensus (lower → admits contrarian oversolds analysts don't cover)
+#
+# Backtester auto-tunes scoring_weights via config/scoring_weights.json
+# in S3 — changes here are initial points, not final. See aggregator.py.
+#
+# Follow-up (Phase 2, tracked in ROADMAP Predictor section):
+# - require_dual_signoff toggle (CIO prompt branch, "quant AND qual" → "OR")
+# - momentum_weight exposed in scoring.yaml
+# - bear_regime_max_oversold_score re-tune
 scoring_weights:
-  quant: 0.50
-  qual: 0.50
+  quant: 0.60         # was 0.50 — reduces LLM-thesis dependency; quant signals are
+                      # walk-forward-validated while qual is point-in-time narrative
+  qual: 0.40          # was 0.50
 
 rating_thresholds:
-  buy: 65             # 12-month horizon: conviction holds should rate BUY by default
+  buy: 60             # was 65. 5pp below the old bar; still above the 40-65 HOLD
+                      # band midpoint so we're not flooding the book with marginal picks
   sell: 40
 
 scanner:
@@ -27,6 +47,11 @@ scanner:
   candidate_universe: sp500_sp400    # sp500 | sp500_sp400 | russell1000
   min_avg_volume: 500000
   min_price: 10
+  max_atr_pct: 12.0         # was 8.0. Admits high-vol growth names (RKLB ~5%, NVDA ~3-4%)
+                            # that were being culled despite clearing all other filters.
+                            # Position sizing still dampens dollar exposure via the
+                            # executor's ATR-scaled sizing, so per-name risk stays bounded.
+  deep_value_max_atr_pct: 15.0  # was 12.0. Relaxed proportionally for the contrarian path.
 
   # Tiered rotation thresholds (§6.3 Stage 5)
   rotation_tiers:
@@ -47,7 +72,10 @@ scanner:
   # Deep value path
   deep_value_path: true
   deep_value_max_rsi: 35
-  deep_value_min_consensus: Buy
+  deep_value_min_consensus: Hold  # was "Buy" — admit contrarian oversolds analysts
+                                  # haven't upgraded yet. Primary signal is still
+                                  # the RSI < 35 oversold condition; the analyst
+                                  # rating just screens out actively-dumped names.
   deep_value_max_candidates: 10
 
 archive:
