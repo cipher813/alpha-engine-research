@@ -230,19 +230,20 @@ def fetch_data(state: ResearchState) -> dict:
     except Exception as e:
         logger.debug("[fetch_data] daily_closes not available: %s", e)
 
-    # ── yfinance fallback: only fetch tickers NOT in feature store ───────────
+    # ── ArcticDB OHLCV read: skip tickers already covered by feature store ───
     # Population tickers always fetched (agents need raw OHLCV for deep analysis).
-    # Scanner universe tickers covered by feature store are SKIPPED.
+    # Scanner universe tickers covered by feature store are SKIPPED — their
+    # technical indicators are already populated above.
     _fs_covered = set(_fs_features.keys()) if _fs_features else set()
-    yf_tickers = [t for t in all_tickers if t not in _fs_covered or t in population_tickers]
-    if len(yf_tickers) < len(all_tickers):
+    ohlcv_tickers = [t for t in all_tickers if t not in _fs_covered or t in population_tickers]
+    if len(ohlcv_tickers) < len(all_tickers):
         logger.info(
-            "[fetch_data] yfinance: fetching %d tickers (skipped %d from feature store)",
-            len(yf_tickers), len(all_tickers) - len(yf_tickers),
+            "[fetch_data] ArcticDB: reading %d tickers (skipped %d from feature store)",
+            len(ohlcv_tickers), len(all_tickers) - len(ohlcv_tickers),
         )
-    price_data = fetch_price_data(yf_tickers, period="3mo") if yf_tickers else {}
+    price_data = fetch_price_data(ohlcv_tickers, period="3mo") if ohlcv_tickers else {}
 
-    # Fill current_price from yfinance for tickers that had feature store data
+    # Fill current_price from ArcticDB for tickers that had feature store data
     # but no daily_closes price
     for ticker in technical_scores:
         if technical_scores[ticker]["current_price"] == 0.0:
