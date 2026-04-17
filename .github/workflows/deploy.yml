@@ -20,6 +20,13 @@ on:
       - 'infrastructure/deploy.sh'
       - '.github/workflows/deploy.yml'
   workflow_dispatch:  # manual trigger from Actions UI
+  repository_dispatch:
+    # Fired by alpha-engine-config's notify-research.yml when a push to its
+    # main branch changes research/**. Rebuilds the Docker image so that
+    # gitignored proprietary prompts + yaml configs (baked into the image
+    # at build time via infrastructure/deploy.sh's CONFIG_REPO_DIR stage)
+    # propagate to the live Lambda without a manual trigger.
+    types: [config-changed]
 
 # Concurrency: only one deploy at a time, cancel in-progress runs on new push
 concurrency:
@@ -94,7 +101,14 @@ jobs:
 
       - name: Report deployed version
         run: |
-          echo "Deployed commit: ${{ github.sha }}"
+          echo "Triggered by: ${{ github.event_name }}"
+          echo "Research commit: ${{ github.sha }}"
+          # When the deploy was fired by a config-repo dispatch, surface
+          # which config SHA it was built against so the Lambda version is
+          # traceable across both repos.
+          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            echo "Config commit: ${{ github.event.client_payload.config_sha }}"
+          fi
           aws lambda get-function \
             --function-name alpha-engine-research-runner \
             --query "Configuration.[LastModified,CodeSha256]" \
