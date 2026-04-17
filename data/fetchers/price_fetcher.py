@@ -1,8 +1,21 @@
 """
-Price fetcher — downloads daily OHLCV data and computes technical indicators.
+Price fetcher — reads daily OHLCV from ArcticDB and constituents from S3.
 
-S3-first: tries pre-collected data from alpha-engine-data repo, falls back
-to yfinance if S3 data is missing or stale.
+Phase 7c (2026-04-17) rip-and-replaced the yfinance + slim-cache + Wikipedia
+fallback chain. The weekly research Lambda is now a pure consumer of
+alpha-engine-data outputs:
+
+  * Prices → ArcticDB ``universe`` library (written by alpha-engine-data's
+    daily DailyData step + weekly backfill).
+  * Constituents → ``s3://<bucket>/market_data/constituents.json`` (written
+    by alpha-engine-data's weekly DataPhase1).
+
+Both sources hard-fail on miss — no yfinance / FRED / Wikipedia fallback.
+Matches the predictor's Phase 7a pattern and the ``feedback_hard_fail_until_stable``
++ ``feedback_no_silent_fails`` conventions.
+
+``fetch_short_interest`` still calls yfinance ``Ticker.info`` because short-float
+data isn't yet collected upstream — tracked as a Phase 7c follow-up in ROADMAP.
 """
 
 from __future__ import annotations
@@ -11,213 +24,138 @@ import logging
 import os
 from typing import Optional
 
+import arcticdb as adb  # Hard dep: matches predictor's Phase 7a pattern.
+                        # If the Lambda image lacks arcticdb, fail loud at
+                        # cold start rather than silently degrading.
 import pandas as pd
 import yfinance as yf
-
-from retry import retry
 
 logger = logging.getLogger(__name__)
 
 _S3_BUCKET = os.environ.get("RESEARCH_BUCKET", "alpha-engine-research")
 _MARKET_DATA_PREFIX = "market_data/"
 
+# OHLCV columns in ArcticDB's universe library (title-case; matches the schema
+# alpha-engine-data's builders/backfill.py + daily_append.py write).
+_ARCTIC_OHLCV_COLS = ["Open", "High", "Low", "Close", "Volume"]
 
-class PriceFetchError(RuntimeError):
-    """Raised when price data fetch returns insufficient results."""
-    pass
+# Max fraction of per-ticker read failures tolerated before we treat the read as
+# a pipeline failure. Matches the predictor's Phase 7a threshold.
+_MAX_ERR_RATE = 0.05
 
-
-_BATCH_SIZE = 100
-_BATCH_DELAY_SECS = 2
-_MIN_FETCH_RATIO = 0.80
-_MIN_EXPECTED_CONSTITUENTS = 800  # S&P 500 (~503) + S&P 400 (~400), minus overlaps
-
-# ── yfinance request counter (per-Lambda-invocation) ─────────────────────────
+# yfinance request counter (short-interest path only; kept for telemetry).
 _yf_request_count = 0
 
 
+class PriceFetchError(RuntimeError):
+    """Raised when ArcticDB reads fail to meet quality thresholds."""
+    pass
+
+
 def get_yf_request_count() -> int:
-    """Return total yfinance requests made this invocation."""
+    """Return total yfinance requests made this invocation (short-interest only)."""
     return _yf_request_count
 
 
-def _make_rate_limited_session():
-    """Create a requests session with rate limiting (max 2 requests per 5 seconds)."""
+def _connect_arctic() -> object:
+    """Open the ArcticDB ``universe`` library. Hard-fail on unreachable."""
+    region = os.environ.get("AWS_REGION", "us-east-1")
+    uri = f"s3s://s3.{region}.amazonaws.com:{_S3_BUCKET}?path_prefix=arcticdb&aws_auth=true"
     try:
-        from requests_ratelimiter import LimiterSession, RequestRate, Limiter, Duration
-        rate = RequestRate(2, Duration.SECOND * 5)
-        session = LimiterSession(limiter=Limiter(rate))
-        session.headers["User-agent"] = "alpha-engine-research/1.0"
-        return session
-    except ImportError:
-        logger.warning("requests_ratelimiter not installed, using default session")
-        return None
-
-
-@retry(max_attempts=2, retryable=(Exception,), label="yfinance")
-def _download_batch(tickers: list[str], period: str, session=None) -> dict[str, pd.DataFrame]:
-    """Download one batch of tickers and return per-ticker DataFrames."""
-    result: dict[str, pd.DataFrame] = {}
-    if not tickers:
-        return result
-
-    raw = yf.download(
-        tickers=tickers,
-        period=period,
-        interval="1d",
-        auto_adjust=True,
-        progress=False,
-        group_by="ticker",
-        threads=True,
-        session=session,
-    )
-
-    if len(tickers) == 1:
-        ticker = tickers[0]
-        df = raw.copy()
-        df.index = pd.to_datetime(df.index)
-        df = df.dropna(subset=["Close"])
-        result[ticker] = df
-    else:
-        for ticker in tickers:
-            try:
-                df = raw[ticker].copy()
-                df.index = pd.to_datetime(df.index)
-                df = df.dropna(subset=["Close"])
-                result[ticker] = df
-            except (KeyError, AttributeError):
-                result[ticker] = pd.DataFrame()
-
-    return result
-
-
-def _load_prices_from_arcticdb(tickers: list[str], lookback_days: int = 90) -> dict[str, pd.DataFrame] | None:
-    """Try to load price data from ArcticDB universe library."""
-    try:
-        import os
-        import arcticdb as adb
-        from datetime import datetime, timedelta
-
-        region = os.environ.get("AWS_REGION", "us-east-1")
-        uri = f"s3s://s3.{region}.amazonaws.com:{_S3_BUCKET}?path_prefix=arcticdb&aws_auth=true"
         arctic = adb.Arctic(uri)
-        universe = arctic.get_library("universe")
-
-        cutoff = (datetime.now() - timedelta(days=lookback_days)).strftime("%Y-%m-%d")
-        result: dict[str, pd.DataFrame] = {}
-        failed = 0
-
-        for ticker in tickers:
-            try:
-                df = universe.read(ticker, date_range=(cutoff, None)).data
-                if not df.empty:
-                    # Keep only OHLCV columns for compatibility
-                    ohlcv = [c for c in ["Open", "High", "Low", "Close", "Volume"] if c in df.columns]
-                    result[ticker] = df[ohlcv]
-            except Exception:
-                failed += 1
-
-        if result and len(result) >= len(tickers) * 0.5:
-            logger.info("[data_source=arcticdb] Loaded %d/%d ticker prices (%d missing)",
-                        len(result), len(tickers), failed)
-            return result
-    except ImportError:
-        logger.debug("arcticdb not installed — trying S3 slim cache")
-    except Exception as e:
-        logger.debug("[data_source=arcticdb] ArcticDB price load failed: %s", e)
-    return None
+        return arctic.get_library("universe")
+    except Exception as exc:
+        raise PriceFetchError(
+            f"ArcticDB unreachable at {uri}: {exc}"
+        ) from exc
 
 
-def _load_prices_from_s3(tickers: list[str], lookback_days: int = 90) -> dict[str, pd.DataFrame] | None:
-    """Try to load price data from alpha-engine-data's slim cache on S3."""
-    try:
-        import boto3
-        import io
-        from datetime import datetime, timedelta
-        s3 = boto3.client("s3")
-        cutoff = datetime.now() - timedelta(days=lookback_days)
-        result: dict[str, pd.DataFrame] = {}
-        failed = 0
-        for ticker in tickers:
-            try:
-                key = f"predictor/price_cache_slim/{ticker}.parquet"
-                obj = s3.get_object(Bucket=_S3_BUCKET, Key=key)
-                df = pd.read_parquet(io.BytesIO(obj["Body"].read()))
-                # Slice to lookback period
-                df.index = pd.to_datetime(df.index)
-                df = df[df.index >= cutoff]
-                if not df.empty:
-                    result[ticker] = df
-            except Exception:
-                failed += 1
-        if result and len(result) >= len(tickers) * 0.5:
-            logger.info("[data_source=legacy] Loaded %d/%d ticker prices from S3 slim cache (%d missing)",
-                        len(result), len(tickers), failed)
-            return result
-    except Exception as e:
-        logger.debug("S3 price load failed: %s", e)
-    return None
+def _period_to_lookback_days(period: str) -> int:
+    """Map yfinance-style period strings to calendar-day lookback windows."""
+    mapping = {
+        "1mo": 30,
+        "3mo": 90,
+        "6mo": 180,
+        "1y": 365,
+        "2y": 730,
+        "5y": 1825,
+        "10y": 3650,
+    }
+    if period not in mapping:
+        raise ValueError(
+            f"Unsupported period {period!r}; expected one of {sorted(mapping)}"
+        )
+    return mapping[period]
 
 
 def fetch_price_data(tickers: list[str], period: str = "1y") -> dict[str, pd.DataFrame]:
     """
-    Download daily OHLCV for a list of tickers.
+    Read daily OHLCV for a list of tickers from ArcticDB.
 
-    Priority: S3 slim cache (last 3 months) → yfinance batch download.
-    Returns dict of ticker → DataFrame with columns [Open, High, Low, Close, Volume].
-    Raises PriceFetchError if fewer than 80% of tickers return data.
+    Returns ``{ticker: DataFrame[Open, High, Low, Close, Volume]}`` with a
+    ``DatetimeIndex``. Individual tickers missing from ArcticDB are dropped
+    from the result and logged as warnings; per-ticker error rate above
+    ``_MAX_ERR_RATE`` (5%) raises ``PriceFetchError``.
+
+    Failure semantics (Phase 7c):
+      * ArcticDB unreachable → ``PriceFetchError`` (hard fail).
+      * Per-ticker error rate > 5% → ``PriceFetchError``.
+      * Individual ticker missing/empty → logged WARNING, dropped from output.
+
+    No yfinance / slim-cache fallback. Upstream ArcticDB is canonical; silent
+    fallbacks masked data bugs for days at a time pre-Phase-7a.
     """
-    import time
-
     if not tickers:
         return {}
 
-    # ArcticDB first, then S3 slim cache, then yfinance
-    arctic_result = _load_prices_from_arcticdb(tickers)
-    if arctic_result is not None:
-        return arctic_result
+    lookback_days = _period_to_lookback_days(period)
+    end_ts = pd.Timestamp.utcnow().normalize().tz_localize(None)
+    start_ts = end_ts - pd.Timedelta(days=lookback_days)
 
-    s3_result = _load_prices_from_s3(tickers)
-    if s3_result is not None:
-        return s3_result
+    universe_lib = _connect_arctic()
 
-    global _yf_request_count
-
-    session = _make_rate_limited_session()
-    batches = [tickers[i:i + _BATCH_SIZE] for i in range(0, len(tickers), _BATCH_SIZE)]
     result: dict[str, pd.DataFrame] = {}
-
-    for i, batch in enumerate(batches):
-        if i > 0:
-            time.sleep(_BATCH_DELAY_SECS)
+    n_err = 0
+    for ticker in tickers:
         try:
-            result.update(_download_batch(batch, period, session=session))
-            _yf_request_count += 1
-            n_ok = sum(1 for t in batch if t in result and not result[t].empty)
-            logger.info("Batch %d/%d: %d/%d tickers OK", i + 1, len(batches), n_ok, len(batch))
-        except Exception as e:
-            _yf_request_count += 1
-            logger.warning("Batch %d/%d failed (%d tickers): %s", i + 1, len(batches), len(batch), e)
+            res = universe_lib.read(
+                ticker,
+                date_range=(start_ts, end_ts),
+                columns=_ARCTIC_OHLCV_COLS,
+            )
+            df = res.data
+        except Exception as exc:
+            logger.warning("ArcticDB read failed for %s: %s", ticker, exc)
+            n_err += 1
+            continue
+        if df is None or df.empty:
+            logger.warning("ArcticDB returned empty frame for %s", ticker)
+            n_err += 1
+            continue
+        # Defensive dedup — matches predictor Phase 7a (removable after 1-2
+        # clean Saturday cycles confirm the upstream write path is clean).
+        df = df[~df.index.duplicated(keep="last")].sort_index()
+        result[ticker] = df
 
-    # ── Data quality gate ─────────────────────────────────────────────────
-    n_requested = len(tickers)
-    n_fetched = sum(1 for df in result.values() if not df.empty)
-    pct = n_fetched / n_requested * 100 if n_requested > 0 else 0
-
-    if n_requested > 0 and n_fetched < n_requested * _MIN_FETCH_RATIO:
-        msg = (f"Price fetch failed: {n_fetched}/{n_requested} tickers "
-               f"with data ({pct:.0f}%) — minimum {_MIN_FETCH_RATIO:.0%} required")
-        logger.error(msg)
-        raise PriceFetchError(msg)
+    err_rate = n_err / max(len(tickers), 1)
+    if err_rate > _MAX_ERR_RATE:
+        raise PriceFetchError(
+            f"ArcticDB per-ticker error rate {err_rate:.1%} exceeds "
+            f"{_MAX_ERR_RATE:.0%} threshold ({n_err} failed of {len(tickers)})"
+        )
 
     logger.info(
-        "Price fetch complete: %d/%d tickers (%.0f%%), %d batches, %d total yf requests this run",
-        n_fetched, n_requested, pct, len(batches), _yf_request_count,
+        "[data_source=arcticdb] Loaded %d/%d ticker prices (%d missing, window %s → %s)",
+        len(result), len(tickers), n_err, start_ts.date(), end_ts.date(),
     )
     return result
 
 
-# Wikipedia GICS sector names → internal sector names used throughout the system
+# ── Constituents ─────────────────────────────────────────────────────────────
+
+# Wikipedia GICS sector names → internal sector names used throughout the system.
+# Retained for historical signal archives that may carry raw GICS labels; the
+# fresh path below reads pre-mapped sectors from alpha-engine-data.
 _GICS_SECTOR_MAP = {
     "Information Technology": "Technology",
     "Health Care": "Healthcare",
@@ -233,173 +171,99 @@ _GICS_SECTOR_MAP = {
 }
 
 
-def _load_constituents_from_s3() -> tuple[list[str], dict[str, str]] | None:
-    """Try to load constituents from alpha-engine-data's S3 output."""
+def _load_constituents_from_s3() -> tuple[list[str], dict[str, str]]:
+    """Load constituents + sectors from alpha-engine-data's weekly output.
+
+    Hard-fails on any miss (no Wikipedia fallback). alpha-engine-data's
+    Saturday DataPhase1 step writes ``market_data/latest_weekly.json`` +
+    ``market_data/<date>/constituents.json``; a missing or stale pointer
+    means upstream didn't run, which is a pipeline failure, not a prompt
+    to go scrape Wikipedia.
+    """
+    import boto3
+    import json
+
+    s3 = boto3.client("s3")
     try:
-        import boto3
-        import json
-        s3 = boto3.client("s3")
-        # Load latest pointer
-        ptr = s3.get_object(Bucket=_S3_BUCKET, Key=f"{_MARKET_DATA_PREFIX}latest_weekly.json")
-        pointer = json.loads(ptr["Body"].read())
-        prefix = pointer.get("s3_prefix", "")
-        if not prefix:
-            return None
-        # Load constituents
+        ptr = s3.get_object(
+            Bucket=_S3_BUCKET,
+            Key=f"{_MARKET_DATA_PREFIX}latest_weekly.json",
+        )
+    except Exception as exc:
+        raise PriceFetchError(
+            f"s3://{_S3_BUCKET}/{_MARKET_DATA_PREFIX}latest_weekly.json unreadable: "
+            f"{exc} — alpha-engine-data DataPhase1 did not run or the pointer is missing."
+        ) from exc
+
+    pointer = json.loads(ptr["Body"].read())
+    prefix = pointer.get("s3_prefix", "")
+    if not prefix:
+        raise PriceFetchError(
+            f"latest_weekly.json has no 's3_prefix' field: {pointer!r}"
+        )
+
+    try:
         obj = s3.get_object(Bucket=_S3_BUCKET, Key=f"{prefix}constituents.json")
-        data = json.loads(obj["Body"].read())
-        tickers = data.get("tickers", [])
-        sector_map = data.get("sector_map", {})
-        if tickers and len(tickers) >= 800:
-            logger.info("Loaded %d constituents from S3 (date=%s)", len(tickers), pointer.get("date"))
-            return tickers, sector_map
-    except Exception as e:
-        logger.debug("S3 constituents load failed: %s", e)
-    return None
+    except Exception as exc:
+        raise PriceFetchError(
+            f"s3://{_S3_BUCKET}/{prefix}constituents.json unreadable: {exc}"
+        ) from exc
+
+    data = json.loads(obj["Body"].read())
+    tickers = data.get("tickers", [])
+    sector_map = data.get("sector_map", {})
+    if not tickers or len(tickers) < 800:
+        raise PriceFetchError(
+            f"constituents.json has {len(tickers)} tickers (expected >= 800 for "
+            f"S&P 500+400) — upstream collector produced a malformed output."
+        )
+    logger.info(
+        "[data_source=s3] Loaded %d constituents from %s (date=%s)",
+        len(tickers), f"{prefix}constituents.json", pointer.get("date"),
+    )
+    return tickers, sector_map
 
 
 def fetch_sp500_sp400_with_sectors() -> tuple[list[str], dict[str, str]]:
     """
-    Fetch S&P 500 and S&P 400 constituent lists AND GICS sectors.
+    Fetch S&P 500 and S&P 400 constituents + GICS sectors from
+    alpha-engine-data's weekly S3 output.
 
-    Priority: S3 (alpha-engine-data) → Wikipedia → local CSV cache.
+    Hard-fails on any read error — no Wikipedia fallback.
 
-    Known limitation — survivorship bias:
-        Wikipedia provides current-only constituent lists. Stocks that were removed
-        from the index (delisted, acquired, or dropped due to market cap decline)
-        are not included. This means historical backtests using these lists will
-        overstate returns because they exclude stocks that performed poorly enough
-        to be removed. Impact is small for this system's weekly horizon: S&P indices
-        rebalance quarterly with ~20-30 changes/year. For historical constituent
-        data, paid sources (Compustat, Sharadar) would be needed.
+    Returns ``(tickers, sector_map)`` where sector_map is ``{ticker:
+    internal_sector_name}`` for all tickers.
 
-    Returns:
-        (tickers, sector_map) where:
-        - tickers: deduplicated list of ticker symbols
-        - sector_map: {ticker: internal_sector_name} for all tickers
+    Survivorship-bias note (unchanged): alpha-engine-data's constituents
+    collector pulls the current index membership, same as the Wikipedia path
+    it replaces; historical backtests still need a paid source (Compustat,
+    Sharadar) for point-in-time constituent data.
     """
-    import requests
-    from pathlib import Path
-    from io import StringIO
-
-    # S3-first: try pre-collected data from alpha-engine-data
-    s3_result = _load_constituents_from_s3()
-    if s3_result is not None:
-        return s3_result
-
-    # Writable cache in /tmp (Lambda's /var/task is read-only); fall back to baked-in copy
-    baked_cache = Path(__file__).parent.parent.parent / "data" / "constituents_cache.csv"
-    cache_path = Path("/tmp/constituents_cache.csv")
-    if not cache_path.exists() and baked_cache.exists():
-        import shutil
-        shutil.copy2(baked_cache, cache_path)
-
-    sp500_url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-    sp400_url = "https://en.wikipedia.org/wiki/List_of_S%26P_400_companies"
-    headers = {
-        "User-Agent": "alpha-engine-research/1.0 (https://github.com/; research bot)"
-    }
-
-    tickers: list[str] = []
-    sector_map: dict[str, str] = {}
-
-    try:
-        for url in [sp500_url, sp400_url]:
-            resp = requests.get(url, headers=headers, timeout=15)
-            resp.raise_for_status()
-            tables = pd.read_html(StringIO(resp.text))
-            df = tables[0]
-            # Flatten multi-level columns if present
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = [" ".join(str(c) for c in col).strip() for col in df.columns]
-
-            # Find ticker/symbol column
-            col = next(
-                (c for c in df.columns if "symbol" in str(c).lower() or "ticker" in str(c).lower()),
-                df.columns[0],
-            )
-
-            # Find GICS sector column
-            sector_col = next(
-                (c for c in df.columns if "gics" in str(c).lower() and "sector" in str(c).lower()),
-                None,
-            )
-            if sector_col is None:
-                # Broader match for tables without "GICS" prefix
-                sector_col = next(
-                    (c for c in df.columns if "sector" in str(c).lower()),
-                    None,
-                )
-
-            for _, row in df.iterrows():
-                raw_ticker = str(row[col]).strip().replace(".", "-")
-                if not raw_ticker or raw_ticker == "nan" or len(raw_ticker) > 6:
-                    continue
-                tickers.append(raw_ticker)
-
-                if sector_col is not None:
-                    raw_sector = str(row[sector_col]).strip()
-                    mapped = _GICS_SECTOR_MAP.get(raw_sector, raw_sector)
-                    sector_map[raw_ticker] = mapped
-
-        tickers = list(dict.fromkeys(tickers))  # dedupe, preserve order
-
-        # Sanity check: Wikipedia should return ~900 tickers
-        if tickers and len(tickers) < _MIN_EXPECTED_CONSTITUENTS:
-            logger.error(
-                "Wikipedia returned only %d tickers (expected >= %d) — falling back to cache",
-                len(tickers), _MIN_EXPECTED_CONSTITUENTS,
-            )
-            raise ValueError(f"Insufficient tickers from Wikipedia: {len(tickers)}")
-
-        if tickers:
-            cache_df = pd.DataFrame({
-                "ticker": tickers,
-                "sector": [sector_map.get(t, "Unknown") for t in tickers],
-            })
-            cache_df.to_csv(cache_path, index=False)
-            logger.info("Fetched %d S&P 500+400 constituents with sectors from Wikipedia", len(tickers))
-        return tickers, sector_map
-
-    except Exception as e:
-        logger.warning("Wikipedia fetch failed (%s); trying cache...", e)
-        if cache_path.exists():
-            cached = pd.read_csv(cache_path)
-            ticker_list = cached["ticker"].tolist()
-            if "sector" in cached.columns:
-                sector_map = {
-                    str(t): str(s)
-                    for t, s in zip(cached["ticker"], cached["sector"])
-                    if s and str(s) != "nan"
-                }
-            has_sectors = "with" if sector_map else "without"
-            logger.info("Loaded %d tickers from cache (%s sectors)", len(ticker_list), has_sectors)
-            return ticker_list, sector_map
-        logger.error("No cache found. Scanner will have no universe.")
-        return [], {}
+    return _load_constituents_from_s3()
 
 
 def fetch_sp500_sp400_tickers() -> list[str]:
-    """
-    Fetch S&P 500 and S&P 400 constituent lists from Wikipedia.
-    Falls back to cached static CSV if Wikipedia is unavailable.
-    Returns deduplicated list of tickers.
-    """
+    """Return the deduplicated S&P 500 + S&P 400 ticker list from S3."""
     tickers, _ = fetch_sp500_sp400_with_sectors()
     return tickers
 
 
+# ── Short interest (yfinance Ticker.info, not a price read) ──────────────────
+# Tracked for migration in ROADMAP.md: short interest collector in
+# alpha-engine-data. Kept here until that collector ships.
+
 def fetch_short_interest(tickers: list[str]) -> dict[str, dict]:
     """
-    Fetch short interest data from yfinance for a list of tickers.
+    Fetch short interest from yfinance for a list of tickers.
 
-    Uses Ticker.info fields: shortPercentOfFloat, shortRatio, sharesShort.
-    Only call for analyzed tickers (~35), not the full S&P 900.
+    Uses ``Ticker.info`` (not ``yf.download``) for ``shortPercentOfFloat``,
+    ``shortRatio``, ``sharesShort``. Only call for analyzed tickers (~35),
+    not the full S&P 900.
 
-    Note: yfinance short interest data is delayed (bi-monthly FINRA reporting).
-    Best used as a supplementary signal, not for precise timing.
+    Note: yfinance short interest data is delayed (bi-monthly FINRA
+    reporting). Best used as a supplementary signal, not for precise timing.
 
-    Returns {ticker: {short_pct_float, short_ratio, shares_short}}.
+    Returns ``{ticker: {short_pct_float, short_ratio, shares_short}}``.
     """
     global _yf_request_count
 
@@ -409,11 +273,10 @@ def fetch_short_interest(tickers: list[str]) -> dict[str, dict]:
         try:
             info = yf.Ticker(ticker).info
             _yf_request_count += 1
-            short_pct = info.get("shortPercentOfFloat")  # e.g. 0.05 = 5%
-            short_ratio = info.get("shortRatio")          # days to cover
+            short_pct = info.get("shortPercentOfFloat")
+            short_ratio = info.get("shortRatio")
             shares_short = info.get("sharesShort")
 
-            # Convert to percentage if present
             if short_pct is not None:
                 short_pct = round(short_pct * 100, 2)
 
@@ -439,6 +302,8 @@ def fetch_short_interest(tickers: list[str]) -> dict[str, dict]:
     )
     return results
 
+
+# ── Technical indicators (pure computation; no external calls) ───────────────
 
 def compute_technical_indicators(df: pd.DataFrame) -> Optional[dict]:
     """

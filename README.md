@@ -270,7 +270,7 @@ python local/run.py --offline --date 2026-03-23
 
 | Category | Stubbed Functions | Synthetic Output |
 |----------|-------------------|-----------------|
-| Price data | `fetch_price_data`, `fetch_sp500_sp400_with_sectors`, `yf.download` | 252-day synthetic OHLCV for 30 sample tickers |
+| Price data | `fetch_price_data`, `fetch_sp500_sp400_with_sectors` (ArcticDB + S3 reads) | 252-day synthetic OHLCV for 30 sample tickers |
 | News | `fetch_all_news` | 2 synthetic headlines per ticker |
 | Analyst | `fetch_analyst_consensus`, `fetch_revisions` | Randomized consensus ratings + targets |
 | Macro | `fetch_macro_data`, `compute_market_breadth` | Hardcoded neutral macro environment |
