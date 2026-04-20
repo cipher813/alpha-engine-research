@@ -265,11 +265,16 @@ def ingest_signals_theses(
         except ValueError:
             continue
 
-        # Load signals.json
+        # Load signals.json — only skip the file-absent case; everything else raises.
         try:
             obj = s3.get_object(Bucket=bucket, Key=f"{prefix}signals.json")
+        except s3.exceptions.NoSuchKey:
+            logger.debug("No signals.json under %s — skipping", prefix)
+            continue
+        try:
             data = json.loads(obj["Body"].read())
-        except Exception:
+        except json.JSONDecodeError as e:
+            logger.warning("Corrupt signals.json at %s: %s — skipping", prefix, e)
             continue
 
         universe = data.get("universe", [])
