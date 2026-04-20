@@ -222,17 +222,8 @@ def main():
     if args.tickers:
         tickers = [t.strip().upper() for t in args.tickers.split(",")]
     elif args.from_signals:
-        import boto3
-        s3 = boto3.client("s3")
-        resp = s3.list_objects_v2(Bucket="alpha-engine-research", Prefix="signals/", Delimiter="/")
-        prefixes = sorted([p["Prefix"] for p in resp.get("CommonPrefixes", [])])
-        if not prefixes:
-            logger.error("No signals found on S3")
-            return
-        obj = s3.get_object(Bucket="alpha-engine-research", Key=f"{prefixes[-1]}signals.json")
-        data = json.loads(obj["Body"].read())
-        tickers = [s["ticker"] for s in data.get("universe", []) if s.get("ticker")]
-        logger.info("Loaded %d tickers from signals", len(tickers))
+        from rag.pipelines._signals_resolver import load_tickers_from_latest_signals
+        tickers = load_tickers_from_latest_signals()
     else:
         parser.error("Provide --tickers or --from-signals")
         return
