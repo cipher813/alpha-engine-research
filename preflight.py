@@ -41,15 +41,16 @@ class ResearchPreflight(BasePreflight):
         self.mode = mode
 
     def _check_arcticdb_universe(self) -> None:
-        """Assert ArcticDB's universe library is reachable and SPY has fresh data.
+        """Assert ArcticDB is reachable and SPY has fresh data.
 
-        SPY is written by alpha-engine-data's weekly + daily collectors, so its
+        SPY is written by alpha-engine-data's weekly + daily collectors to the
+        ``macro`` library (benchmarks/sector ETFs/macro series live there; the
+        ``universe`` library holds the ~910 S&P 500+400 constituents). Its
         last-row date is the cleanest proxy for "DataPhase1 has run recently."
-        Matches the predictor's ``_verify_arctic_fresh`` pattern. Tolerates
-        short staleness (up to 7 calendar days) because the Saturday research
-        pipeline nominally runs after Friday's close — tighter freshness is
-        enforced by the predictor's daily inference, not the weekly research
-        batch.
+        Tolerates short staleness (up to 7 calendar days) because the Saturday
+        research pipeline nominally runs after Friday's close — tighter
+        freshness is enforced by the predictor's daily inference, not the
+        weekly research batch.
         """
         import arcticdb as adb
 
@@ -57,23 +58,23 @@ class ResearchPreflight(BasePreflight):
         uri = f"s3s://s3.{region}.amazonaws.com:{self.bucket}?path_prefix=arcticdb&aws_auth=true"
         try:
             arctic = adb.Arctic(uri)
-            universe = arctic.get_library("universe")
+            macro = arctic.get_library("macro")
         except Exception as exc:
             raise RuntimeError(
                 f"ArcticDB unreachable at {uri}: {exc}"
             ) from exc
 
         try:
-            df = universe.read("SPY", columns=["Close"]).data
+            df = macro.read("SPY", columns=["Close"]).data
         except Exception as exc:
             raise RuntimeError(
-                f"ArcticDB universe.SPY unreadable: {exc} — DataPhase1 did "
-                f"not run or the universe library is broken."
+                f"ArcticDB macro.SPY unreadable: {exc} — DataPhase1 did "
+                f"not run or the macro library is broken."
             ) from exc
 
         if df is None or df.empty:
             raise RuntimeError(
-                "ArcticDB universe.SPY has no rows — DataPhase1 has never written."
+                "ArcticDB macro.SPY has no rows — DataPhase1 has never written."
             )
 
         last_date = pd.Timestamp(df.index.max()).normalize()
@@ -81,12 +82,12 @@ class ResearchPreflight(BasePreflight):
         stale_days = (today - last_date).days
         if stale_days > 7:
             raise RuntimeError(
-                f"ArcticDB universe.SPY last_date={last_date.date()} is "
+                f"ArcticDB macro.SPY last_date={last_date.date()} is "
                 f"{stale_days}d stale (>7d threshold) — DataPhase1 has not "
                 f"refreshed recently."
             )
         log.info(
-            "preflight: ArcticDB universe.SPY last_date=%s (%dd old)",
+            "preflight: ArcticDB macro.SPY last_date=%s (%dd old)",
             last_date.date(), stale_days,
         )
 
