@@ -506,11 +506,18 @@ def exit_evaluator_node(state: ResearchState) -> dict:
             **thesis,
         }
 
+    # Pass scanner_universe as the constituents whitelist so grandfathered
+    # non-S&P tickers get UNIVERSE_DROP exits before score/tenure logic.
+    # scanner_universe is built in fetch_data_node and persisted in graph
+    # state (line 83). Origin: 2026-04-20 — TSM + ASML surfaced as incumbent
+    # outliers causing executor ArcticDB NoSuchVersionException downstream.
+    scanner_universe = state.get("scanner_universe", [])
     remaining, exits, open_slots = compute_exits_and_open_slots(
         current_population=state.get("current_population", []),
         investment_theses=investment_theses,
         config=POPULATION_CFG,
         run_date=state.get("run_date"),
+        constituents=set(scanner_universe) if scanner_universe else None,
     )
 
     return {
