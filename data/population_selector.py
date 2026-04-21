@@ -446,6 +446,7 @@ def compute_exits_and_open_slots(
     investment_theses: dict[str, dict],
     config: dict,
     run_date: str | None = None,
+    constituents: set[str] | frozenset[str] | None = None,
 ) -> tuple[list[dict], list[dict], int]:
     """
     Determine which stocks exit the population. Runs in parallel with sector teams
@@ -456,6 +457,19 @@ def compute_exits_and_open_slots(
         investment_theses: {ticker: thesis_dict} from prior week.
         config: Population config section.
         run_date: YYYY-MM-DD.
+        constituents: current scanner universe (S&P 500 + 400) as a set. When
+            provided, any incumbent whose ticker is NOT in the set is removed
+            via a ``UNIVERSE_DROP`` exit event before score/tenure logic runs.
+            Catches grandfathered tickers (ADRs, de-listed names, manual seeds)
+            that predate the current constituent filter. Without this,
+            ``compute_exits_and_open_slots`` had no way to rotate out tickers
+            that weren't in the weekly S&P 900 scan — they kept their prior
+            score and persisted indefinitely. Confirmed 2026-04-20: TSM + ASML
+            persisted as incumbents with full thesis archives while absent
+            from both constituents.json and the ArcticDB universe library,
+            causing NoSuchVersionException downstream in the executor-sim
+            replay. None = skip the check (backwards compatible for callers
+            that don't have constituents at hand).
 
     Returns:
         (remaining_population, exit_events, open_slots)
@@ -473,9 +487,44 @@ def compute_exits_and_open_slots(
     min_rotation_pct = rotation_config.get("min_rotation_pct", 0.10)
     max_rotations = rotation_config.get("max_rotations_per_run", 10)
 
-    remaining = []
-    exits = []
+    remaining: list[dict] = []
+    exits: list[dict] = []
     rotations_used = 0
+
+    # ── Universe guardrail ──
+    # Drop incumbents that have fallen out of (or were never in) the current
+    # constituent universe BEFORE score/tenure logic. A ticker not in the
+    # scanner's S&P 900 has no refreshed score and no ArcticDB coverage —
+    # both downstream prereqs. Drops here are separate from score-based
+    # rotations and don't count toward ``max_rotations_per_run`` (they
+    # aren't volitional trades, they're reconciliation).
+    if constituents is not None:
+        constituents_set = (
+            constituents
+            if isinstance(constituents, (set, frozenset))
+            else set(constituents)
+        )
+        surviving_incumbents: list[dict] = []
+        for incumbent in current_population:
+            ticker = incumbent["ticker"]
+            if ticker not in constituents_set:
+                logger.warning(
+                    "[population_selector] dropping incumbent %s — not in current "
+                    "S&P 500+400 constituents. Sector=%s. Grandfathered outlier; "
+                    "executor will not be able to read ArcticDB universe for it.",
+                    ticker,
+                    incumbent.get("sector", "Unknown"),
+                )
+                exits.append({
+                    "type": "UNIVERSE_DROP",
+                    "ticker_out": ticker,
+                    "sector": incumbent.get("sector", "Unknown"),
+                    "reason": "not in current S&P 500+400 constituents",
+                    "score_out": incumbent.get("long_term_score", 0),
+                })
+                continue
+            surviving_incumbents.append(incumbent)
+        current_population = surviving_incumbents
 
     for incumbent in current_population:
         ticker = incumbent["ticker"]
