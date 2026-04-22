@@ -115,6 +115,14 @@ def run_quant_filter(
     _ma200_floor = _sp["momentum_ma200_floor_pct"]
     _momentum_top_n = _sp["momentum_top_n"]
     _min_combined = _sp["min_combined_candidates"]
+    # Min-history admission gate (2026-04-22). Tickers with < this many
+    # trading-day bars cannot produce 252-day rolling features (momentum,
+    # dist_from_52w_*, price_vs_ma200, return_252d). Downstream scoring
+    # would silently see NaN features. Per feedback_no_unscoreable_labels
+    # the correct posture is upstream guardrail — refuse to nominate, not
+    # tolerate downstream. Configurable (backtester can sweep) with 252
+    # as the default that matches the longest rolling-window feature.
+    _min_history_days = _sp.get("min_trading_days_for_candidacy", 252)
 
     for ticker in tickers:
         tech = technical_scores.get(ticker)
@@ -156,6 +164,19 @@ def run_quant_filter(
             "volatility_pass": 1,
             "quant_filter_pass": 0,
         }
+
+        # Min-history admission gate. A ticker with < _min_history_days
+        # bars cannot produce 252-day rolling features (SNDK-class on
+        # 2026-04-21 was the motivating incident — IPO'd 2025-02-13,
+        # passed liquidity + tech_score but had NaN on every long-window
+        # feature downstream). Upstream guardrail here is safer than
+        # NaN-tolerance in scoring/executor — feedback_no_unscoreable_labels.
+        if df is not None and not df.empty and len(df) < _min_history_days:
+            eval_rec["filter_fail_reason"] = "insufficient_history"
+            eval_rec["history_days"] = int(len(df))
+            eval_rec["min_required_days"] = int(_min_history_days)
+            _eval_log.append(eval_rec)
+            continue
 
         # Basic liquidity + price floor (both paths)
         if avg_vol < _min_avg_vol or (_min_price > 0 and price < _min_price):
@@ -239,6 +260,10 @@ def run_quant_filter(
 
     # Fallback: if fewer than _min_combined candidates passed, fill from all scored tickers
     # sorted by tech_score so the scanner always has at least that many names to work with.
+    # The min-history gate (above) is a STRUCTURAL rejection — a ticker without enough
+    # bars cannot be scored on 252-day features — so we must honor it here too. Otherwise
+    # the "always promise N" guarantee silently promotes short-history tickers into the
+    # candidate pool, reopening the SNDK-class gap the upstream gate was added to close.
     if len(combined) < _min_combined:
         combined_symbols = {c["ticker"] for c in combined}
         all_scored = []
@@ -250,6 +275,10 @@ def run_quant_filter(
                     continue
                 tech = compute_technical_indicators(df)
             if tech is None:
+                continue
+            # Honor the min-history gate even in fallback mode.
+            df = price_data.get(ticker)
+            if df is not None and not df.empty and len(df) < _min_history_days:
                 continue
             price = tech.get("current_price", 0)
             avg_vol = tech.get("avg_volume_20d", 0) or 0
