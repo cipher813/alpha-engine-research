@@ -1,0 +1,159 @@
+"""Regression tests for score_aggregator's thesis_update recompute path.
+
+Context (ROADMAP P1, 2026-04-22):
+    ``thesis_updates`` from the held-stock evaluation path occasionally
+    arrive with ``final_score=None``. Prior behavior was to log ERROR +
+    skip, which silently dropped valid tickers from ``investment_theses``
+    (CME/HSY/KR on 2026-04-20; 9 held tickers on 2026-04-11).
+
+Correct posture (feedback_no_silent_fails / feedback_no_unscoreable_labels):
+    - If ``quant_score`` + ``qual_score`` are present, RECOMPUTE the
+      composite — the recommendation loop uses the same function.
+    - If BOTH sub-scores are also missing, HARD-FAIL — the thesis is
+      truly unscoreable and the upstream writer must be fixed.
+
+These tests lock both behaviors.
+"""
+
+from __future__ import annotations
+
+import logging
+
+import pytest
+
+from graph.research_graph import score_aggregator
+
+
+def _state(team_outputs: dict, sector_modifiers: dict | None = None,
+           sector_map: dict | None = None) -> dict:
+    return {
+        "sector_team_outputs": team_outputs,
+        "sector_modifiers": sector_modifiers or {},
+        "sector_map": sector_map or {},
+    }
+
+
+class TestThesisUpdateRecompute:
+    def test_missing_final_score_with_sub_scores_is_recomputed(self, caplog):
+        """CME/HSY/KR-class: thesis has quant + qual but no final_score.
+        Aggregator must recompute and include the ticker.
+        """
+        state = _state(
+            team_outputs={
+                "financials": {
+                    "recommendations": [],
+                    "thesis_updates": {
+                        "CME": {
+                            "ticker": "CME",
+                            "sector": "Financials",
+                            "quant_score": 70,
+                            "qual_score": 80,
+                            # final_score INTENTIONALLY absent
+                        },
+                    },
+                },
+            },
+            sector_modifiers={"Financials": 1.0},
+        )
+
+        with caplog.at_level(logging.WARNING):
+            out = score_aggregator(state)
+
+        assert "CME" in out["investment_theses"], (
+            "Ticker with recoverable sub-scores was dropped — recompute path "
+            "didn't fire. Silent-drop regression."
+        )
+        cme = out["investment_theses"]["CME"]
+        # 0.5 × 70 + 0.5 × 80 + 0 macro shift = 75.0
+        assert cme["final_score"] == 75.0
+        # Recompute should emit a WARN so upstream is visible.
+        assert any("missing final_score — recomputed" in r.message
+                   for r in caplog.records), (
+            "Recompute path must emit a WARNING pointing at upstream — "
+            "silent recomputation would hide the real bug."
+        )
+
+    def test_missing_final_score_with_only_quant_score_is_recomputed(self):
+        """If only quant_score is present, composite uses it at full weight."""
+        state = _state(
+            team_outputs={
+                "tech": {
+                    "recommendations": [],
+                    "thesis_updates": {
+                        "MSFT": {
+                            "ticker": "MSFT",
+                            "sector": "Technology",
+                            "quant_score": 65,
+                            # qual_score + final_score absent
+                        },
+                    },
+                },
+            },
+            sector_modifiers={"Technology": 1.1},
+        )
+        out = score_aggregator(state)
+        assert "MSFT" in out["investment_theses"]
+        # weighted_base = 65 (quant at full weight when qual is None),
+        # macro_shift = (1.1-1.0)/0.30 * 10 = 3.33. final = 68.3.
+        assert out["investment_theses"]["MSFT"]["final_score"] == pytest.approx(68.3, abs=0.1)
+
+    def test_missing_all_scores_hard_fails(self):
+        """If BOTH sub-scores AND final_score are absent, thesis is truly
+        unscoreable — raise rather than drop silently.
+        """
+        state = _state(
+            team_outputs={
+                "financials": {
+                    "recommendations": [],
+                    "thesis_updates": {
+                        "BROKEN": {
+                            "ticker": "BROKEN",
+                            "sector": "Financials",
+                            # quant_score, qual_score, final_score ALL absent
+                        },
+                    },
+                },
+            },
+            sector_modifiers={"Financials": 1.0},
+        )
+        with pytest.raises(RuntimeError, match="BROKEN"):
+            score_aggregator(state)
+
+    def test_hard_fail_message_mentions_unscoreable_labels(self):
+        """Hard-fail message must point at the feedback file so operators
+        know this is a feedback-driven guardrail, not a random error.
+        """
+        state = _state(
+            team_outputs={
+                "x": {
+                    "recommendations": [],
+                    "thesis_updates": {"BROKEN": {"ticker": "BROKEN"}},
+                },
+            },
+        )
+        with pytest.raises(RuntimeError) as exc:
+            score_aggregator(state)
+        assert "unscoreable" in str(exc.value).lower()
+
+    def test_present_final_score_is_passed_through_unchanged(self):
+        """Happy path: thesis has final_score already. No recompute,
+        no extra WARN.
+        """
+        state = _state(
+            team_outputs={
+                "tech": {
+                    "recommendations": [],
+                    "thesis_updates": {
+                        "AAPL": {
+                            "ticker": "AAPL",
+                            "sector": "Technology",
+                            "final_score": 82.5,
+                            "quant_score": 80,
+                            "qual_score": 85,
+                        },
+                    },
+                },
+            },
+        )
+        out = score_aggregator(state)
+        assert out["investment_theses"]["AAPL"]["final_score"] == 82.5

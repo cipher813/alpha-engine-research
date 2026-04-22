@@ -610,28 +610,67 @@ def score_aggregator(state: ResearchState) -> dict:
         # Merge thesis updates from held stocks
         for ticker, thesis in output.get("thesis_updates", {}).items():
             if ticker not in investment_theses:
-                # Skip thesis_updates that lack final_score. Without one,
-                # the downstream _build_signals_payload safety gate will
-                # downgrade the stock from BUY to HOLD with a
-                # "broken thesis" warning (observed for 9 held tickers on
-                # the 2026-04-11 run). The upstream cause is usually a
-                # held-stock thesis that was saved without final_score —
-                # either from a first-time held-stock update path that
-                # never ran the aggregator, or a historic archive entry
-                # that predates the current schema. Either way, skipping
-                # here prevents the broken record from entering
-                # investment_theses and fails loudly via the ERROR log so
-                # the archive row can be backfilled.
+                # thesis_updates come from the held-stock evaluation path,
+                # which occasionally produces records missing ``final_score``
+                # (first-time update, legacy archive entries predating the
+                # current schema — CME/HSY/KR on 2026-04-20, 9 held tickers
+                # on 2026-04-11). Previously we logged ERROR and skipped,
+                # which silently dropped valid tickers whose sub-scores
+                # were intact.
+                #
+                # Per feedback_no_silent_fails / feedback_no_unscoreable_labels,
+                # recompute-or-hard-fail: if ``quant_score`` + ``qual_score``
+                # are present, run them through the same
+                # ``compute_composite_score`` path the recommendation loop
+                # above uses. If BOTH sub-scores are also missing, raise —
+                # the thesis is truly unscoreable and the upstream writer
+                # must be fixed.
                 if thesis.get("final_score") is None:
-                    logger.error(
-                        "[score_aggregator] thesis_update for %s is missing "
-                        "final_score — skipping investment_theses entry to "
-                        "prevent broken-thesis downgrade downstream. "
-                        "Upstream fix required: backfill the archive thesis "
-                        "for this ticker or re-run the aggregator path.",
-                        ticker,
+                    quant_score = thesis.get("quant_score")
+                    qual_score = thesis.get("qual_score")
+                    sector = thesis.get("sector") or sector_map.get(ticker, "Unknown")
+                    modifier = sector_modifiers.get(sector, 1.0)
+
+                    if quant_score is None and qual_score is None:
+                        msg = (
+                            f"thesis_update for {ticker} missing final_score "
+                            f"AND both sub-scores (quant_score, qual_score). "
+                            f"Thesis is unscoreable — upstream fix required "
+                            f"(team evaluation path wrote an incomplete "
+                            f"record). Refusing to drop silently per "
+                            f"feedback_no_unscoreable_labels.md."
+                        )
+                        logger.error("[score_aggregator] %s", msg)
+                        raise RuntimeError(msg)
+
+                    recomputed = compute_composite_score(
+                        quant_score=quant_score,
+                        qual_score=qual_score,
+                        sector_modifier=modifier,
                     )
-                    continue
+                    logger.warning(
+                        "[score_aggregator] thesis_update for %s missing "
+                        "final_score — recomputed from sub-scores "
+                        "(quant=%s, qual=%s, sector=%s, modifier=%.2f) → "
+                        "final_score=%s. Upstream writer should populate "
+                        "final_score at thesis-creation time.",
+                        ticker, quant_score, qual_score, sector, modifier,
+                        recomputed["final_score"],
+                    )
+                    thesis = dict(thesis)  # avoid mutating team output
+                    thesis["final_score"] = recomputed["final_score"]
+                    thesis.setdefault("weighted_base", recomputed["weighted_base"])
+                    thesis.setdefault("macro_shift", recomputed["macro_shift"])
+                    thesis.setdefault("score_failed", recomputed["score_failed"])
+                    if "sector" not in thesis:
+                        thesis["sector"] = sector
+                    if "rating" not in thesis:
+                        thesis["rating"] = score_to_rating(
+                            recomputed["final_score"],
+                            buy_threshold=RATING_BUY_THRESHOLD,
+                            sell_threshold=RATING_SELL_THRESHOLD,
+                        )
+
                 investment_theses[ticker] = {
                     "ticker": ticker,
                     "team_id": team_id,
