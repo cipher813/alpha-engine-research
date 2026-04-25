@@ -144,7 +144,15 @@ class ArchiveManager:
     def load_latest_theses(self, tickers: list[str]) -> dict[str, dict]:
         """Load the most recent investment thesis per ticker from SQLite.
 
-        Returns {ticker: {rating, score, conviction, thesis_summary, ...}}.
+        Returns {ticker: {ticker, rating, score, final_score, conviction, ...}}.
+
+        ``final_score`` mirrors the DB ``score`` column. The team-output
+        convention (``compute_composite_score``) uses ``final_score``;
+        ``score_aggregator`` checks ``thesis.get("final_score")`` to decide
+        whether to recompute or hard-fail. Without ``final_score`` populated
+        here, every held ticker's prior_thesis trips the PR #42 hard-fail
+        even though ``score`` is set. ``ticker`` mirrors ``symbol`` for the
+        same reason.
         """
         if not self.db_conn or not tickers:
             return {}
@@ -166,9 +174,12 @@ class ArchiveManager:
                 tickers,
             ).fetchall()
             for row in rows:
+                score = row["score"]
                 results[row["symbol"]] = {
+                    "ticker": row["symbol"],
                     "rating": row["rating"],
-                    "score": row["score"],
+                    "score": score,
+                    "final_score": score,
                     "conviction": row["conviction"],
                     "signal": row["signal"],
                     "thesis_summary": row["thesis_summary"] or "",
