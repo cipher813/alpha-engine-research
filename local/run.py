@@ -58,18 +58,27 @@ def main():
                              "Safe preprod check — does not affect live executor.")
     parser.add_argument("--offline", action="store_true",
                         help="Full offline mode: stub all API/LLM/S3/email calls with synthetic data.")
+    parser.add_argument("--stub-llm", action="store_true",
+                        help="Real data + real archive, but stub all Anthropic LLM agent calls. "
+                             "Costs $0 in tokens. For debugging data-shape bugs, score_aggregator "
+                             "regressions, archive_writer issues — anything below the LLM layer.")
     args = parser.parse_args()
 
     # Install offline stubs BEFORE any graph/agent imports
     if args.offline:
         from local.offline_stubs import install_offline_stubs
         install_offline_stubs()
+    elif args.stub_llm:
+        from local.offline_stubs import install_llm_only_stubs
+        install_llm_only_stubs()
 
     run_date = args.date or str(datetime.date.today())
 
     print(f"alpha-engine-research local run — {run_date}")
     if args.offline:
         print("OFFLINE MODE: all external calls stubbed with synthetic data")
+    elif args.stub_llm:
+        print("STUB-LLM MODE: real data + real archive, agent LLM calls stubbed ($0 tokens)")
     elif args.no_s3:
         print("NO-S3 MODE: real APIs, signals written to local file, email skipped")
 
@@ -112,6 +121,9 @@ def main():
     if args.offline:
         from local.offline_stubs import patch_graph_modules
         patch_graph_modules()
+    elif args.stub_llm:
+        from local.offline_stubs import patch_graph_modules_llm_only
+        patch_graph_modules_llm_only()
 
     graph = build_graph()
     state = create_initial_state(
@@ -120,8 +132,10 @@ def main():
         is_early_close=early_close,
     )
 
-    # --no-s3: intercept S3 writes → local files, skip email
-    if args.no_s3 and not args.offline:
+    # --no-s3 or --stub-llm: intercept S3 writes → local files, skip email
+    # (--stub-llm implies --no-s3 — never overwrite prod signals.json from a
+    # debug run with synthetic LLM output.)
+    if (args.no_s3 or args.stub_llm) and not args.offline:
         import json as _json
         _out_dir = os.path.join(project_root, "local", "output")
         os.makedirs(_out_dir, exist_ok=True)
