@@ -984,8 +984,32 @@ def archive_writer(state: ResearchState) -> dict:
         except Exception as e:
             logger.warning("Failed to save rotation event: %s", e)
 
-    # Write signals.json (backward compatible)
+    # Persist per-ticker investment_thesis rows. This is what feeds
+    # `prior_theses` on the next run via `archive.manager.load_prior_theses`.
+    # Until this fix the writer existed but had zero callers, so every population
+    # member added since 2026-03-16 was an orphan with no thesis. PR #42
+    # (2026-04-22) hard-fails downstream when a held ticker's thesis_update
+    # arrives with no scores — that hard-fail is the symptom; this is the cause.
+    # Population and thesis must be written atomically so the invariant
+    # `every population member has an investment_thesis` always holds.
     investment_theses = state.get("investment_theses", {})
+    run_time = state.get("run_time") or run_date
+    n_theses_written = 0
+    for ticker, thesis in investment_theses.items():
+        try:
+            thesis_row = {**thesis, "ticker": ticker, "date": run_date}
+            am.write_investment_thesis(thesis_row, run_time)
+            n_theses_written += 1
+        except Exception as e:
+            logger.error("Failed to write investment_thesis for %s: %s", ticker, e)
+    if investment_theses:
+        am.commit()
+        logger.info(
+            "[archive_writer] wrote %d/%d investment_thesis rows",
+            n_theses_written, len(investment_theses),
+        )
+
+    # Write signals.json (backward compatible)
     try:
         signals_payload = _build_signals_payload(state)
         am.write_signals_json(run_date, state.get("run_time", ""), signals_payload)
