@@ -143,6 +143,24 @@ def run_sector_team(team_id: str, ctx: SectorTeamContext) -> dict:
 
     thesis_updates = {}
     for ticker in team_held:
+        # Held tickers must always have a prior_thesis. The held-stock update
+        # path (triggers branch below + no-trigger preservation branch) both
+        # depend on prior_thesis carrying the score fields — the LLM is not
+        # authoritative on scores for held updates. A held ticker without a
+        # prior_thesis means archive_writer wrote `population` without writing
+        # the corresponding `investment_thesis` row (the bug closed by the
+        # 2026-04-25 atomic-thesis-write fix). Hard-fail loudly so the
+        # invariant cannot silently regress.
+        if ctx.prior_theses.get(ticker) is None:
+            raise RuntimeError(
+                f"Held ticker {ticker} has no prior_thesis in archive — "
+                f"population/investment_thesis are out of sync. Either "
+                f"archive_writer regressed the atomic-write invariant, or "
+                f"a backfill was skipped after a schema migration. Refusing "
+                f"to produce an unscoreable thesis_update per "
+                f"feedback_no_unscoreable_labels.md."
+            )
+
         triggers = check_material_triggers(
             ticker=ticker,
             news_data=ctx.news_data_by_ticker.get(ticker),
@@ -165,12 +183,11 @@ def run_sector_team(team_id: str, ctx: SectorTeamContext) -> dict:
             thesis_updates[ticker] = updated
         else:
             # No material event — preserve prior thesis
-            if ctx.prior_theses.get(ticker):
-                thesis_updates[ticker] = {
-                    **ctx.prior_theses[ticker],
-                    "stale_days": ctx.prior_theses[ticker].get("stale_days", 0) + 1,
-                    "triggers": [],
-                }
+            thesis_updates[ticker] = {
+                **ctx.prior_theses[ticker],
+                "stale_days": ctx.prior_theses[ticker].get("stale_days", 0) + 1,
+                "triggers": [],
+            }
 
     # ── Combine tool call logs ────────────────────────────────────────────────
     all_tool_calls = (
