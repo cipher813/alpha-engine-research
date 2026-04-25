@@ -549,7 +549,21 @@ class ArchiveManager:
         return {r[0] for r in rows}
 
     def load_prior_theses(self, tickers: list[str]) -> dict[str, dict]:
-        """Load the most recent investment_thesis row for each ticker."""
+        """Load the most recent investment_thesis row for each ticker.
+
+        Translates DB column names to the in-memory team-output convention:
+        - DB column ``score`` → dict key ``final_score`` (matches the output
+          shape of ``compute_composite_score`` and the consumer expectation
+          in ``score_aggregator``).
+        - ``symbol`` → ``ticker``.
+
+        Without this translation, every prior_thesis loaded from DB lacks a
+        ``final_score`` key, which trips PR #42's "missing final_score AND
+        both sub-scores" hard-fail in ``score_aggregator`` for every held
+        ticker — even though the underlying ``score`` column is populated.
+        Two naming conventions had drifted apart over time; this is the
+        boundary translation.
+        """
         if not self.db_conn:
             return {}
         result = {}
@@ -560,7 +574,13 @@ class ArchiveManager:
                 (ticker,),
             ).fetchone()
             if row:
-                result[ticker] = dict(row)
+                d = dict(row)
+                # Boundary translation — see docstring.
+                if "score" in d and "final_score" not in d:
+                    d["final_score"] = d["score"]
+                if "symbol" in d and "ticker" not in d:
+                    d["ticker"] = d["symbol"]
+                result[ticker] = d
         return result
 
     def commit(self) -> None:
