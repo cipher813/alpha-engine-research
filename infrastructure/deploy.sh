@@ -170,7 +170,10 @@ build_and_deploy_main() {
   if [ "$PROMPTS_STAGED_FROM_CONFIG_REPO" = "1" ]; then
     rm -rf config/prompts
   fi
-  for yaml in "${YAMLS_STAGED_FROM_CONFIG_REPO[@]}"; do
+  # Guard the array expansion — under `set -u`, expanding an empty array
+  # with `[@]` raises "unbound variable" (Bash <4.4). The `[@]+...` pattern
+  # only emits the elements when the array exists and is non-empty.
+  for yaml in "${YAMLS_STAGED_FROM_CONFIG_REPO[@]+"${YAMLS_STAGED_FROM_CONFIG_REPO[@]}"}"; do
     rm -f "config/$yaml"
   done
 
