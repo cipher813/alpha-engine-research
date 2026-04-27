@@ -53,6 +53,7 @@ EXPECTED_SECTOR_TEAM_COUNT = 6
 def validate_trajectory(
     project_name: str = "alpha-research",
     max_wait_seconds: int = 15,
+    completeness_timeout_seconds: int = 30,
 ) -> dict | None:
     """
     Validate the most recent LangGraph run's trajectory against the reference.
@@ -65,7 +66,15 @@ def validate_trajectory(
 
     Args:
         project_name: LangSmith project name (matches LANGCHAIN_PROJECT env var)
-        max_wait_seconds: Max time to wait for traces to propagate to LangSmith
+        max_wait_seconds: Max time to wait for the root run to appear in
+            LangSmith
+        completeness_timeout_seconds: Max time to wait for ALL required
+            child spans to appear after the root run is found. This is the
+            propagation race the validator was getting bit by every run —
+            ``email_sender_node`` is the last graph node before END, so its
+            child span lands in LangSmith after ``graph.invoke()`` returns
+            and after the validator's first child-runs query. Default 30s
+            covers LangSmith's typical Lambda-side flush latency.
 
     Returns:
         {"passed": bool, "failures": list[str], "node_counts": dict, "duration_ms": int}
@@ -105,16 +114,51 @@ def validate_trajectory(
         logger.warning("No runs found in LangSmith project '%s'", project_name)
         return {"passed": False, "failures": ["no_run_found"], "node_counts": {}, "duration_ms": 0}
 
-    # Fetch child spans (graph node executions)
-    try:
-        child_runs = list(client.list_runs(
-            project_name=project_name,
-            trace_id=run.trace_id,
-            is_root=False,
-        ))
-    except Exception as e:
-        logger.warning("Failed to fetch child runs: %s", e)
-        return {"passed": False, "failures": [f"fetch_children_failed: {e}"], "node_counts": {}, "duration_ms": 0}
+    # Fetch child spans (graph node executions). Poll until either all
+    # REQUIRED_NODES are present or the completeness timeout fires.
+    #
+    # Origin: prior to this poll loop, the validator did a single fetch
+    # immediately after the root-run lookup. ``email_sender_node`` is the
+    # terminal node before ``END`` and its child span propagates to
+    # LangSmith *after* ``graph.invoke()`` returns — the validator was
+    # racing the async flusher and reporting ``missing_node:
+    # email_sender_node`` on every run. This trained operators to ignore
+    # the alarm. Keep the poll bounded so a real graph regression
+    # (mid-flow node truly missing) still surfaces in <30s.
+    poll_interval = 3
+    deadline = time.time() + completeness_timeout_seconds
+    child_runs: list = []
+    last_fetch_error: str | None = None
+    while True:
+        try:
+            child_runs = list(client.list_runs(
+                project_name=project_name,
+                trace_id=run.trace_id,
+                is_root=False,
+            ))
+            last_fetch_error = None
+        except Exception as e:
+            last_fetch_error = str(e)
+            logger.warning("Failed to fetch child runs: %s", e)
+        observed_names = {c.name for c in child_runs if c.name}
+        missing = [n for n in REQUIRED_NODES if n not in observed_names]
+        if not missing:
+            break
+        if time.time() >= deadline:
+            break
+        logger.debug(
+            "Trajectory child-span poll: %d/%d required nodes seen "
+            "(missing=%s) — waiting %ds",
+            len(REQUIRED_NODES) - len(missing), len(REQUIRED_NODES),
+            missing, poll_interval,
+        )
+        time.sleep(poll_interval)
+    if last_fetch_error is not None:
+        return {
+            "passed": False,
+            "failures": [f"fetch_children_failed: {last_fetch_error}"],
+            "node_counts": {}, "duration_ms": 0,
+        }
 
     # Extract node names and their earliest start times
     node_names: list[str] = []
