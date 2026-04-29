@@ -31,6 +31,19 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
+# ── Conviction enum (two formats — agent vs storage) ──────────────────────
+# Agent format: returned by sector_quant / sector_qual / cio agents.
+# Storage format: produced by ``scoring.composite.normalize_conviction()``
+# and used by downstream executor + archive writes.
+# ``ThesisUpdate`` accepts the union because prior_theses (loaded from
+# archive) carry storage format while cio entry_theses carry agent format.
+AgentConvictionLiteral = Literal["high", "medium", "low"]
+StoredConvictionLiteral = Literal["rising", "stable", "declining"]
+EitherConvictionLiteral = Literal[
+    "high", "medium", "low", "rising", "stable", "declining"
+]
+
+
 # ── Atomic agent-output components ────────────────────────────────────────
 
 
@@ -56,7 +69,7 @@ class SectorRecommendation(BaseModel):
     bull_case: str = ""
     bear_case: str = ""
     catalysts: list[str] = Field(default_factory=list)
-    conviction: Literal["high", "medium", "low"] = "medium"
+    conviction: AgentConvictionLiteral = "medium"
     quant_rationale: str = ""
 
 
@@ -75,12 +88,19 @@ class ThesisUpdate(BaseModel):
 
     model_config = ConfigDict(extra="allow")
 
-    ticker: str
+    # ``ticker`` is optional because ThesisUpdate values appear as the
+    # value-half of a ``dict[str, ThesisUpdate]`` mapping where the key IS
+    # the ticker (e.g. ``cio.entry_theses[ticker] = thesis_dict``). The
+    # cio agent and held-stock thesis_update path both rely on this
+    # convention. score_aggregator's investment_theses path repeats the
+    # ticker in the value too, so callers can use either shape.
+    ticker: str | None = None
     final_score: float | None = Field(default=None, ge=0, le=100)
     quant_score: float | None = Field(default=None, ge=0, le=100)
     qual_score: float | None = Field(default=None, ge=0, le=100)
     sector: str | None = None
     rating: Literal["BUY", "HOLD", "SELL"] | None = None
+    conviction: EitherConvictionLiteral | None = None
     bull_case: str = ""
     bear_case: str = ""
     thesis_summary: str = ""
@@ -175,7 +195,7 @@ class CIODecision(BaseModel):
     ticker: str
     thesis_type: Literal["ADVANCE", "REJECT", "HOLD"] | None = None
     rationale: str = ""
-    conviction: Literal["high", "medium", "low"] | None = None
+    conviction: AgentConvictionLiteral | None = None
     score: float | None = Field(default=None, ge=0, le=100)
 
 
@@ -216,7 +236,12 @@ class InvestmentThesis(BaseModel):
     bull_case: str = ""
     bear_case: str = ""
     catalysts: list[str] = Field(default_factory=list)
-    conviction: Literal["high", "medium", "low"] = "medium"
+    # InvestmentThesis is constructed by score_aggregator AFTER
+    # ``normalize_conviction()`` runs, so the stored value uses the
+    # executor-compatible enum (rising/stable/declining), NOT the
+    # agent-input format (high/medium/low). Surfaced 2026-04-29 by
+    # warn-mode validation against the original draft schema.
+    conviction: StoredConvictionLiteral = "stable"
     quant_rationale: str = ""
     rating: Literal["BUY", "HOLD", "SELL"]
     score_failed: bool = False
