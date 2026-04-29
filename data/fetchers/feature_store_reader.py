@@ -83,6 +83,13 @@ def read_latest_daily_closes() -> dict[str, float] | None:
 
     Returns {ticker: close_price} or None if unavailable.
     Much cheaper than yfinance batch fetch (~100KB single S3 read vs ~900 HTTP calls).
+
+    Reads from ``staging/daily_closes/`` per the 2026-04-29 prefix migration
+    in alpha-engine-data PR #112 (the parquet's role is intermediate state
+    between API fetch and ArcticDB ingest, not authoritative storage).
+    Hard-cutover with no fallback per ``feedback_no_silent_fails`` — if
+    the staging prefix is empty/missing, the function returns ``None`` and
+    callers must handle that explicitly (existing contract).
     """
     try:
         import boto3
@@ -92,7 +99,7 @@ def read_latest_daily_closes() -> dict[str, float] | None:
 
         # Find the latest daily_closes file
         response = s3.list_objects_v2(
-            Bucket=_BUCKET, Prefix="predictor/daily_closes/", MaxKeys=100,
+            Bucket=_BUCKET, Prefix="staging/daily_closes/", MaxKeys=100,
         )
         contents = response.get("Contents", [])
         if not contents:
