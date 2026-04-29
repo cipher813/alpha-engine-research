@@ -29,6 +29,7 @@ from typing import Annotated, Any, Optional, TypedDict
 
 from langgraph.graph import END, StateGraph
 from langgraph.types import Send
+from pydantic import ValidationError
 
 from config import (
     POPULATION_CFG,
@@ -52,101 +53,112 @@ from data.population_selector import (
 from scoring.composite import compute_composite_score, normalize_conviction, score_to_rating
 from archive.manager import ArchiveManager
 
+from graph.reducers import take_last, merge_typed_dicts, reject_on_conflict
+from graph.state_schemas import (
+    CIODecision,
+    ExitEvent,
+    InvestmentThesis,
+    PopulationRotationEvent,
+    SectorTeamOutput,
+    ThesisUpdate,
+)
+
 logger = logging.getLogger(__name__)
+
+
+# ── Warn-mode schema validation helper ────────────────────────────────────────
+
+def _warn_validate(model_cls, payload, *, context: str) -> None:
+    """
+    Validate ``payload`` against ``model_cls`` and log on ValidationError —
+    NEVER raise. Used to surface agent-output schema drift without changing
+    runtime behavior. Once the schemas are stable across one full Saturday
+    SF cycle, downstream commits flip this to hard-fail (the behavior change
+    that introduces real validation gating).
+
+    The state value itself is unchanged — this helper validates and discards
+    the model. Storing the typed model would change runtime semantics; the
+    annotation in ``ResearchState`` documents the intended shape, but
+    LangGraph's TypedDict reducers see the raw dict either way.
+    """
+    try:
+        model_cls.model_validate(payload)
+    except ValidationError as e:
+        logger.warning(
+            "[schema-warn:%s] %s schema violation: %s",
+            context, model_cls.__name__, e,
+        )
 
 
 # ── State Schema ──────────────────────────────────────────────────────────────
 
-def _take_last(_left: Any, right: Any) -> Any:
-    return right
-
-
-def _merge_dicts(left: dict | None, right: dict | None) -> dict:
-    """
-    Merge dicts from Send() fan-out — each team writes its team_id key.
-
-    Returns canonical (sorted) key order so graph execution is deterministic
-    regardless of Send-branch completion order. Without sorting, downstream
-    consumers (``score_aggregator``, ``cio_node``, ``archive_writer``) iterate
-    the merged dict in completion order, which varies run-to-run; that
-    propagated through ``cio_node``'s ``candidates[:open_slots]`` slice into
-    different advance decisions, different exits, and different
-    ``signals.json`` output across re-runs of the same input. Diagnosed
-    2026-04-29 during baseline capture for the typed-state workstream — see
-    ``tests/fixtures/BASELINE_README.md``.
-    """
-    if left is None:
-        merged = dict(right or {})
-    elif right is None:
-        merged = dict(left)
-    else:
-        merged = {**left, **right}
-    return {k: merged[k] for k in sorted(merged)}
-
-
 class ResearchState(TypedDict, total=False):
     # ── Core run info ────────────────────────────────────────────────────────
-    run_date: Annotated[str, _take_last]
-    run_time: Annotated[str, _take_last]
-    archive_manager: Annotated[Any, _take_last]
-    is_early_close: Annotated[bool, _take_last]
+    run_date: Annotated[str, take_last]
+    run_time: Annotated[str, take_last]
+    archive_manager: Annotated[Any, take_last]
+    is_early_close: Annotated[bool, take_last]
 
-    # ── Data (loaded in fetch_data) ──────────────────────────────────────────
-    price_data: Annotated[dict[str, Any], _take_last]
-    technical_scores: Annotated[dict[str, dict], _take_last]
-    scanner_universe: Annotated[list[str], _take_last]
-    sector_map: Annotated[dict[str, str], _take_last]
-    macro_data: Annotated[dict, _take_last]
-    current_population: Annotated[list[dict], _take_last]
-    population_tickers: Annotated[list[str], _take_last]
-    prior_theses: Annotated[dict[str, dict], _take_last]
-    prior_sector_ratings: Annotated[dict[str, dict], _take_last]
-    predictions: Annotated[dict[str, dict], _take_last]
-    news_data_by_ticker: Annotated[dict[str, dict], _take_last]
-    analyst_data_by_ticker: Annotated[dict[str, dict], _take_last]
-    insider_data_by_ticker: Annotated[dict[str, dict], _take_last]
+    # ── Data (loaded in fetch_data; single-writer, no parallel update) ───────
+    price_data: Annotated[dict[str, Any], take_last]
+    technical_scores: Annotated[dict[str, dict], take_last]
+    scanner_universe: Annotated[list[str], take_last]
+    sector_map: Annotated[dict[str, str], take_last]
+    macro_data: Annotated[dict, take_last]
+    current_population: Annotated[list[dict], take_last]
+    population_tickers: Annotated[list[str], take_last]
+    prior_theses: Annotated[dict[str, ThesisUpdate], take_last]
+    prior_sector_ratings: Annotated[dict[str, dict], take_last]
+    predictions: Annotated[dict[str, dict], take_last]
+    news_data_by_ticker: Annotated[dict[str, dict], take_last]
+    analyst_data_by_ticker: Annotated[dict[str, dict], take_last]
+    insider_data_by_ticker: Annotated[dict[str, dict], take_last]
 
     # ── Prior context (memory) ─────────────────────────────────────────────
-    prior_macro_report: Annotated[str, _take_last]
-    prior_macro_snapshots: Annotated[list[dict], _take_last]
-    episodic_memories: Annotated[dict[str, list], _take_last]
-    semantic_memories: Annotated[dict[str, list], _take_last]
+    prior_macro_report: Annotated[str, take_last]
+    prior_macro_snapshots: Annotated[list[dict], take_last]
+    episodic_memories: Annotated[dict[str, list], take_last]
+    semantic_memories: Annotated[dict[str, list], take_last]
 
-    # ── Sector team outputs (merged via Send) ────────────────────────────────
-    sector_team_outputs: Annotated[dict[str, Any], _merge_dicts]
+    # ── Sector team outputs (Send fan-out, disjoint team_id keyspace) ───────
+    # reject_on_conflict: each Send branch owns a distinct team_id; an overlap
+    # would indicate a graph-wiring bug, not a legitimate merge. Replaces the
+    # legacy ``_merge_dicts`` (PR #50, 2026-04-29) which was last-write-wins
+    # but happened to be safe under disjoint-key invariant.
+    sector_team_outputs: Annotated[dict[str, SectorTeamOutput], reject_on_conflict]
 
     # ── Macro output ─────────────────────────────────────────────────────────
-    macro_report: Annotated[str, _take_last]
-    sector_modifiers: Annotated[dict[str, float], _take_last]
-    sector_ratings: Annotated[dict[str, dict], _take_last]
-    market_regime: Annotated[str, _take_last]
+    macro_report: Annotated[str, take_last]
+    sector_modifiers: Annotated[dict[str, float], take_last]
+    sector_ratings: Annotated[dict[str, dict], take_last]
+    market_regime: Annotated[str, take_last]
 
     # ── Exit evaluator output ────────────────────────────────────────────────
-    remaining_population: Annotated[list[dict], _take_last]
-    exits: Annotated[list[dict], _take_last]
-    open_slots: Annotated[int, _take_last]
+    remaining_population: Annotated[list[dict], take_last]
+    exits: Annotated[list[ExitEvent], take_last]
+    open_slots: Annotated[int, take_last]
 
     # ── CIO output ───────────────────────────────────────────────────────────
-    ic_decisions: Annotated[list[dict], _take_last]
-    advanced_tickers: Annotated[list[str], _take_last]
-    entry_theses: Annotated[dict[str, dict], _take_last]
+    ic_decisions: Annotated[list[CIODecision], take_last]
+    advanced_tickers: Annotated[list[str], take_last]
+    entry_theses: Annotated[dict[str, ThesisUpdate], take_last]
 
     # ── Final population ─────────────────────────────────────────────────────
-    new_population: Annotated[list[dict], _take_last]
-    population_rotation_events: Annotated[list[dict], _take_last]
+    new_population: Annotated[list[dict], take_last]
+    population_rotation_events: Annotated[list[PopulationRotationEvent], take_last]
 
     # ── Email ────────────────────────────────────────────────────────────────
-    consolidated_report: Annotated[str, _take_last]
-    email_sent: Annotated[bool, _take_last]
+    consolidated_report: Annotated[str, take_last]
+    email_sent: Annotated[bool, take_last]
 
     # ── Team slot allocation ─────────────────────────────────────────────────
-    team_slot_allocation: Annotated[dict[str, int], _take_last]
+    team_slot_allocation: Annotated[dict[str, int], take_last]
 
-    # ── Investment theses (combined team + IC) ───────────────────────────────
-    investment_theses: Annotated[dict[str, dict], _take_last]
+    # ── Investment theses (computed by score_aggregator) ─────────────────────
+    investment_theses: Annotated[dict[str, InvestmentThesis], take_last]
 
     # ── Dispatch metadata (for Send()) ───────────────────────────────────────
-    team_id: Annotated[str, _take_last]  # set by Send() per team
+    team_id: Annotated[str, take_last]  # set by Send() per team
 
 
 # ── Node Functions ────────────────────────────────────────────────────────────
@@ -470,7 +482,13 @@ def sector_team_node(state: ResearchState) -> dict:
     )
     result = run_sector_team(team_id, ctx)
 
-    # Return partial state update — _merge_dicts reducer merges team outputs
+    # Warn-mode schema validation — surfaces agent-output drift without
+    # changing runtime behavior. Hard-fail flip lands in a follow-up PR
+    # after one Saturday SF cycle of clean warn-counts.
+    _warn_validate(SectorTeamOutput, result, context=f"sector_team:{team_id}")
+
+    # Return partial state update — reject_on_conflict reducer merges team
+    # outputs (each team_id is disjoint).
     return {
         "sector_team_outputs": {team_id: result},
     }
@@ -533,6 +551,10 @@ def exit_evaluator_node(state: ResearchState) -> dict:
         run_date=state.get("run_date"),
         constituents=set(scanner_universe) if scanner_universe else None,
     )
+
+    # Warn-mode schema validation on per-exit shape.
+    for ev in exits:
+        _warn_validate(ExitEvent, ev, context="exit_evaluator")
 
     return {
         "remaining_population": remaining,
@@ -693,6 +715,10 @@ def score_aggregator(state: ResearchState) -> dict:
 
     logger.info("[score_aggregator] scored %d tickers", len(investment_theses))
 
+    # Warn-mode schema validation on every produced thesis.
+    for ticker, thesis in investment_theses.items():
+        _warn_validate(InvestmentThesis, thesis, context=f"score_aggregator:{ticker}")
+
     return {"investment_theses": investment_theses}
 
 
@@ -745,6 +771,12 @@ def cio_node(state: ResearchState) -> dict:
         run_date=state.get("run_date", ""),
         prior_decisions=prior_ic,
     )
+
+    # Warn-mode schema validation on CIO output shapes.
+    for decision in cio_result.get("decisions", []):
+        _warn_validate(CIODecision, decision, context="cio")
+    for ticker, thesis in cio_result.get("entry_theses", {}).items():
+        _warn_validate(ThesisUpdate, thesis, context=f"cio:entry_theses:{ticker}")
 
     return {
         "ic_decisions": cio_result.get("decisions", []),

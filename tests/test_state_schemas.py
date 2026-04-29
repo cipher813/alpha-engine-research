@@ -287,7 +287,8 @@ class TestInvestmentThesis:
         t = InvestmentThesis(ticker="AAPL", final_score=70.0, rating="BUY")
         assert t.sector == "Unknown"
         assert t.team_id == ""
-        assert t.conviction == "medium"
+        # Storage format from normalize_conviction (executor-compatible)
+        assert t.conviction == "stable"
 
     def test_full(self):
         t = InvestmentThesis(
@@ -302,12 +303,22 @@ class TestInvestmentThesis:
             bull_case="AI",
             bear_case="Valuation",
             catalysts=["Earnings"],
-            conviction="high",
+            conviction="rising",  # storage format
             quant_rationale="...",
             rating="BUY",
             score_failed=False,
         )
         assert t.weighted_base == 82.5
+
+    def test_agent_format_conviction_rejected(self):
+        # InvestmentThesis is post-normalize_conviction storage; agent format
+        # must NOT be accepted at this boundary (use ThesisUpdate for the
+        # union-format variant if needed).
+        with pytest.raises(ValueError):
+            InvestmentThesis(
+                ticker="AAPL", final_score=70.0, rating="BUY",
+                conviction="medium",
+            )
 
     def test_rating_literal(self):
         with pytest.raises(ValueError):
@@ -328,7 +339,7 @@ class TestInvestmentThesis:
             "bull_case": "...",
             "bear_case": "...",
             "catalysts": [],
-            "conviction": "medium",
+            "conviction": "stable",  # storage format from normalize_conviction
             "quant_rationale": "",
             "rating": "BUY",
             "score_failed": False,
