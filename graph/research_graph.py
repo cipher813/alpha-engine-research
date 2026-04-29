@@ -62,12 +62,26 @@ def _take_last(_left: Any, right: Any) -> Any:
 
 
 def _merge_dicts(left: dict | None, right: dict | None) -> dict:
-    """Merge dicts from Send() fan-out — each team writes its team_id key."""
+    """
+    Merge dicts from Send() fan-out — each team writes its team_id key.
+
+    Returns canonical (sorted) key order so graph execution is deterministic
+    regardless of Send-branch completion order. Without sorting, downstream
+    consumers (``score_aggregator``, ``cio_node``, ``archive_writer``) iterate
+    the merged dict in completion order, which varies run-to-run; that
+    propagated through ``cio_node``'s ``candidates[:open_slots]`` slice into
+    different advance decisions, different exits, and different
+    ``signals.json`` output across re-runs of the same input. Diagnosed
+    2026-04-29 during baseline capture for the typed-state workstream — see
+    ``tests/fixtures/BASELINE_README.md``.
+    """
     if left is None:
-        return right or {}
-    if right is None:
-        return left
-    return {**left, **right}
+        merged = dict(right or {})
+    elif right is None:
+        merged = dict(left)
+    else:
+        merged = {**left, **right}
+    return {k: merged[k] for k in sorted(merged)}
 
 
 class ResearchState(TypedDict, total=False):
