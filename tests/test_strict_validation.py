@@ -32,9 +32,12 @@ from graph.state_schemas import (
 class TestStrictValidationEnvVar:
     """``_strict_validation_enabled()`` parses the env var per-spec."""
 
-    def test_unset_defaults_to_false_during_rollout(self, monkeypatch):
+    def test_unset_defaults_to_true_post_step_f(self, monkeypatch):
+        """Step F of PR 2 (2026-04-30 evening) flipped the default from
+        False to True. Strict-by-default is now the post-flip steady state;
+        STRICT_VALIDATION=false is the emergency override path."""
         monkeypatch.delenv("STRICT_VALIDATION", raising=False)
-        assert _strict_validation_enabled() is False
+        assert _strict_validation_enabled() is True
 
     def test_true_string_enables_strict(self, monkeypatch):
         monkeypatch.setenv("STRICT_VALIDATION", "true")
@@ -68,7 +71,8 @@ class TestStrictValidationEnvVar:
 class TestValidateBehavior:
     """``_validate`` behaves correctly under each strict/payload combo."""
 
-    def test_valid_payload_passes_in_warn_mode(self, monkeypatch, caplog):
+    def test_valid_payload_passes_in_strict_default(self, monkeypatch, caplog):
+        """Default is strict post-Step F. Valid payload still passes silently."""
         monkeypatch.delenv("STRICT_VALIDATION", raising=False)
         good = {"ticker": "JPM", "thesis_type": "ADVANCE", "conviction": 78}
         # Should not raise, should not log a schema warning
@@ -76,14 +80,13 @@ class TestValidateBehavior:
         assert "schema-warn" not in caplog.text
         assert "schema-fail" not in caplog.text
 
-    def test_invalid_payload_warns_in_warn_mode(self, monkeypatch, caplog):
+    def test_invalid_payload_raises_in_strict_default(self, monkeypatch):
+        """Default is strict post-Step F. Invalid payload raises rather than
+        warns. To recover the warn-mode log path, set STRICT_VALIDATION=false."""
         monkeypatch.delenv("STRICT_VALIDATION", raising=False)
         bad = {"ticker": "JPM", "conviction": 999}  # out of [0, 100]
-        import logging
-        with caplog.at_level(logging.WARNING):
-            _validate(CIODecision, bad, context="test_warn")
-        assert "schema-warn:test_warn" in caplog.text
-        assert "CIODecision" in caplog.text
+        with pytest.raises(RuntimeError, match=r"schema-fail:test_default_strict"):
+            _validate(CIODecision, bad, context="test_default_strict")
 
     def test_invalid_payload_raises_when_strict_param_true(self, monkeypatch):
         monkeypatch.delenv("STRICT_VALIDATION", raising=False)
