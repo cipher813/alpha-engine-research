@@ -87,8 +87,14 @@ class TestInstallRestore:
     def setup_method(self):
         # Build a fake `agents.macro_agent` etc. with sentinel originals
         # so we can verify save/restore without importing real agents.
+        # Track real attributes that already exist so teardown can
+        # restore them — without this, sentinel MagicMocks leak into
+        # the parent package namespace and break subsequent tests that
+        # expect the real module attribute (caught 2026-04-30 by
+        # tests/test_macro_agent_structured.py interaction).
         self._sentinels = {}
         self._created_modules = []
+        self._saved_real_attrs: dict[tuple[str, str], object] = {}
         for mod_path, attr in [
             ("agents.macro_agent", "run_macro_agent_with_reflection"),
             ("agents.macro_agent", "run_macro_agent"),
@@ -106,6 +112,11 @@ class TestInstallRestore:
                     sys.modules[sub_path] = types.ModuleType(sub_path)
                     self._created_modules.append(sub_path)
             mod = sys.modules[mod_path]
+            # Save the existing real attribute (if any) so teardown
+            # can restore it. Sentinel MagicMocks must not leak into
+            # the real module namespace once the test exits.
+            if hasattr(mod, attr) and (mod_path, attr) not in self._saved_real_attrs:
+                self._saved_real_attrs[(mod_path, attr)] = getattr(mod, attr)
             sentinel = MagicMock(name=f"{mod_path}.{attr}.original")
             setattr(mod, attr, sentinel)
             self._sentinels[(mod_path, attr)] = sentinel
@@ -129,6 +140,14 @@ class TestInstallRestore:
         self._created_modules.append("graph.research_graph")
 
     def teardown_method(self):
+        # Restore real-module attributes BEFORE popping the shells —
+        # if the parent module persists in sys.modules with a sentinel
+        # MagicMock as one of its attributes, subsequent tests in the
+        # session will see the sentinel instead of the real function.
+        for (mod_path, attr), original in self._saved_real_attrs.items():
+            mod = sys.modules.get(mod_path)
+            if mod is not None:
+                setattr(mod, attr, original)
         for mod_path in reversed(self._created_modules):
             sys.modules.pop(mod_path, None)
 

@@ -22,6 +22,8 @@ from langchain_core.messages import HumanMessage
 from agents.prompt_loader import load_prompt
 from config import STRATEGIC_MODEL, MAX_TOKENS_STRATEGIC, ANTHROPIC_API_KEY, ALL_SECTORS, REGIME_GUARDRAILS, PRIOR_REPORT_MAX_CHARS
 from agents.token_guard import check_prompt_size
+from graph.state_schemas import MacroCriticOutput, MacroEconomistRawOutput
+from strict_mode import is_strict_validation_enabled
 
 _PROMPT_TEMPLATE = load_prompt("macro_agent")
 
@@ -213,21 +215,88 @@ def run_macro_agent(
 
     prompt = check_prompt_size(prompt, MAX_TOKENS_STRATEGIC, caller="macro_agent")
 
-    response = llm.invoke([HumanMessage(content=prompt)])
+    # PR 2.2 Step B (Path B2): with_structured_output(include_raw=True) replaces
+    # the prior _extract_macro_json regex parser. Anthropic's tool-use mechanism
+    # populates the typed Pydantic model; we keep the raw text alongside so the
+    # markdown narrative (report_md) is preserved verbatim — pulled from raw if
+    # the LLM didn't fill the schema field directly. include_raw=True converts
+    # parse failures into a captured ``parsing_error`` rather than raising; the
+    # strict-mode env-var gate explicitly raises on parse failure to match the
+    # "no silent fallbacks" feedback rule.
+    structured_llm = llm.with_structured_output(
+        MacroEconomistRawOutput, include_raw=True
+    )
+    response = structured_llm.invoke([HumanMessage(content=prompt)])
 
-    full_text = response.content
-    macro_json = _extract_macro_json(full_text)
+    raw_message = response.get("raw")
+    parsed: MacroEconomistRawOutput | None = response.get("parsed")
+    parsing_error = response.get("parsing_error")
+    full_text = (
+        raw_message.content
+        if raw_message is not None and hasattr(raw_message, "content")
+        else ""
+    )
 
-    # Strip JSON block from markdown using the same balanced-brace scanner
-    _start, _end = _find_json_block(full_text)
-    if _start != -1:
-        report_md = (full_text[:_start] + full_text[_end + 1:]).strip()
-    else:
-        report_md = full_text.strip()
+    if parsing_error is not None:
+        msg = (
+            f"[macro_agent] structured-output parse failed: "
+            f"{type(parsing_error).__name__}: {parsing_error}"
+        )
+        if is_strict_validation_enabled():
+            raise RuntimeError(msg)
+        logger.warning("%s — falling back to defaults (lax mode)", msg)
+        parsed = MacroEconomistRawOutput(
+            market_regime="neutral",
+            sector_modifiers=_DEFAULT_SECTOR_MODIFIERS.copy(),
+        )
 
-    # Post-LLM regime validation (Task 3A)
-    llm_regime = macro_json.get("market_regime", "neutral")
-    validated_regime = _validate_regime(llm_regime, macro_data)
+    # parsed is guaranteed non-None at this point (either the LLM populated it
+    # or the lax-mode fallback above synthesized defaults).
+    assert parsed is not None
+
+    # report_md preference order: parsed.report_md (LLM filled the field) →
+    # raw-slice fallback (LLM emitted prose-then-JSON like the prior contract).
+    # The fallback retires once prompts are migrated to put markdown into the
+    # schema field; until then, the include_raw path keeps narrative quality.
+    report_md = (parsed.report_md or "").strip()
+    if not report_md and full_text:
+        _start, _end = _find_json_block(full_text)
+        if _start != -1:
+            report_md = (full_text[:_start] + full_text[_end + 1:]).strip()
+        else:
+            report_md = full_text.strip()
+
+    # Sector ratings post-validation: per-sector validity check + derived
+    # fallback when the LLM emits an invalid rating string. Preserved from the
+    # legacy _extract_macro_json; the schema only types sector_ratings as
+    # ``dict[str, dict]`` so this domain logic still lives in the agent.
+    raw_ratings = dict(parsed.sector_ratings or {})
+    validated_ratings = {}
+    for sector in ALL_SECTORS:
+        entry = raw_ratings.get(sector, {})
+        rating = entry.get("rating", "") if isinstance(entry, dict) else ""
+        rationale = entry.get("rationale", "") if isinstance(entry, dict) else ""
+        if rating not in _VALID_RATINGS:
+            mod = parsed.sector_modifiers.get(sector, 1.0)
+            fallback = _derive_sector_ratings({sector: mod})[sector]
+            validated_ratings[sector] = fallback
+        else:
+            validated_ratings[sector] = {"rating": rating, "rationale": rationale}
+
+    # Build macro_json in the legacy return shape so downstream consumers
+    # (graph/research_graph.py merge_results, archive_writer, consolidator)
+    # see the same dict structure as before the with_structured_output flip.
+    macro_json = {
+        "market_regime": parsed.market_regime,
+        "sector_modifiers": dict(parsed.sector_modifiers),
+        "sector_ratings": validated_ratings,
+        "key_theme": parsed.key_theme,
+        "material_changes": parsed.material_changes,
+    }
+
+    # Post-LLM regime validation (Task 3A) — quantitative cross-check that
+    # may override the LLM's regime call when guardrail invariants fire.
+    validated_regime = _validate_regime(parsed.market_regime, macro_data)
     macro_json["market_regime"] = validated_regime
 
     return {
@@ -357,19 +426,40 @@ def run_macro_critic(
         sector_modifiers_text="\n".join(mod_lines),
     )
 
+    # PR 2.2 Step C: flip macro_critic to with_structured_output. Critic
+    # historically returned a single-object JSON like {"action": "...", ...}
+    # extracted via regex; structured output replaces the regex with the
+    # typed extraction. Strict mode raises on parse failure; lax mode keeps
+    # the silent-accept fallback because the critic is an editorial gate
+    # (rejecting the critic's input falls back to the macro_agent's initial
+    # classification, which is the conservative behavior).
+    structured_llm = llm.with_structured_output(MacroCriticOutput)
     try:
-        response = llm.invoke([HumanMessage(content=prompt)])
-        text = response.content
-        match = re.search(r"\{[^{}]*\"action\"[^{}]*\}", text, re.DOTALL)
-        if match:
-            result = json.loads(match.group())
-            logger.info("[macro_critic] action=%s critique=%s",
-                         result.get("action"), result.get("critique", "")[:80])
-            return result
+        verdict: MacroCriticOutput = structured_llm.invoke(
+            [HumanMessage(content=prompt)]
+        )
+        result = {
+            "action": verdict.action,
+            "critique": verdict.critique,
+        }
+        if verdict.suggested_regime is not None:
+            result["suggested_regime"] = verdict.suggested_regime
+        logger.info(
+            "[macro_critic] action=%s critique=%s",
+            verdict.action, (verdict.critique or "")[:80],
+        )
+        return result
     except Exception as e:
-        logger.warning("[macro_critic] LLM call failed: %s — accepting initial result", e)
+        if is_strict_validation_enabled():
+            raise
+        logger.warning(
+            "[macro_critic] LLM call failed: %s — accepting initial result", e
+        )
 
-    return {"action": "accept", "critique": "Critic unavailable — accepting initial classification."}
+    return {
+        "action": "accept",
+        "critique": "Critic unavailable — accepting initial classification.",
+    }
 
 
 def run_macro_agent_with_reflection(
