@@ -48,24 +48,38 @@ EitherConvictionLiteral = Literal[
 
 
 class ToolCall(BaseModel):
-    """One ReAct tool invocation log entry. Diagnostic; not load-bearing."""
+    """One ReAct tool invocation log entry. Diagnostic; not load-bearing.
+
+    ``tool`` is optional because peer-review-orchestration entries are
+    appended to ``tool_calls`` to record the phase, but they have no
+    underlying tool name (peer review is a synthesis step, not a tool
+    invocation). 2026-04-30 warn-mode validation surfaced 3 such entries
+    across healthcare/financials/defensives in a real Saturday SF run.
+    """
 
     model_config = ConfigDict(extra="allow")
 
-    tool: str
+    tool: str | None = None
     ticker: str | None = None
     args: dict = Field(default_factory=dict)
     result_summary: str | None = None
 
 
 class SectorRecommendation(BaseModel):
-    """One BUY-candidate output from a sector team's quant→qual→peer chain."""
+    """One BUY-candidate output from a sector team's quant→qual→peer chain.
+
+    ``qual_score`` is optional because peer-review can produce
+    recommendations even when the qual analyst returned zero assessments
+    (logged as ``[qual:<team>] completed — 0 assessments, N tool calls``).
+    2026-04-30 warn-mode validation surfaced 6 such entries (healthcare 3
+    + defensives 3) in a real Saturday SF run.
+    """
 
     model_config = ConfigDict(extra="allow")
 
     ticker: str
     quant_score: float = Field(ge=0, le=100)
-    qual_score: float = Field(ge=0, le=100)
+    qual_score: float | None = Field(default=None, ge=0, le=100)
     bull_case: str = ""
     bear_case: str = ""
     catalysts: list[str] = Field(default_factory=list)
@@ -188,14 +202,25 @@ class ExitEvaluatorOutput(BaseModel):
 
 
 class CIODecision(BaseModel):
-    """One per-ticker CIO decision (ADVANCE / REJECT / HOLD)."""
+    """One per-ticker CIO decision (ADVANCE / REJECT / HOLD).
+
+    ``conviction`` is an integer score (0-100), aligned with what the CIO
+    agent prompt actually emits — composite ranking scores like 78, 72, 25.
+    2026-04-30 warn-mode validation surfaced 9 violations against the prior
+    Literal['high','medium','low'] schema in a real Saturday SF run; every
+    decision had a numeric conviction. Path Y of the conviction-semantics
+    decision (versatility — int representation generalizes; downstream
+    consumers can map to display levels via a level-helper). PR for
+    producer-side alignment of SectorRecommendation/InvestmentThesis to
+    int convention is the follow-up.
+    """
 
     model_config = ConfigDict(extra="allow")
 
     ticker: str
     thesis_type: Literal["ADVANCE", "REJECT", "HOLD"] | None = None
     rationale: str = ""
-    conviction: AgentConvictionLiteral | None = None
+    conviction: int | None = Field(default=None, ge=0, le=100)
     score: float | None = Field(default=None, ge=0, le=100)
 
 
