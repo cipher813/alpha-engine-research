@@ -31,17 +31,18 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
-# ── Conviction enum (two formats — agent vs storage) ──────────────────────
-# Agent format: returned by sector_quant / sector_qual / cio agents.
+# ── Conviction enums (agent vs storage formats) ───────────────────────────
+# Agent format (post-Option-A 2026-04-30): every agent emits int 0-100. The
+# old Literal["high","medium","low"] alias is retired — see ROADMAP entry
+# "Standardize agent-level conviction to int 0-100 (Option A)".
 # Storage format: produced by ``scoring.composite.normalize_conviction()``
-# and used by downstream executor + archive writes.
-# ``ThesisUpdate`` accepts the union because prior_theses (loaded from
-# archive) carry storage format while cio entry_theses carry agent format.
-AgentConvictionLiteral = Literal["high", "medium", "low"]
+# and used by downstream executor + archive writes. Trend label, NOT
+# strength — preserved for backward compatibility with existing rows in
+# ``investment_thesis`` SQLite (cleanly renamed under Option B / Phase 4).
+# ``ThesisUpdate.conviction`` is an int|StoredConvictionLiteral|None union
+# because prior_theses (loaded from archive) carry storage format while
+# cio entry_theses + agent-emitted theses carry the agent int format.
 StoredConvictionLiteral = Literal["rising", "stable", "declining"]
-EitherConvictionLiteral = Literal[
-    "high", "medium", "low", "rising", "stable", "declining"
-]
 
 
 # ── Atomic agent-output components ────────────────────────────────────────
@@ -83,7 +84,7 @@ class SectorRecommendation(BaseModel):
     bull_case: str = ""
     bear_case: str = ""
     catalysts: list[str] = Field(default_factory=list)
-    conviction: AgentConvictionLiteral = "medium"
+    conviction: int | None = Field(default=None, ge=0, le=100)
     quant_rationale: str = ""
 
 
@@ -114,7 +115,11 @@ class ThesisUpdate(BaseModel):
     qual_score: float | None = Field(default=None, ge=0, le=100)
     sector: str | None = None
     rating: Literal["BUY", "HOLD", "SELL"] | None = None
-    conviction: EitherConvictionLiteral | None = None
+    # int-or-storage-string union: agent-emitted entries carry int 0-100
+    # (post-Option-A); prior_theses loaded from archive carry the storage
+    # trend label rising/stable/declining. ``normalize_conviction`` flattens
+    # the union back to storage format at the score_aggregator boundary.
+    conviction: int | StoredConvictionLiteral | None = None
     bull_case: str = ""
     bear_case: str = ""
     thesis_summary: str = ""
@@ -388,7 +393,7 @@ class QualAssessment(BaseModel):
     bear_case: str = ""
     catalysts: list[str] = Field(default_factory=list)
     risks: list[str] = Field(default_factory=list)
-    conviction: AgentConvictionLiteral | None = None
+    conviction: int | None = Field(default=None, ge=0, le=100)
 
 
 class QualAnalystOutput(BaseModel):
@@ -441,7 +446,7 @@ class HeldThesisUpdateLLMOutput(BaseModel):
     bear_case: str = ""
     catalysts: list[str] = Field(default_factory=list)
     risks: list[str] = Field(default_factory=list)
-    conviction: AgentConvictionLiteral | None = None
+    conviction: int | None = Field(default=None, ge=0, le=100)
     conviction_rationale: str = ""
     thesis_summary: str = ""
     triggers_response: str = ""

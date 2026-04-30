@@ -162,7 +162,12 @@ def _merge_candidates(
             "bull_case": qa.get("bull_case", ""),
             "bear_case": qa.get("bear_case", ""),
             "catalysts": qa.get("catalysts", []),
-            "conviction": qa.get("conviction", "medium"),
+            # Option A 2026-04-30: agent-format conviction is int 0-100 or
+            # None. The string default ``"medium"`` is gone — qual analyst
+            # emits int per qual_analyst_user.txt v1.1.0. None means qual
+            # didn't emit a conviction for this ticker; downstream
+            # normalize_conviction maps None → "stable".
+            "conviction": qa.get("conviction"),
             "resources_used": qa.get("resources_used", []),
         })
 
@@ -178,7 +183,8 @@ def _merge_candidates(
                 "bull_case": additional.get("rationale", ""),
                 "bear_case": "",
                 "catalysts": [],
-                "conviction": "medium",
+                # Same int-or-None convention as the merged loop above.
+                "conviction": additional.get("conviction"),
                 "resources_used": [],
                 "is_qual_addition": True,
             })
