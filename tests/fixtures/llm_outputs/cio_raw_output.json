@@ -1,0 +1,52 @@
+{
+  "decisions": [
+    {
+      "ticker": "NVDA",
+      "decision": "ADVANCE",
+      "rank": 1,
+      "conviction": 88,
+      "rationale": "Highest team conviction; macro tailwind aligns; portfolio concentration acceptable given sector overweight; clear catalyst calendar.",
+      "entry_thesis": {
+        "bull_case": "AI compute demand structural; data center revenue growing 30%+ YoY",
+        "bear_case": "Hyperscaler capex deceleration; valuation rich",
+        "catalysts": ["Q3 earnings", "GTC keynote"],
+        "risks": ["Capex normalization", "China export controls"],
+        "conviction": "high",
+        "conviction_rationale": "Multiple catalysts within 90 days",
+        "thesis_summary": "Best-of-breed AI infrastructure play with structural tailwinds"
+      }
+    },
+    {
+      "ticker": "MSFT",
+      "decision": "ADVANCE",
+      "rank": 2,
+      "conviction": 75,
+      "rationale": "Diversified revenue base; Azure AI accelerating; lower volatility than alternatives.",
+      "entry_thesis": {
+        "bull_case": "Azure AI revenue accelerating; Copilot enterprise adoption",
+        "bear_case": "Capex intensity rising",
+        "catalysts": ["Q1 Azure growth print"],
+        "risks": ["AI capex absorption"],
+        "conviction": "medium",
+        "conviction_rationale": "Strong fundamentals but valuation full",
+        "thesis_summary": "Diversified mega-cap with AI optionality"
+      }
+    },
+    {
+      "ticker": "JPM",
+      "decision": "REJECT",
+      "rank": null,
+      "conviction": 35,
+      "rationale": "Financial sector underweight per macro; rate cycle headwinds; better risk/reward elsewhere.",
+      "entry_thesis": null
+    },
+    {
+      "ticker": "XOM",
+      "decision": "NO_ADVANCE_DEADLOCK",
+      "rank": null,
+      "conviction": 50,
+      "rationale": "Mixed signals: oil price weakness vs. capital return story. Insufficient conviction either direction; recommend monitoring.",
+      "entry_thesis": null
+    }
+  ]
+}

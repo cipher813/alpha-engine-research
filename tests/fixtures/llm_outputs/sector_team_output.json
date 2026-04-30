@@ -1,0 +1,44 @@
+{
+  "team_id": "technology",
+  "recommendations": [
+    {
+      "ticker": "NVDA",
+      "quant_score": 88.5,
+      "qual_score": 85.0,
+      "bull_case": "AI compute demand structural; data center revenue growing 30%+ YoY",
+      "bear_case": "Hyperscaler capex deceleration; valuation rich",
+      "catalysts": ["Q3 earnings", "GTC keynote"],
+      "conviction": "high",
+      "quant_rationale": "RSI 58, momentum_20d +5.2%, 50d/200d MA crossover bullish"
+    },
+    {
+      "ticker": "MSFT",
+      "quant_score": 82.0,
+      "qual_score": 78.0,
+      "bull_case": "Azure AI revenue accelerating; Copilot enterprise adoption",
+      "bear_case": "Capex intensity rising",
+      "catalysts": ["Q1 Azure growth print"],
+      "conviction": "medium",
+      "quant_rationale": "Steady momentum, low volatility regime"
+    }
+  ],
+  "thesis_updates": {
+    "AAPL": {
+      "ticker": "AAPL",
+      "final_score": 72.0,
+      "quant_score": 70.0,
+      "qual_score": 74.0,
+      "sector": "Technology",
+      "rating": "HOLD",
+      "conviction": "stable",
+      "bull_case": "Services growth offset hardware deceleration",
+      "bear_case": "China demand softness persistent"
+    }
+  },
+  "tool_calls": [
+    {"tool": "quant_indicators", "ticker": "NVDA"},
+    {"tool": "qual_news_search", "ticker": "MSFT"},
+    {"args": {"phase": "peer_review"}}
+  ],
+  "error": null
+}
