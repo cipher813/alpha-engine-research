@@ -56,6 +56,14 @@ class TestToolCall:
         # extra fields preserved on dump
         assert tc.model_dump()["undocumented_field"] == "value"
 
+    def test_tool_optional_for_peer_review_entries(self):
+        # 2026-04-30: peer_review appends a phase-tracking entry to
+        # tool_calls without a `tool` name (it's an orchestration step,
+        # not a tool invocation). Schema must accept tool=None.
+        tc = ToolCall(args={"phase": "peer_review"})
+        assert tc.tool is None
+        assert tc.args["phase"] == "peer_review"
+
 
 # ── SectorRecommendation ──────────────────────────────────────────────────
 
@@ -71,6 +79,16 @@ class TestSectorRecommendation:
             SectorRecommendation(ticker="AAPL", quant_score=120, qual_score=50)
         with pytest.raises(ValueError):
             SectorRecommendation(ticker="AAPL", quant_score=50, qual_score=-1)
+
+    def test_qual_score_optional(self):
+        # 2026-04-30: peer_review can produce a recommendation when the
+        # qual analyst returned 0 assessments (qual_score legitimately
+        # absent). Schema must accept qual_score=None.
+        r = SectorRecommendation(ticker="AAPL", quant_score=70.0, qual_score=None)
+        assert r.qual_score is None
+        # And must still clamp when a value IS provided.
+        with pytest.raises(ValueError):
+            SectorRecommendation(ticker="AAPL", quant_score=70.0, qual_score=120)
 
     def test_conviction_literal(self):
         with pytest.raises(ValueError):
@@ -265,10 +283,22 @@ class TestCIODecision:
             ticker="JPM",
             thesis_type="ADVANCE",
             rationale="Strong",
-            conviction="high",
+            conviction=78,
             score=78.0,
         )
         assert d.thesis_type == "ADVANCE"
+        assert d.conviction == 78
+
+    def test_conviction_int_range_enforced(self):
+        # Path Y: conviction is a 0-100 score; bounds enforced.
+        with pytest.raises(ValueError):
+            CIODecision(ticker="JPM", conviction=120)
+        with pytest.raises(ValueError):
+            CIODecision(ticker="JPM", conviction=-1)
+
+    def test_conviction_optional(self):
+        d = CIODecision(ticker="JPM")
+        assert d.conviction is None
 
 
 class TestCIOOutput:
