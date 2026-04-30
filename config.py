@@ -147,6 +147,18 @@ PREDICTOR_PREDICTIONS_KEY: str = _pred_cfg.get("s3_predictions_key", "predictor/
 # Below this threshold the prediction is treated as low-conviction and ignored.
 MIN_PREDICTION_CONFIDENCE: float = float(_pred_cfg.get("min_confidence", 0.60))
 
+# ── CIO ───────────────────────────────────────────────────────────────────────
+# Weekly entrant cap applied to new investments (does not affect reaffirmations
+# of held BUY-rated names).
+_cio_cfg: dict = _cfg.get("cio", {})
+CIO_MAX_NEW_ENTRANTS: int = int(_cio_cfg.get("max_new_entrants", 10))
+CIO_MIN_NEW_ENTRANTS: int = int(_cio_cfg.get("min_new_entrants", 2))
+if CIO_MIN_NEW_ENTRANTS < 0 or CIO_MAX_NEW_ENTRANTS < CIO_MIN_NEW_ENTRANTS:
+    raise ValueError(
+        f"Invalid cio config: min_new_entrants={CIO_MIN_NEW_ENTRANTS}, "
+        f"max_new_entrants={CIO_MAX_NEW_ENTRANTS} (must be 0 <= min <= max)"
+    )
+
 # ── LLM ───────────────────────────────────────────────────────────────────────
 LLM_CFG: dict = _cfg["llm"]
 PER_STOCK_MODEL: str = LLM_CFG["per_stock_model"]

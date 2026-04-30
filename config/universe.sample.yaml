@@ -50,6 +50,14 @@ scanner:
   deep_value_min_consensus: Buy
   deep_value_max_candidates: 10
 
+cio:
+  # Weekly cap on new entrants the CIO may advance. Does NOT count
+  # reaffirmations of held BUY-rated names — those remain unbounded.
+  # The effective cap each week combines the population gap with these bounds:
+  #   effective = min(max_new_entrants, max(min_new_entrants, open_slots))
+  max_new_entrants: 10
+  min_new_entrants: 2
+
 archive:
   retain_history: true
   check_prior_candidate_records: true

@@ -32,6 +32,8 @@ from langgraph.types import Send
 from pydantic import ValidationError
 
 from config import (
+    CIO_MAX_NEW_ENTRANTS,
+    CIO_MIN_NEW_ENTRANTS,
     POPULATION_CFG,
     RATING_BUY_THRESHOLD,
     RATING_SELL_THRESHOLD,
@@ -884,6 +886,8 @@ def cio_node(state: ResearchState) -> dict:
         exits=state.get("exits", []),
         run_date=state.get("run_date", ""),
         prior_decisions=prior_ic,
+        max_new_entrants=CIO_MAX_NEW_ENTRANTS,
+        min_new_entrants=CIO_MIN_NEW_ENTRANTS,
     )
 
     # Warn-mode schema validation on CIO output shapes.
@@ -1393,17 +1397,18 @@ def _build_signals_payload(state: ResearchState) -> dict:
             )
             rating = "HOLD"
 
-        # Determine signal
+        # Determine signal — CIO is the sole gate for new entrants.
+        # Team recs that the CIO did not advance fall through and produce no
+        # signal even if rated BUY. Reaffirmations of held BUY-rated names
+        # remain unbounded.
         if rating == "BUY" and ticker in advanced_tickers:
             signal = "ENTER"  # CIO approved new entry
         elif rating == "BUY" and in_pop:
             signal = "ENTER"  # Reaffirm existing BUY position
         elif in_pop:
             signal = "HOLD"   # Held, not BUY-rated
-        elif rating == "BUY":
-            signal = "ENTER"  # BUY recommendation (candidate, not yet held)
         else:
-            continue  # Not held, not recommended — skip
+            continue  # Not held, not CIO-advanced — drop
 
         signals[ticker] = {
             "ticker": ticker,

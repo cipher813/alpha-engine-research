@@ -1,0 +1,1358 @@
+{
+  "date": "2026-04-24",
+  "run_date": "2026-04-25T17:17:46.813776+00:00",
+  "time": "2026-04-25T17:17:46.813776+00:00",
+  "market_regime": "bull",
+  "sector_modifiers": {
+    "Technology": 1.25,
+    "Healthcare": 1.0,
+    "Financial": 1.18,
+    "Consumer Discretionary": 1.05,
+    "Consumer Staples": 0.93,
+    "Energy": 1.2,
+    "Industrials": 1.08,
+    "Materials": 1.15,
+    "Real Estate": 0.9,
+    "Utilities": 0.88,
+    "Communication Services": 1.18
+  },
+  "sector_ratings": {
+    "Technology": {
+      "rating": "overweight",
+      "rationale": "Rate-cutting cycle compresses discount rates on long-duration growth cash flows, and QQQ's 18% 30-day surge confirms institutional rotation into large-cap tech as the primary bull-regime beneficiary."
+    },
+    "Healthcare": {
+      "rating": "market_weight",
+      "rationale": "Defensive earnings stability provides ballast but offers no incremental cyclical upside in a risk-on bull environment where capital is rotating toward growth and commodities."
+    },
+    "Financial": {
+      "rating": "overweight",
+      "rationale": "Positive 51bps yield curve slope directly expands net interest margins for banks, while near-zero HY spreads signal minimal loan-loss provisioning pressure."
+    },
+    "Consumer Discretionary": {
+      "rating": "market_weight",
+      "rationale": "Bull regime momentum is a tailwind, but UMich sentiment at 53.3 and unemployment rising to 4.3% signal softening household spending capacity that caps the sector's upside."
+    },
+    "Consumer Staples": {
+      "rating": "underweight",
+      "rationale": "In a confirmed bull regime, defensive staples historically underperform as capital rotates to cyclicals; low-growth earnings profiles attract limited premium at current valuations."
+    },
+    "Energy": {
+      "rating": "overweight",
+      "rationale": "WTI at $94.40/bbl directly lifts E&P cash flows and refining margins, providing fundamental earnings support independent of broader equity sentiment."
+    },
+    "Industrials": {
+      "rating": "overweight",
+      "rationale": "Positive yield curve and bull regime support capex cycle expansion, though $94 oil as an input cost headwind moderates the conviction to a lean overweight."
+    },
+    "Materials": {
+      "rating": "overweight",
+      "rationale": "Commodity price firmness and early-cycle bull dynamics historically drive materials sector outperformance, though soft copper at $6.02 limits the magnitude of the tailwind."
+    },
+    "Real Estate": {
+      "rating": "underweight",
+      "rationale": "10yr yield at 4.3% sustains pressure on cap rate expansion and refinancing economics, making REIT valuations fundamentally challenged despite the broader bull backdrop."
+    },
+    "Utilities": {
+      "rating": "underweight",
+      "rationale": "Elevated long-end yields make utility dividend yields relatively unattractive versus risk-free alternatives, and the bull regime reduces safe-haven demand for the sector."
+    },
+    "Communication Services": {
+      "rating": "overweight",
+      "rationale": "Digital advertising and streaming fundamentals benefit from falling discount rates on growth earnings, and the sector is participating in the QQQ-led momentum surge."
+    }
+  },
+  "signals": {
+    "PODD": {
+      "ticker": "PODD",
+      "score": 67.0,
+      "rating": "BUY",
+      "signal": "ENTER",
+      "conviction": "stable",
+      "thesis_summary": "Omnipod platform delivers 31.2% revenue growth with 71.6% gross margins, demonstrating strong pricing power and market adoption in insulin delivery. Technical setup (RSI 26.4 after -25.7% decline) offers mean-reversion bounce with 23.5x forward PE reasonable for medtech growth cohort.",
+      "sector": "Health Care",
+      "team_id": "healthcare",
+      "quant_score": 72,
+      "qual_score": 62,
+      "sub_scores": {
+        "quant": 72,
+        "qual": 62
+      }
+    },
+    "ABT": {
+      "ticker": "ABT",
+      "score": 56.0,
+      "rating": "BUY",
+      "signal": "ENTER",
+      "conviction": "declining",
+      "thesis_summary": "Diversified medtech/pharma/diagnostics platform provides defensive characteristics with RSI 26 oversold and price near MA50 support, enabling technical stabilization and mean reversion in oversold technicals.",
+      "sector": "Health Care",
+      "team_id": "healthcare",
+      "quant_score": 68,
+      "qual_score": 44,
+      "sub_scores": {
+        "quant": 68,
+        "qual": 44
+      }
+    },
+    "DVA": {
+      "ticker": "DVA",
+      "score": 55.0,
+      "rating": "BUY",
+      "signal": "ENTER",
+      "conviction": "declining",
+      "thesis_summary": "Dialysis services exhibit sticky demand with MACD bullish cross and price above 200-day MA (+ 0.14), signaling early-stage uptrend. Patient base is locked-in by medical necessity, providing revenue stability and pricing-power foundation.",
+      "sector": "Health Care",
+      "team_id": "healthcare",
+      "quant_score": 65,
+      "qual_score": 45,
+      "sub_scores": {
+        "quant": 65,
+        "qual": 45
+      }
+    },
+    "LNTH": {
+      "ticker": "LNTH",
+      "score": 59.33,
+      "rating": "BUY",
+      "signal": "ENTER",
+      "conviction": "declining",
+      "thesis_summary": "",
+      "sector": "Unknown",
+      "team_id": "healthcare",
+      "quant_score": null,
+      "qual_score": null,
+      "sub_scores": {
+        "quant": null,
+        "qual": null
+      }
+    },
+    "JHG": {
+      "ticker": "JHG",
+      "score": 84.0,
+      "rating": "BUY",
+      "signal": "ENTER",
+      "conviction": "stable",
+      "thesis_summary": "",
+      "sector": "Financial",
+      "team_id": "financials",
+      "quant_score": 78,
+      "qual_score": null,
+      "sub_scores": {
+        "quant": 78,
+        "qual": null
+      }
+    },
+    "PRU": {
+      "ticker": "PRU",
+      "score": 74.0,
+      "rating": "BUY",
+      "signal": "ENTER",
+      "conviction": "stable",
+      "thesis_summary": "",
+      "sector": "Financials",
+      "team_id": "financials",
+      "quant_score": 74,
+      "qual_score": null,
+      "sub_scores": {
+        "quant": 74,
+        "qual": null
+      }
+    },
+    "TROW": {
+      "ticker": "TROW",
+      "score": 71.0,
+      "rating": "BUY",
+      "signal": "ENTER",
+      "conviction": "stable",
+      "thesis_summary": "",
+      "sector": "Financials",
+      "team_id": "financials",
+      "quant_score": 71,
+      "qual_score": null,
+      "sub_scores": {
+        "quant": 71,
+        "qual": null
+      }
+    },
+    "MA": {
+      "ticker": "MA",
+      "score": 84.0,
+      "rating": "BUY",
+      "signal": "ENTER",
+      "conviction": "rising",
+      "thesis_summary": "",
+      "sector": "Unknown",
+      "team_id": "financials",
+      "quant_score": null,
+      "qual_score": null,
+      "sub_scores": {
+        "quant": null,
+        "qual": null
+      }
+    },
+    "TRV": {
+      "ticker": "TRV",
+      "score": 72.0,
+      "rating": "BUY",
+      "signal": "ENTER",
+      "conviction": "rising",
+      "thesis_summary": "",
+      "sector": "Unknown",
+      "team_id": "financials",
+      "quant_score": null,
+      "qual_score": null,
+      "sub_scores": {
+        "quant": null,
+        "qual": null
+      }
+    },
+    "CME": {
+      "ticker": "CME",
+      "score": 64.0,
+      "rating": "BUY",
+      "signal": "ENTER",
+      "conviction": "stable",
+      "thesis_summary": "",
+      "sector": "Unknown",
+      "team_id": "financials",
+      "quant_score": null,
+      "qual_score": null,
+      "sub_scores": {
+        "quant": null,
+        "qual": null
+      }
+    },
+    "WAB": {
+      "ticker": "WAB",
+      "score": 70.2,
+      "rating": "BUY",
+      "signal": "ENTER",
+      "conviction": "stable",
+      "thesis_summary": "Bullish MACD cross with 22% premium to MA200 and RSI 58.4 suggests strong institutional accumulation in transportation equipment; rail sector benefits from logistics recovery and freight normalization.",
+      "sector": "Industrials",
+      "team_id": "industrials",
+      "quant_score": 70,
+      "qual_score": 65,
+      "sub_scores": {
+        "quant": 70,
+        "qual": 65
+      }
+    },
+    "RTX": {
+      "ticker": "RTX",
+      "score": 70.7,
+      "rating": "BUY",
+      "signal": "ENTER",
+      "conviction": "rising",
+      "thesis_summary": "Severe oversold conditions (RSI 24.3) in a defense sector with strong structural tailwinds from elevated geopolitical tensions and NATO spending; deep technical bounce potential (12-month mean reversion) with institutional backing likely in defense names.",
+      "sector": "Industrials",
+      "team_id": "industrials",
+      "quant_score": 65,
+      "qual_score": 71,
+      "sub_scores": {
+        "quant": 65,
+        "qual": 71
+      }
+    },
+    "LHX": {
+      "ticker": "LHX",
+      "score": 69.2,
+      "rating": "BUY",
+      "signal": "ENTER",
+      "conviction": "stable",
+      "thesis_summary": "Oversold conditions (RSI 27.1) with technical score 60.4 in a pure-play defense contractor positioned to benefit from sustained NATO and U.S. defense spending increases; disciplined pullback setup suggests institutional accumulation into weakness.",
+      "sector": "Industrials",
+      "team_id": "industrials",
+      "quant_score": 64,
+      "qual_score": 69,
+      "sub_scores": {
+        "quant": 64,
+        "qual": 69
+      }
+    },
+    "FAST": {
+      "ticker": "FAST",
+      "score": 78.0,
+      "rating": "BUY",
+      "signal": "ENTER",
+      "conviction": "rising",
+      "thesis_summary": "",
+      "sector": "Unknown",
+      "team_id": "industrials",
+      "quant_score": null,
+      "qual_score": null,
+      "sub_scores": {
+        "quant": null,
+        "qual": null
+      }
+    },
+    "UNP": {
+      "ticker": "UNP",
+      "score": 74.0,
+      "rating": "BUY",
+      "signal": "ENTER",
+      "conviction": "stable",
+      "thesis_summary": "UNP's strong operational fundamentals and network efficiency position it well for economic recovery. Rail volumes and pricing power support margin expansion.",
+      "sector": "Unknown",
+      "team_id": "industrials",
+      "quant_score": null,
+      "qual_score": null,
+      "sub_scores": {
+        "quant": null,
+        "qual": null
+      }
+    },
+    "CTAS": {
+      "ticker": "CTAS",
+      "score": 74.0,
+      "rating": "BUY",
+      "signal": "ENTER",
+      "conviction": "rising",
+      "thesis_summary": "",
+      "sector": "Unknown",
+      "team_id": "industrials",
+      "quant_score": null,
+      "qual_score": null,
+      "sub_scores": {
+        "quant": null,
+        "qual": null
+      }
+    },
+    "NVT": {
+      "ticker": "NVT",
+      "score": 70.0,
+      "rating": "BUY",
+      "signal": "ENTER",
+      "conviction": "stable",
+      "thesis_summary": "",
+      "sector": "Unknown",
+      "team_id": "industrials",
+      "quant_score": null,
+      "qual_score": null,
+      "sub_scores": {
+        "quant": null,
+        "qual": null
+      }
+    },
+    "TSCO": {
+      "ticker": "TSCO",
+      "score": 61.7,
+      "rating": "BUY",
+      "signal": "ENTER",
+      "conviction": "declining",
+      "thesis_summary": "Extreme oversold technicals (RSI 20.3, -22% MA50) signal mechanical reversal opportunity; rural cyclical tailwinds in Q2/Q3 provide seasonal support.",
+      "sector": "Consumer Discretionary",
+      "team_id": "consumer",
+      "quant_score": 72,
+      "qual_score": 48,
+      "sub_scores": {
+        "quant": 72,
+        "qual": 48
+      }
+    },
+    "HSY": {
+      "ticker": "HSY",
+      "score": 61.7,
+      "rating": "BUY",
+      "signal": "ENTER",
+      "conviction": "stable",
+      "thesis_summary": "Defensive confectionery leader with strong pricing power and 33.5% gross margins oversold at forward PE 19.4; inflation re-acceleration and yield (~3%) provide dual support.",
+      "sector": "Consumer Staples",
+      "team_id": "consumer",
+      "quant_score": 66,
+      "qual_score": 62,
+      "sub_scores": {
+        "quant": 66,
+        "qual": 62
+      }
+    },
+    "WMT": {
+      "ticker": "WMT",
+      "score": 70.0,
+      "rating": "BUY",
+      "signal": "ENTER",
+      "conviction": "rising",
+      "thesis_summary": "",
+      "sector": "Unknown",
+      "team_id": "consumer",
+      "quant_score": null,
+      "qual_score": null,
+      "sub_scores": {
+        "quant": null,
+        "qual": null
+      }
+    },
+    "PG": {
+      "ticker": "PG",
+      "score": 68.0,
+      "rating": "BUY",
+      "signal": "ENTER",
+      "conviction": "stable",
+      "thesis_summary": "",
+      "sector": "Unknown",
+      "team_id": "consumer",
+      "quant_score": null,
+      "qual_score": null,
+      "sub_scores": {
+        "quant": null,
+        "qual": null
+      }
+    },
+    "COKE": {
+      "ticker": "COKE",
+      "score": 63.2,
+      "rating": "BUY",
+      "signal": "ENTER",
+      "conviction": "rising",
+      "thesis_summary": "",
+      "sector": "Unknown",
+      "team_id": "consumer",
+      "quant_score": null,
+      "qual_score": null,
+      "sub_scores": {
+        "quant": null,
+        "qual": null
+      }
+    },
+    "DVN": {
+      "ticker": "DVN",
+      "score": 81.7,
+      "rating": "BUY",
+      "signal": "ENTER",
+      "conviction": "stable",
+      "thesis_summary": "Devon has a fortress balance sheet with $4.1B liquidity, disciplined free cash flow allocation targeting 70% shareholder returns (fixed + variable dividends + buybacks), and an active capital return program now ~$2.6B executed on a $3B program. The 10% fixed dividend increase in Q1 2024 signals management confidence; strong cash generation from low-capex-per-barrel Delaware Basin operations (moderating production growth) combined with commodity price upside in Brent above $70/bbl provides cushion for variable distributions.",
+      "sector": "Energy",
+      "team_id": "defensives",
+      "quant_score": 78,
+      "qual_score": 72,
+      "sub_scores": {
+        "quant": 78,
+        "qual": 72
+      }
+    },
+    "CVX": {
+      "ticker": "CVX",
+      "score": 78.2,
+      "rating": "BUY",
+      "signal": "ENTER",
+      "conviction": "stable",
+      "thesis_summary": "Chevron is the integrated mega-cap with $369B market cap and 41.9% gross margins\u2014defensive positioning as a major refined products and chemicals producer hedges pure E&P risk. The Hess integration (pending arbitration resolution per Feb 2026 10-K risk factors) adds Stabroek Block upside if closed. Oversold technicals (RSI 41.3) present mean-reversion entry; strong balance sheet supports dividend sustainability through oil downturns.",
+      "sector": "Energy",
+      "team_id": "defensives",
+      "quant_score": 75,
+      "qual_score": 68,
+      "sub_scores": {
+        "quant": 75,
+        "qual": 68
+      }
+    },
+    "VICI": {
+      "ticker": "VICI",
+      "score": 70.2,
+      "rating": "BUY",
+      "signal": "ENTER",
+      "conviction": "stable",
+      "thesis_summary": "VICI is a pure-play gaming REIT with 100% leased portfolio (weighted avg lease term 39.6\u201340.7 years), triple-net leases transferring all operating risk to tenants (Caesars, Hard Rock, JACK, etc.), and diversified geography across 26 states. Very low P/E (10.89x) reflects depressed valuations on REIT cohort post-2023 rate hikes. Revenue growth 3.8% on stable same-store operations; high current ratio (17.23x) signals fortress liquidity. Dividend yield ~4.5\u20135%+ plays well in current 4%\u20135% risk-free rate environment.",
+      "sector": "Real Estate",
+      "team_id": "defensives",
+      "quant_score": 73,
+      "qual_score": 74,
+      "sub_scores": {
+        "quant": 73,
+        "qual": 74
+      }
+    },
+    "TER": {
+      "ticker": "TER",
+      "score": 74.0,
+      "rating": "BUY",
+      "signal": "ENTER",
+      "conviction": "stable",
+      "thesis_summary": "43.9% revenue growth with 58.2% gross margins and +46.6% 60d momentum; semiconductor test equipment demand driven by AI chip complexity.",
+      "sector": "Information Technology",
+      "team_id": null,
+      "quant_score": null,
+      "qual_score": null,
+      "sub_scores": {
+        "quant": null,
+        "qual": null
+      }
+    },
+    "COHR": {
+      "ticker": "COHR",
+      "score": 74.0,
+      "rating": "BUY",
+      "signal": "ENTER",
+      "conviction": "rising",
+      "thesis_summary": "Dominant optical interconnect supplier; AI datacenter capex wave structurally reprices optical demand; institutional momentum without extreme overbought conditions.",
+      "sector": "Information Technology",
+      "team_id": null,
+      "quant_score": null,
+      "qual_score": null,
+      "sub_scores": {
+        "quant": null,
+        "qual": null
+      }
+    }
+  },
+  "population": [
+    "MA",
+    "FAST",
+    "PRU",
+    "TER",
+    "UNP",
+    "CTAS",
+    "COHR",
+    "DVN",
+    "TROW",
+    "PODD",
+    "TRV",
+    "NVT",
+    "WMT",
+    "CVX",
+    "PG",
+    "CME",
+    "VICI",
+    "COKE",
+    "HSY",
+    "RTX",
+    "WAB"
+  ],
+  "universe": [
+    {
+      "ticker": "PODD",
+      "signal": "ENTER",
+      "score": 67.0,
+      "rating": "BUY",
+      "conviction": "stable",
+      "price_target_upside": null,
+      "sector_rating": "market_weight",
+      "sector": "Health Care",
+      "thesis_summary": "Omnipod platform delivers 31.2% revenue growth with 71.6% gross margins, demonstrating strong pricing power and market adoption in insulin delivery. Technical setup (RSI 26.4 after -25.7% decline) offers mean-reversion bounce with 23.5x forward PE reasonable for medtech growth cohort.",
+      "sub_scores": {
+        "quant": 72,
+        "qual": 62
+      }
+    },
+    {
+      "ticker": "ABT",
+      "signal": "ENTER",
+      "score": 56.0,
+      "rating": "BUY",
+      "conviction": "declining",
+      "price_target_upside": null,
+      "sector_rating": "market_weight",
+      "sector": "Health Care",
+      "thesis_summary": "Diversified medtech/pharma/diagnostics platform provides defensive characteristics with RSI 26 oversold and price near MA50 support, enabling technical stabilization and mean reversion in oversold technicals.",
+      "sub_scores": {
+        "quant": 68,
+        "qual": 44
+      }
+    },
+    {
+      "ticker": "DVA",
+      "signal": "ENTER",
+      "score": 55.0,
+      "rating": "BUY",
+      "conviction": "declining",
+      "price_target_upside": null,
+      "sector_rating": "market_weight",
+      "sector": "Health Care",
+      "thesis_summary": "Dialysis services exhibit sticky demand with MACD bullish cross and price above 200-day MA (+ 0.14), signaling early-stage uptrend. Patient base is locked-in by medical necessity, providing revenue stability and pricing-power foundation.",
+      "sub_scores": {
+        "quant": 65,
+        "qual": 45
+      }
+    },
+    {
+      "ticker": "LNTH",
+      "signal": "ENTER",
+      "score": 59.33,
+      "rating": "BUY",
+      "conviction": "declining",
+      "price_target_upside": null,
+      "sector_rating": "market_weight",
+      "sector": "Unknown",
+      "thesis_summary": "",
+      "sub_scores": {
+        "quant": null,
+        "qual": null
+      }
+    },
+    {
+      "ticker": "JHG",
+      "signal": "ENTER",
+      "score": 84.0,
+      "rating": "BUY",
+      "conviction": "stable",
+      "price_target_upside": null,
+      "sector_rating": "overweight",
+      "sector": "Financial",
+      "thesis_summary": "",
+      "sub_scores": {
+        "quant": 78,
+        "qual": null
+      }
+    },
+    {
+      "ticker": "PRU",
+      "signal": "ENTER",
+      "score": 74.0,
+      "rating": "BUY",
+      "conviction": "stable",
+      "price_target_upside": null,
+      "sector_rating": "market_weight",
+      "sector": "Financials",
+      "thesis_summary": "",
+      "sub_scores": {
+        "quant": 74,
+        "qual": null
+      }
+    },
+    {
+      "ticker": "TROW",
+      "signal": "ENTER",
+      "score": 71.0,
+      "rating": "BUY",
+      "conviction": "stable",
+      "price_target_upside": null,
+      "sector_rating": "market_weight",
+      "sector": "Financials",
+      "thesis_summary": "",
+      "sub_scores": {
+        "quant": 71,
+        "qual": null
+      }
+    },
+    {
+      "ticker": "MA",
+      "signal": "ENTER",
+      "score": 84.0,
+      "rating": "BUY",
+      "conviction": "rising",
+      "price_target_upside": null,
+      "sector_rating": "market_weight",
+      "sector": "Unknown",
+      "thesis_summary": "",
+      "sub_scores": {
+        "quant": null,
+        "qual": null
+      }
+    },
+    {
+      "ticker": "TRV",
+      "signal": "ENTER",
+      "score": 72.0,
+      "rating": "BUY",
+      "conviction": "rising",
+      "price_target_upside": null,
+      "sector_rating": "market_weight",
+      "sector": "Unknown",
+      "thesis_summary": "",
+      "sub_scores": {
+        "quant": null,
+        "qual": null
+      }
+    },
+    {
+      "ticker": "CME",
+      "signal": "ENTER",
+      "score": 64.0,
+      "rating": "BUY",
+      "conviction": "stable",
+      "price_target_upside": null,
+      "sector_rating": "market_weight",
+      "sector": "Unknown",
+      "thesis_summary": "",
+      "sub_scores": {
+        "quant": null,
+        "qual": null
+      }
+    },
+    {
+      "ticker": "WAB",
+      "signal": "ENTER",
+      "score": 70.2,
+      "rating": "BUY",
+      "conviction": "stable",
+      "price_target_upside": null,
+      "sector_rating": "overweight",
+      "sector": "Industrials",
+      "thesis_summary": "Bullish MACD cross with 22% premium to MA200 and RSI 58.4 suggests strong institutional accumulation in transportation equipment; rail sector benefits from logistics recovery and freight normalization.",
+      "sub_scores": {
+        "quant": 70,
+        "qual": 65
+      }
+    },
+    {
+      "ticker": "RTX",
+      "signal": "ENTER",
+      "score": 70.7,
+      "rating": "BUY",
+      "conviction": "rising",
+      "price_target_upside": null,
+      "sector_rating": "overweight",
+      "sector": "Industrials",
+      "thesis_summary": "Severe oversold conditions (RSI 24.3) in a defense sector with strong structural tailwinds from elevated geopolitical tensions and NATO spending; deep technical bounce potential (12-month mean reversion) with institutional backing likely in defense names.",
+      "sub_scores": {
+        "quant": 65,
+        "qual": 71
+      }
+    },
+    {
+      "ticker": "LHX",
+      "signal": "ENTER",
+      "score": 69.2,
+      "rating": "BUY",
+      "conviction": "stable",
+      "price_target_upside": null,
+      "sector_rating": "overweight",
+      "sector": "Industrials",
+      "thesis_summary": "Oversold conditions (RSI 27.1) with technical score 60.4 in a pure-play defense contractor positioned to benefit from sustained NATO and U.S. defense spending increases; disciplined pullback setup suggests institutional accumulation into weakness.",
+      "sub_scores": {
+        "quant": 64,
+        "qual": 69
+      }
+    },
+    {
+      "ticker": "FAST",
+      "signal": "ENTER",
+      "score": 78.0,
+      "rating": "BUY",
+      "conviction": "rising",
+      "price_target_upside": null,
+      "sector_rating": "market_weight",
+      "sector": "Unknown",
+      "thesis_summary": "",
+      "sub_scores": {
+        "quant": null,
+        "qual": null
+      }
+    },
+    {
+      "ticker": "UNP",
+      "signal": "ENTER",
+      "score": 74.0,
+      "rating": "BUY",
+      "conviction": "stable",
+      "price_target_upside": null,
+      "sector_rating": "market_weight",
+      "sector": "Unknown",
+      "thesis_summary": "UNP's strong operational fundamentals and network efficiency position it well for economic recovery. Rail volumes and pricing power support margin expansion.",
+      "sub_scores": {
+        "quant": null,
+        "qual": null
+      }
+    },
+    {
+      "ticker": "CTAS",
+      "signal": "ENTER",
+      "score": 74.0,
+      "rating": "BUY",
+      "conviction": "rising",
+      "price_target_upside": null,
+      "sector_rating": "market_weight",
+      "sector": "Unknown",
+      "thesis_summary": "",
+      "sub_scores": {
+        "quant": null,
+        "qual": null
+      }
+    },
+    {
+      "ticker": "NVT",
+      "signal": "ENTER",
+      "score": 70.0,
+      "rating": "BUY",
+      "conviction": "stable",
+      "price_target_upside": null,
+      "sector_rating": "market_weight",
+      "sector": "Unknown",
+      "thesis_summary": "",
+      "sub_scores": {
+        "quant": null,
+        "qual": null
+      }
+    },
+    {
+      "ticker": "TSCO",
+      "signal": "ENTER",
+      "score": 61.7,
+      "rating": "BUY",
+      "conviction": "declining",
+      "price_target_upside": null,
+      "sector_rating": "market_weight",
+      "sector": "Consumer Discretionary",
+      "thesis_summary": "Extreme oversold technicals (RSI 20.3, -22% MA50) signal mechanical reversal opportunity; rural cyclical tailwinds in Q2/Q3 provide seasonal support.",
+      "sub_scores": {
+        "quant": 72,
+        "qual": 48
+      }
+    },
+    {
+      "ticker": "HSY",
+      "signal": "ENTER",
+      "score": 61.7,
+      "rating": "BUY",
+      "conviction": "stable",
+      "price_target_upside": null,
+      "sector_rating": "underweight",
+      "sector": "Consumer Staples",
+      "thesis_summary": "Defensive confectionery leader with strong pricing power and 33.5% gross margins oversold at forward PE 19.4; inflation re-acceleration and yield (~3%) provide dual support.",
+      "sub_scores": {
+        "quant": 66,
+        "qual": 62
+      }
+    },
+    {
+      "ticker": "WMT",
+      "signal": "ENTER",
+      "score": 70.0,
+      "rating": "BUY",
+      "conviction": "rising",
+      "price_target_upside": null,
+      "sector_rating": "market_weight",
+      "sector": "Unknown",
+      "thesis_summary": "",
+      "sub_scores": {
+        "quant": null,
+        "qual": null
+      }
+    },
+    {
+      "ticker": "PG",
+      "signal": "ENTER",
+      "score": 68.0,
+      "rating": "BUY",
+      "conviction": "stable",
+      "price_target_upside": null,
+      "sector_rating": "market_weight",
+      "sector": "Unknown",
+      "thesis_summary": "",
+      "sub_scores": {
+        "quant": null,
+        "qual": null
+      }
+    },
+    {
+      "ticker": "COKE",
+      "signal": "ENTER",
+      "score": 63.2,
+      "rating": "BUY",
+      "conviction": "rising",
+      "price_target_upside": null,
+      "sector_rating": "market_weight",
+      "sector": "Unknown",
+      "thesis_summary": "",
+      "sub_scores": {
+        "quant": null,
+        "qual": null
+      }
+    },
+    {
+      "ticker": "DVN",
+      "signal": "ENTER",
+      "score": 81.7,
+      "rating": "BUY",
+      "conviction": "stable",
+      "price_target_upside": null,
+      "sector_rating": "overweight",
+      "sector": "Energy",
+      "thesis_summary": "Devon has a fortress balance sheet with $4.1B liquidity, disciplined free cash flow allocation targeting 70% shareholder returns (fixed + variable dividends + buybacks), and an active capital return program now ~$2.6B executed on a $3B program. The 10% fixed dividend increase in Q1 2024 signals management confidence; strong cash generation from low-capex-per-barrel Delaware Basin operations (moderating production growth) combined with commodity price upside in Brent above $70/bbl provides cushion for variable distributions.",
+      "sub_scores": {
+        "quant": 78,
+        "qual": 72
+      }
+    },
+    {
+      "ticker": "CVX",
+      "signal": "ENTER",
+      "score": 78.2,
+      "rating": "BUY",
+      "conviction": "stable",
+      "price_target_upside": null,
+      "sector_rating": "overweight",
+      "sector": "Energy",
+      "thesis_summary": "Chevron is the integrated mega-cap with $369B market cap and 41.9% gross margins\u2014defensive positioning as a major refined products and chemicals producer hedges pure E&P risk. The Hess integration (pending arbitration resolution per Feb 2026 10-K risk factors) adds Stabroek Block upside if closed. Oversold technicals (RSI 41.3) present mean-reversion entry; strong balance sheet supports dividend sustainability through oil downturns.",
+      "sub_scores": {
+        "quant": 75,
+        "qual": 68
+      }
+    },
+    {
+      "ticker": "VICI",
+      "signal": "ENTER",
+      "score": 70.2,
+      "rating": "BUY",
+      "conviction": "stable",
+      "price_target_upside": null,
+      "sector_rating": "underweight",
+      "sector": "Real Estate",
+      "thesis_summary": "VICI is a pure-play gaming REIT with 100% leased portfolio (weighted avg lease term 39.6\u201340.7 years), triple-net leases transferring all operating risk to tenants (Caesars, Hard Rock, JACK, etc.), and diversified geography across 26 states. Very low P/E (10.89x) reflects depressed valuations on REIT cohort post-2023 rate hikes. Revenue growth 3.8% on stable same-store operations; high current ratio (17.23x) signals fortress liquidity. Dividend yield ~4.5\u20135%+ plays well in current 4%\u20135% risk-free rate environment.",
+      "sub_scores": {
+        "quant": 73,
+        "qual": 74
+      }
+    },
+    {
+      "ticker": "TER",
+      "signal": "ENTER",
+      "score": 74.0,
+      "rating": "BUY",
+      "conviction": "stable",
+      "price_target_upside": null,
+      "sector_rating": "market_weight",
+      "sector": "Information Technology",
+      "thesis_summary": "43.9% revenue growth with 58.2% gross margins and +46.6% 60d momentum; semiconductor test equipment demand driven by AI chip complexity.",
+      "sub_scores": {
+        "quant": null,
+        "qual": null
+      }
+    },
+    {
+      "ticker": "COHR",
+      "signal": "ENTER",
+      "score": 74.0,
+      "rating": "BUY",
+      "conviction": "rising",
+      "price_target_upside": null,
+      "sector_rating": "market_weight",
+      "sector": "Information Technology",
+      "thesis_summary": "Dominant optical interconnect supplier; AI datacenter capex wave structurally reprices optical demand; institutional momentum without extreme overbought conditions.",
+      "sub_scores": {
+        "quant": null,
+        "qual": null
+      }
+    }
+  ],
+  "buy_candidates": [
+    {
+      "ticker": "PODD",
+      "signal": "ENTER",
+      "score": 67.0,
+      "rating": "BUY",
+      "conviction": "stable",
+      "price_target_upside": null,
+      "sector_rating": "market_weight",
+      "sector": "Health Care",
+      "thesis_summary": "31.2% revenue growth + 71.6% gross margins in insulin delivery; Omnipod platform stickiness in Type 1 diabetes limits GLP-1 displacement risk.",
+      "sub_scores": {
+        "quant": 72,
+        "qual": 62
+      },
+      "catalysts": [
+        "Revenue growth acceleration data",
+        "Type 1 diabetes market share gains vs legacy pump competitors"
+      ]
+    },
+    {
+      "ticker": "ABT",
+      "signal": "ENTER",
+      "score": 56.0,
+      "rating": "BUY",
+      "conviction": "declining",
+      "price_target_upside": null,
+      "sector_rating": "market_weight",
+      "sector": "Health Care",
+      "thesis_summary": "Diversified medtech/pharma/diagnostics platform provides defensive characteristics with RSI 26 oversold and price near MA50 support, enabling technical stabilization and mean reversion in oversold technicals.",
+      "sub_scores": {
+        "quant": 68,
+        "qual": 44
+      }
+    },
+    {
+      "ticker": "DVA",
+      "signal": "ENTER",
+      "score": 55.0,
+      "rating": "BUY",
+      "conviction": "declining",
+      "price_target_upside": null,
+      "sector_rating": "market_weight",
+      "sector": "Health Care",
+      "thesis_summary": "Dialysis services exhibit sticky demand with MACD bullish cross and price above 200-day MA (+ 0.14), signaling early-stage uptrend. Patient base is locked-in by medical necessity, providing revenue stability and pricing-power foundation.",
+      "sub_scores": {
+        "quant": 65,
+        "qual": 45
+      }
+    },
+    {
+      "ticker": "LNTH",
+      "signal": "ENTER",
+      "score": 59.33,
+      "rating": "BUY",
+      "conviction": "declining",
+      "price_target_upside": null,
+      "sector_rating": "market_weight",
+      "sector": "Unknown",
+      "thesis_summary": "",
+      "sub_scores": {
+        "quant": null,
+        "qual": null
+      }
+    },
+    {
+      "ticker": "JHG",
+      "signal": "ENTER",
+      "score": 84.0,
+      "rating": "BUY",
+      "conviction": "stable",
+      "price_target_upside": null,
+      "sector_rating": "overweight",
+      "sector": "Financial",
+      "thesis_summary": "",
+      "sub_scores": {
+        "quant": 78,
+        "qual": null
+      }
+    },
+    {
+      "ticker": "PRU",
+      "signal": "ENTER",
+      "score": 74.0,
+      "rating": "BUY",
+      "conviction": "stable",
+      "price_target_upside": null,
+      "sector_rating": "market_weight",
+      "sector": "Financials",
+      "thesis_summary": "",
+      "sub_scores": {
+        "quant": 74,
+        "qual": null
+      }
+    },
+    {
+      "ticker": "TROW",
+      "signal": "ENTER",
+      "score": 71.0,
+      "rating": "BUY",
+      "conviction": "stable",
+      "price_target_upside": null,
+      "sector_rating": "market_weight",
+      "sector": "Financials",
+      "thesis_summary": "",
+      "sub_scores": {
+        "quant": 71,
+        "qual": null
+      }
+    },
+    {
+      "ticker": "MA",
+      "signal": "ENTER",
+      "score": 84.0,
+      "rating": "BUY",
+      "conviction": "rising",
+      "price_target_upside": null,
+      "sector_rating": "market_weight",
+      "sector": "Unknown",
+      "thesis_summary": "",
+      "sub_scores": {
+        "quant": null,
+        "qual": null
+      }
+    },
+    {
+      "ticker": "TRV",
+      "signal": "ENTER",
+      "score": 72.0,
+      "rating": "BUY",
+      "conviction": "rising",
+      "price_target_upside": null,
+      "sector_rating": "market_weight",
+      "sector": "Unknown",
+      "thesis_summary": "",
+      "sub_scores": {
+        "quant": null,
+        "qual": null
+      }
+    },
+    {
+      "ticker": "CME",
+      "signal": "ENTER",
+      "score": 64.0,
+      "rating": "BUY",
+      "conviction": "stable",
+      "price_target_upside": null,
+      "sector_rating": "market_weight",
+      "sector": "Unknown",
+      "thesis_summary": "",
+      "sub_scores": {
+        "quant": null,
+        "qual": null
+      }
+    },
+    {
+      "ticker": "WAB",
+      "signal": "ENTER",
+      "score": 70.2,
+      "rating": "BUY",
+      "conviction": "stable",
+      "price_target_upside": null,
+      "sector_rating": "overweight",
+      "sector": "Industrials",
+      "thesis_summary": "Rail sector institutional accumulation + reshoring logistics tailwind; MACD bullish cross signals trend continuation in overweight industrials.",
+      "sub_scores": {
+        "quant": 70,
+        "qual": 65
+      },
+      "catalysts": [
+        "Freight volume data beats confirming rail demand",
+        "Reshoring capex cycle accelerating rail equipment orders"
+      ]
+    },
+    {
+      "ticker": "RTX",
+      "signal": "ENTER",
+      "score": 70.7,
+      "rating": "BUY",
+      "conviction": "rising",
+      "price_target_upside": null,
+      "sector_rating": "overweight",
+      "sector": "Industrials",
+      "thesis_summary": "RSI 24.3 extreme oversold + NATO/defense spend supercycle; backlog provides earnings visibility. Mean reversion to fair value = 25-35% upside.",
+      "sub_scores": {
+        "quant": 65,
+        "qual": 71
+      },
+      "catalysts": [
+        "Technical mean reversion from extreme oversold RSI 24.3",
+        "NATO defense budget allocation announcements",
+        "Earnings backlog conversion visibility"
+      ]
+    },
+    {
+      "ticker": "LHX",
+      "signal": "ENTER",
+      "score": 69.2,
+      "rating": "BUY",
+      "conviction": "stable",
+      "price_target_upside": null,
+      "sector_rating": "overweight",
+      "sector": "Industrials",
+      "thesis_summary": "Oversold conditions (RSI 27.1) with technical score 60.4 in a pure-play defense contractor positioned to benefit from sustained NATO and U.S. defense spending increases; disciplined pullback setup suggests institutional accumulation into weakness.",
+      "sub_scores": {
+        "quant": 64,
+        "qual": 69
+      }
+    },
+    {
+      "ticker": "FAST",
+      "signal": "ENTER",
+      "score": 78.0,
+      "rating": "BUY",
+      "conviction": "rising",
+      "price_target_upside": null,
+      "sector_rating": "market_weight",
+      "sector": "Unknown",
+      "thesis_summary": "",
+      "sub_scores": {
+        "quant": null,
+        "qual": null
+      }
+    },
+    {
+      "ticker": "UNP",
+      "signal": "ENTER",
+      "score": 74.0,
+      "rating": "BUY",
+      "conviction": "stable",
+      "price_target_upside": null,
+      "sector_rating": "market_weight",
+      "sector": "Unknown",
+      "thesis_summary": "UNP's strong operational fundamentals and network efficiency position it well for economic recovery. Rail volumes and pricing power support margin expansion.",
+      "sub_scores": {
+        "quant": null,
+        "qual": null
+      }
+    },
+    {
+      "ticker": "CTAS",
+      "signal": "ENTER",
+      "score": 74.0,
+      "rating": "BUY",
+      "conviction": "rising",
+      "price_target_upside": null,
+      "sector_rating": "market_weight",
+      "sector": "Unknown",
+      "thesis_summary": "",
+      "sub_scores": {
+        "quant": null,
+        "qual": null
+      }
+    },
+    {
+      "ticker": "NVT",
+      "signal": "ENTER",
+      "score": 70.0,
+      "rating": "BUY",
+      "conviction": "stable",
+      "price_target_upside": null,
+      "sector_rating": "market_weight",
+      "sector": "Unknown",
+      "thesis_summary": "",
+      "sub_scores": {
+        "quant": null,
+        "qual": null
+      }
+    },
+    {
+      "ticker": "TSCO",
+      "signal": "ENTER",
+      "score": 61.7,
+      "rating": "BUY",
+      "conviction": "declining",
+      "price_target_upside": null,
+      "sector_rating": "market_weight",
+      "sector": "Consumer Discretionary",
+      "thesis_summary": "Extreme oversold technicals (RSI 20.3, -22% MA50) signal mechanical reversal opportunity; rural cyclical tailwinds in Q2/Q3 provide seasonal support.",
+      "sub_scores": {
+        "quant": 72,
+        "qual": 48
+      }
+    },
+    {
+      "ticker": "HSY",
+      "signal": "ENTER",
+      "score": 61.7,
+      "rating": "BUY",
+      "conviction": "stable",
+      "price_target_upside": null,
+      "sector_rating": "underweight",
+      "sector": "Consumer Staples",
+      "thesis_summary": "Defensive confectionery leader with strong pricing power and 33.5% gross margins oversold at forward PE 19.4; inflation re-acceleration and yield (~3%) provide dual support.",
+      "sub_scores": {
+        "quant": 66,
+        "qual": 62
+      }
+    },
+    {
+      "ticker": "WMT",
+      "signal": "ENTER",
+      "score": 70.0,
+      "rating": "BUY",
+      "conviction": "rising",
+      "price_target_upside": null,
+      "sector_rating": "market_weight",
+      "sector": "Unknown",
+      "thesis_summary": "",
+      "sub_scores": {
+        "quant": null,
+        "qual": null
+      }
+    },
+    {
+      "ticker": "PG",
+      "signal": "ENTER",
+      "score": 68.0,
+      "rating": "BUY",
+      "conviction": "stable",
+      "price_target_upside": null,
+      "sector_rating": "market_weight",
+      "sector": "Unknown",
+      "thesis_summary": "",
+      "sub_scores": {
+        "quant": null,
+        "qual": null
+      }
+    },
+    {
+      "ticker": "COKE",
+      "signal": "ENTER",
+      "score": 63.2,
+      "rating": "BUY",
+      "conviction": "rising",
+      "price_target_upside": null,
+      "sector_rating": "market_weight",
+      "sector": "Unknown",
+      "thesis_summary": "",
+      "sub_scores": {
+        "quant": null,
+        "qual": null
+      }
+    },
+    {
+      "ticker": "DVN",
+      "signal": "ENTER",
+      "score": 81.7,
+      "rating": "BUY",
+      "conviction": "stable",
+      "price_target_upside": null,
+      "sector_rating": "overweight",
+      "sector": "Energy",
+      "thesis_summary": "FCF machine with variable dividend amplifying shareholder returns; $65/bbl floor coverage with upside torque above that level in bull regime.",
+      "sub_scores": {
+        "quant": 78,
+        "qual": 72
+      },
+      "catalysts": [
+        "Variable dividend declaration tied to FCF realization",
+        "Oil price momentum in overweight energy regime"
+      ]
+    },
+    {
+      "ticker": "CVX",
+      "signal": "ENTER",
+      "score": 78.2,
+      "rating": "BUY",
+      "conviction": "stable",
+      "price_target_upside": null,
+      "sector_rating": "overweight",
+      "sector": "Energy",
+      "thesis_summary": "Chevron is the integrated mega-cap with $369B market cap and 41.9% gross margins\u2014defensive positioning as a major refined products and chemicals producer hedges pure E&P risk. The Hess integration (pending arbitration resolution per Feb 2026 10-K risk factors) adds Stabroek Block upside if closed. Oversold technicals (RSI 41.3) present mean-reversion entry; strong balance sheet supports dividend sustainability through oil downturns.",
+      "sub_scores": {
+        "quant": 75,
+        "qual": 68
+      }
+    },
+    {
+      "ticker": "VICI",
+      "signal": "ENTER",
+      "score": 70.2,
+      "rating": "BUY",
+      "conviction": "stable",
+      "price_target_upside": null,
+      "sector_rating": "underweight",
+      "sector": "Real Estate",
+      "thesis_summary": "100% leased gaming infrastructure with 40-year lease terms and CPI escalators; tenant credit quality (MGM, Caesars) provides cash flow certainty.",
+      "sub_scores": {
+        "quant": 73,
+        "qual": 74
+      },
+      "catalysts": [
+        "CPI escalator resets flowing to VICI revenue",
+        "Experiential consumer spending resilience data"
+      ]
+    },
+    {
+      "ticker": "TER",
+      "signal": "ENTER",
+      "score": 74.0,
+      "rating": "BUY",
+      "conviction": "stable",
+      "price_target_upside": null,
+      "sector_rating": "market_weight",
+      "sector": "Information Technology",
+      "thesis_summary": "43.9% revenue growth with 58.2% gross margins and +46.6% 60d momentum; semiconductor test equipment demand driven by AI chip complexity.",
+      "sub_scores": {
+        "quant": null,
+        "qual": null
+      }
+    },
+    {
+      "ticker": "COHR",
+      "signal": "ENTER",
+      "score": 74.0,
+      "rating": "BUY",
+      "conviction": "rising",
+      "price_target_upside": null,
+      "sector_rating": "market_weight",
+      "sector": "Information Technology",
+      "thesis_summary": "Dominant optical interconnect supplier; AI datacenter capex wave structurally reprices optical demand; institutional momentum without extreme overbought conditions.",
+      "sub_scores": {
+        "quant": null,
+        "qual": null
+      }
+    }
+  ],
+  "architecture_version": "sector_teams"
+}
