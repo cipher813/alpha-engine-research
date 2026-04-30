@@ -377,6 +377,23 @@ def install_offline_stubs():
     """
     logger.info("[offline] Installing offline stubs — no API/LLM calls will be made")
 
+    # Force-disable decision-artifact capture for offline runs even if the
+    # env var leaked in from the dev shell. Capture would otherwise hit
+    # real S3 (no boto3 stub here) and either pollute the production
+    # corpus with synthetic data (creds available) or hard-fail (no creds).
+    # Both are wrong for offline mode; this guard makes offline always
+    # capture-off regardless of shell state.
+    import os as _os
+    if _os.environ.get("ALPHA_ENGINE_DECISION_CAPTURE_ENABLED", "").lower() in (
+        "true", "1", "yes",
+    ):
+        logger.warning(
+            "[offline] ALPHA_ENGINE_DECISION_CAPTURE_ENABLED was set in the "
+            "shell environment — overriding to 'false' for offline run safety "
+            "(would otherwise hit real S3 with synthetic data)."
+        )
+    _os.environ["ALPHA_ENGINE_DECISION_CAPTURE_ENABLED"] = "false"
+
     targets = [
         # Data fetchers
         ("data.fetchers.price_fetcher.fetch_price_data", _stub_fetch_price_data),
@@ -472,6 +489,13 @@ def install_llm_only_stubs():
     aren't LLM-related: data-shape mismatches, score_aggregator hard-fails,
     archive_writer regressions, signals.json structure, etc.
 
+    Decision-artifact capture is force-disabled by setting
+    ``ALPHA_ENGINE_DECISION_CAPTURE_ENABLED=false`` (overriding any shell
+    value). Stub-llm runs use real S3 in other paths but capture's hard-fail
+    posture would block local debugging if IAM isn't right, AND a successful
+    write would pollute the prod corpus with stub agent outputs. Force-off
+    is safer.
+
     Compared to ``install_offline_stubs``: real APIs (FMP, FRED, yfinance,
     EDGAR), real research.db download, real population — but every Anthropic
     LLM call is replaced with a synthetic response. Costs $0 in tokens to
@@ -487,6 +511,18 @@ def install_llm_only_stubs():
         "[stub-llm] Installing LLM-only stubs — real data + real archive, "
         "stubbed agent calls"
     )
+
+    # Force-disable decision-artifact capture (see install_offline_stubs
+    # for rationale).
+    import os as _os
+    if _os.environ.get("ALPHA_ENGINE_DECISION_CAPTURE_ENABLED", "").lower() in (
+        "true", "1", "yes",
+    ):
+        logger.warning(
+            "[stub-llm] ALPHA_ENGINE_DECISION_CAPTURE_ENABLED was set — "
+            "overriding to 'false' for stub-llm run safety."
+        )
+    _os.environ["ALPHA_ENGINE_DECISION_CAPTURE_ENABLED"] = "false"
 
     targets = [
         # LLM agents only — leave data fetchers, archive, S3 untouched.
