@@ -112,19 +112,32 @@ def _quant_reviews_addition(
         technical_score=ts.get("technical_score", "N/A"),
     )
 
+    # PR 2.2 Step C: flip _quant_reviews_addition to with_structured_output.
+    # Strict mode raises on parse failure; lax mode keeps the silent-False
+    # fallback (rejecting the qual addition is the conservative editorial
+    # behavior — the team can still produce 2-3 picks from the quant set).
+    from graph.state_schemas import QuantAcceptanceVerdict
+    from strict_mode import is_strict_validation_enabled
+
+    structured_llm = llm.with_structured_output(QuantAcceptanceVerdict)
     try:
-        response = llm.invoke([HumanMessage(content=prompt)])
-        text = response.content
-        match = re.search(r"\{[^{}]*\"accept\"[^{}]*\}", text, re.DOTALL)
-        if match:
-            result = json.loads(match.group())
-            accepted = bool(result.get("accept", False))
-            log.info("[peer_review:%s] quant %s qual's addition %s: %s",
-                     team_id, "accepted" if accepted else "rejected",
-                     ticker, result.get("reason", ""))
-            return accepted
+        verdict: QuantAcceptanceVerdict = structured_llm.invoke(
+            [HumanMessage(content=prompt)]
+        )
+        log.info(
+            "[peer_review:%s] quant %s qual's addition %s: %s",
+            team_id,
+            "accepted" if verdict.accept else "rejected",
+            ticker,
+            verdict.reason,
+        )
+        return verdict.accept
     except Exception as e:
-        log.warning("[peer_review:%s] quant review of %s failed: %s", team_id, ticker, e)
+        if is_strict_validation_enabled():
+            raise
+        log.warning(
+            "[peer_review:%s] quant review of %s failed: %s", team_id, ticker, e
+        )
 
     return False
 
@@ -195,19 +208,30 @@ def _joint_finalization(
         team_picks_per_run=TEAM_PICKS_PER_RUN,
     )
 
+    # PR 2.2 Step C: flip _joint_finalization to with_structured_output.
+    # The combined-score fallback is load-bearing — every team MUST produce
+    # 2-3 picks for the merge step downstream — so the lax-mode fallback
+    # is preserved. Strict mode raises on parse failure; the operator
+    # then has the choice to flip STRICT_VALIDATION=false in 30s and
+    # re-run if the failure is an isolated LLM hiccup rather than a
+    # systemic schema issue.
+    from graph.state_schemas import JointFinalizationOutput
+    from strict_mode import is_strict_validation_enabled
+
+    structured_llm = llm.with_structured_output(JointFinalizationOutput)
     try:
-        response = llm.invoke([HumanMessage(content=prompt)])
-        text = response.content
-        match = re.search(r"\{[^{}]*\"selected_tickers\"[^{}]*\}", text, re.DOTALL)
-        if match:
-            result = json.loads(match.group())
-            selected = set(result.get("selected_tickers", []))
-            picks = [c for c in candidates if c["ticker"] in selected]
-            return {
-                "picks": picks[:TEAM_PICKS_PER_RUN],
-                "rationale": result.get("rationale", ""),
-            }
+        result: JointFinalizationOutput = structured_llm.invoke(
+            [HumanMessage(content=prompt)]
+        )
+        selected = set(result.selected_tickers)
+        picks = [c for c in candidates if c["ticker"] in selected]
+        return {
+            "picks": picks[:TEAM_PICKS_PER_RUN],
+            "rationale": result.rationale,
+        }
     except Exception as e:
+        if is_strict_validation_enabled():
+            raise
         log.warning("[peer_review:%s] joint finalization failed: %s", team_id, e)
 
     # Fallback: sort by combined score and take top N

@@ -159,24 +159,11 @@ def _capture_if_enabled(
 # ── Schema validation helper (warn-mode → hard-fail toggle) ──────────────────
 
 
-def _strict_validation_enabled() -> bool:
-    """Return True when typed-state validation should hard-fail on
-    schema violations.
-
-    Default ``False`` during the typed-state rollout — preserves warn-mode
-    behavior so PR 2.1 (schemas + plumbing) can ship without flipping
-    behavior. Step F of the PR-2 sequence flips this default to ``True``
-    once every agent is migrated to ``with_structured_output()``.
-
-    Operators can override via Lambda env: set ``STRICT_VALIDATION=true``
-    to enable hard-fail early, or ``STRICT_VALIDATION=false`` once the
-    default is flipped to disable hard-fail in an emergency. The env var
-    is read fresh on each call so a console flip takes effect on warm
-    containers without redeploy.
-    """
-    return os.environ.get("STRICT_VALIDATION", "false").lower() in (
-        "true", "1", "yes"
-    )
+from strict_mode import is_strict_validation_enabled as _strict_validation_enabled
+# Backward-compat: ``_strict_validation_enabled`` is the previous name in
+# this file's API surface. Re-exported via the alias above so existing
+# call sites and tests continue to work; new sites should import from
+# ``strict_mode`` directly.
 
 
 def _validate(
