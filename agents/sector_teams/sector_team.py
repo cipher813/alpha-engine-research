@@ -181,12 +181,28 @@ def run_sector_team(team_id: str, ctx: SectorTeamContext) -> dict:
             )
             thesis_updates[ticker] = updated
         else:
-            # No material event — preserve prior thesis
-            thesis_updates[ticker] = {
-                **ctx.prior_theses[ticker],
-                "stale_days": ctx.prior_theses[ticker].get("stale_days", 0) + 1,
+            # No material event — preserve prior thesis. Normalize the
+            # conviction field at the boundary: archive may carry legacy
+            # agent-format strings ("medium" etc.) from rows written before
+            # the held-stock normalize_conviction fix (PR #56) or before
+            # Option A (2026-04-30). The ThesisUpdate schema only accepts
+            # int 0-100 or storage-format literals, so passing the raw
+            # prior_thesis through would fail typed-state validation in
+            # sector_team_node. Normalize once here to keep this path
+            # schema-compliant; score_aggregator's recompute path also
+            # normalizes downstream so this is double-cover, not a bypass.
+            from scoring.composite import normalize_conviction
+            prior = ctx.prior_theses[ticker]
+            preserved = {
+                **prior,
+                "stale_days": prior.get("stale_days", 0) + 1,
                 "triggers": [],
             }
+            if "conviction" in preserved:
+                preserved["conviction"] = normalize_conviction(
+                    preserved["conviction"]
+                )
+            thesis_updates[ticker] = preserved
 
     # ── Combine tool call logs ────────────────────────────────────────────────
     all_tool_calls = (

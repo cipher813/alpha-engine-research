@@ -159,7 +159,7 @@ def _stub_run_peer_review(
                 "bull_case": qa.get("bull_case", ""),
                 "bear_case": qa.get("bear_case", ""),
                 "catalysts": qa.get("catalysts", []),
-                "conviction": "medium",
+                "conviction": 60,  # Option A: int 0-100 agent format
                 "quant_rationale": "[DRY-RUN] Synthetic peer review",
                 "team_id": team_id,
             }
@@ -215,18 +215,29 @@ def _stub_run_sector_team(team_id, ctx, **kwargs):
         t for t in ctx.held_tickers if ctx.sector_map.get(t, "") in team_sector_set
     ]
     thesis_updates = {}
+    from scoring.composite import normalize_conviction
     for ticker in team_held:
         if ctx.prior_theses.get(ticker) is None:
             raise RuntimeError(
                 f"Held ticker {ticker} has no prior_thesis in archive — "
                 f"population/investment_thesis are out of sync."
             )
-        thesis_updates[ticker] = {
-            **ctx.prior_theses[ticker],
-            "stale_days": ctx.prior_theses[ticker].get("stale_days", 0) + 1,
+        # Mirror the production sector_team.py path: normalize conviction at
+        # the prior-thesis pass-through boundary so legacy "medium"/"high"/
+        # "low" rows in research.db (predating Option A 2026-04-30) don't
+        # break typed-state validation.
+        prior = ctx.prior_theses[ticker]
+        preserved = {
+            **prior,
+            "stale_days": prior.get("stale_days", 0) + 1,
             "triggers": [],
             "last_updated": ctx.run_date,
         }
+        if "conviction" in preserved:
+            preserved["conviction"] = normalize_conviction(
+                preserved["conviction"]
+            )
+        thesis_updates[ticker] = preserved
 
     return {
         "team_id": team_id,
@@ -279,7 +290,7 @@ def _stub_run_cio(
             "bear_case": "[DRY-RUN] Synthetic bear case",
             "catalysts": ["Earnings"],
             "risks": ["Valuation"],
-            "conviction": "medium",
+            "conviction": 60,  # Option A: int 0-100 agent format
             "conviction_rationale": "Synthetic",
             "score": c.get("combined_score", 60),
         }

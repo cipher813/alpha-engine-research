@@ -81,7 +81,7 @@ def test_held_stock_thesis_update_preserves_prior_scores():
         HeldThesisUpdateLLMOutput(
             bull_case="new bull narrative",
             bear_case="new bear narrative",
-            conviction="low",  # agent format (high/medium/low)
+            conviction=25,  # agent format: int 0-100 (Option A)
         )
     )
 
@@ -111,7 +111,7 @@ def test_held_stock_thesis_update_preserves_prior_scores():
     # Narrative fields must be updated from LLM
     assert result["bull_case"] == "new bull narrative"
     assert result["bear_case"] == "new bear narrative"
-    assert result["conviction"] == "low"
+    assert result["conviction"] == 25
 
     # Run metadata must be set
     assert result["last_updated"] == "2026-04-04"

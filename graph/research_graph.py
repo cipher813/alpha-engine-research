@@ -778,7 +778,7 @@ def score_aggregator(state: ResearchState) -> dict:
                 "bull_case": rec.get("bull_case", ""),
                 "bear_case": rec.get("bear_case", ""),
                 "catalysts": rec.get("catalysts", []),
-                "conviction": normalize_conviction(rec.get("conviction", "medium")),
+                "conviction": normalize_conviction(rec.get("conviction")),
                 "quant_rationale": rec.get("quant_rationale", ""),
                 "rating": score_to_rating(
                     score_result["final_score"],
@@ -1123,14 +1123,17 @@ def _build_notable_developments(state: ResearchState) -> list[str]:
     """Extract notable developments from team outputs and exits."""
     notable = []
 
-    # High-conviction recommendations
+    # High-conviction recommendations.
+    # Option A 2026-04-30: agent-format conviction is int 0-100; ``high``
+    # corresponds to ≥70 per the threshold scheme used by
+    # ``normalize_conviction`` and the qual_analyst_user prompt.
     team_outputs = state.get("sector_team_outputs", {})
     for team_id, output in team_outputs.items():
         for rec in output.get("recommendations", []):
             ticker = rec.get("ticker", "?")
             bull = rec.get("bull_case", "")
-            conviction = rec.get("conviction", "")
-            if conviction in ("high",) and bull:
+            conviction = rec.get("conviction")
+            if isinstance(conviction, (int, float)) and conviction >= 70 and bull:
                 notable.append(f"**{ticker} — High Conviction ({team_id.title()}):** {bull[:200]}")
 
     # Exits with reasons

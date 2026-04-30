@@ -46,10 +46,13 @@ class TestNormalizeConviction:
         assert normalize_conviction("stable") == "stable"
         assert normalize_conviction("declining") == "declining"
 
-    def test_qual_analyst_mapping(self):
-        assert normalize_conviction("high") == "rising"
+    def test_legacy_qual_strings_default_to_stable(self):
+        # Post-Option-A 2026-04-30: agent format is uniformly int 0-100; the
+        # legacy "high"/"medium"/"low" branch is retired. These strings now
+        # fall through to the unknown-string default of "stable".
+        assert normalize_conviction("high") == "stable"
         assert normalize_conviction("medium") == "stable"
-        assert normalize_conviction("low") == "declining"
+        assert normalize_conviction("low") == "stable"
 
     def test_numeric_mapping(self):
         assert normalize_conviction(85) == "rising"
@@ -77,16 +80,15 @@ class TestNormalizeConviction:
         assert normalize_conviction(100) == "rising"
 
     def test_whitespace_handling(self):
-        """Leading/trailing whitespace should be stripped."""
+        """Leading/trailing whitespace should be stripped on storage labels."""
         assert normalize_conviction("  rising  ") == "rising"
-        assert normalize_conviction(" high ") == "rising"
         assert normalize_conviction("\tstable\n") == "stable"
 
-    def test_mixed_case_qual_labels(self):
-        """Qual analyst labels in various case formats."""
-        assert normalize_conviction("High") == "rising"
-        assert normalize_conviction("MEDIUM") == "stable"
-        assert normalize_conviction("LOW") == "declining"
+    def test_mixed_case_storage_labels(self):
+        """Storage-format labels are case-insensitive."""
+        assert normalize_conviction("Rising") == "rising"
+        assert normalize_conviction("STABLE") == "stable"
+        assert normalize_conviction("DECLINING") == "declining"
 
     def test_empty_string_defaults_stable(self):
         assert normalize_conviction("") == "stable"

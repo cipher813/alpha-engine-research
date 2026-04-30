@@ -94,24 +94,26 @@ _VALID_CONVICTIONS = {"rising", "stable", "declining"}
 
 
 def normalize_conviction(raw_conviction) -> str:
-    """Map v2 conviction formats to executor-compatible enum.
+    """Map agent + storage conviction formats to executor-compatible enum.
+
+    Post-Option-A (2026-04-30) the agent format is uniformly int 0-100. The
+    legacy ``"high"/"medium"/"low"`` agent-string branch is retired — every
+    agent now emits int (qual_analyst_user.txt v1.1.0,
+    sector_team_thesis_update.txt v1.1.0, ic_cio_evaluation.txt). Storage
+    format remains the trend label ``rising/stable/declining`` and is kept
+    here as passthrough so prior_theses loaded from existing rows in
+    ``investment_thesis`` SQLite continue to round-trip cleanly.
 
     Accepts:
-      - Already valid: "rising", "stable", "declining" -> pass through
-      - Qual analyst strings: "high" -> "rising", "medium" -> "stable", "low" -> "declining"
-      - CIO numeric (0-100): >= 70 -> "rising", 40-69 -> "stable", < 40 -> "declining"
-      - Anything else (sentences, None, etc.) -> "stable"
+      - Storage format: "rising", "stable", "declining" -> pass through
+      - Agent format (int 0-100): >= 70 -> "rising", 40-69 -> "stable",
+        < 40 -> "declining"
+      - Anything else (None, legacy string variants, sentences) -> "stable"
     """
     if isinstance(raw_conviction, str):
         lower = raw_conviction.strip().lower()
         if lower in _VALID_CONVICTIONS:
             return lower
-        if lower == "high":
-            return "rising"
-        if lower == "medium":
-            return "stable"
-        if lower == "low":
-            return "declining"
         return "stable"
 
     if isinstance(raw_conviction, (int, float)):

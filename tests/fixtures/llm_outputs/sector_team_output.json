@@ -8,7 +8,7 @@
       "bull_case": "AI compute demand structural; data center revenue growing 30%+ YoY",
       "bear_case": "Hyperscaler capex deceleration; valuation rich",
       "catalysts": ["Q3 earnings", "GTC keynote"],
-      "conviction": "high",
+      "conviction": 88,
       "quant_rationale": "RSI 58, momentum_20d +5.2%, 50d/200d MA crossover bullish"
     },
     {
@@ -18,7 +18,7 @@
       "bull_case": "Azure AI revenue accelerating; Copilot enterprise adoption",
       "bear_case": "Capex intensity rising",
       "catalysts": ["Q1 Azure growth print"],
-      "conviction": "medium",
+      "conviction": 65,
       "quant_rationale": "Steady momentum, low volatility regime"
     }
   ],

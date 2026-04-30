@@ -71,7 +71,9 @@ class TestToolCall:
 class TestSectorRecommendation:
     def test_minimal_valid(self):
         r = SectorRecommendation(ticker="AAPL", quant_score=70.0, qual_score=65.0)
-        assert r.conviction == "medium"
+        # Option A 2026-04-30: agent-format conviction is int 0-100 with no
+        # default — None means "agent did not emit one".
+        assert r.conviction is None
         assert r.bull_case == ""
 
     def test_score_clamping(self):
@@ -90,10 +92,24 @@ class TestSectorRecommendation:
         with pytest.raises(ValueError):
             SectorRecommendation(ticker="AAPL", quant_score=70.0, qual_score=120)
 
-    def test_conviction_literal(self):
+    def test_conviction_int_range_enforced(self):
+        # Option A 2026-04-30: agent-format conviction is int 0-100; bounds
+        # enforced. Strings (formerly high/medium/low) are no longer valid.
         with pytest.raises(ValueError):
             SectorRecommendation(
-                ticker="AAPL", quant_score=70, qual_score=70, conviction="extreme"
+                ticker="AAPL", quant_score=70, qual_score=70, conviction=120
+            )
+        with pytest.raises(ValueError):
+            SectorRecommendation(
+                ticker="AAPL", quant_score=70, qual_score=70, conviction=-1
+            )
+
+    def test_conviction_string_rejected(self):
+        # Post-Option-A: legacy agent-format strings are NOT accepted at the
+        # SectorRecommendation boundary. Producers must emit int.
+        with pytest.raises(ValueError):
+            SectorRecommendation(
+                ticker="AAPL", quant_score=70, qual_score=70, conviction="high"
             )
 
     def test_round_trip(self):
@@ -104,7 +120,7 @@ class TestSectorRecommendation:
             bull_case="AI tailwind",
             bear_case="Valuation",
             catalysts=["Earnings", "GTC"],
-            conviction="high",
+            conviction=85,
         )
         roundtripped = SectorRecommendation.model_validate(original.model_dump())
         assert roundtripped == original
@@ -187,7 +203,7 @@ class TestSectorTeamOutput:
             "recommendations": [
                 {"ticker": "AAPL", "quant_score": 65.0, "qual_score": 70.0,
                  "bull_case": "x", "bear_case": "y", "catalysts": [],
-                 "conviction": "medium", "team_id": "technology"},
+                 "conviction": 60, "team_id": "technology"},
             ],
             "thesis_updates": {},
             "quant_output": {},
@@ -343,11 +359,17 @@ class TestInvestmentThesis:
     def test_agent_format_conviction_rejected(self):
         # InvestmentThesis is post-normalize_conviction storage; agent format
         # must NOT be accepted at this boundary (use ThesisUpdate for the
-        # union-format variant if needed).
+        # union-format variant if needed). Post-Option-A the agent format is
+        # int 0-100, but it still must NOT be the value stored here.
         with pytest.raises(ValueError):
             InvestmentThesis(
                 ticker="AAPL", final_score=70.0, rating="BUY",
-                conviction="medium",
+                conviction=72,
+            )
+        with pytest.raises(ValueError):
+            InvestmentThesis(
+                ticker="AAPL", final_score=70.0, rating="BUY",
+                conviction="high",
             )
 
     def test_rating_literal(self):
@@ -494,10 +516,18 @@ class TestQualAnalystOutput:
         a = QualAssessment(ticker="AAPL", qual_score=None)
         assert a.qual_score is None
 
-    def test_conviction_literal(self):
+    def test_conviction_int_range(self):
+        # Option A 2026-04-30: qual analyst emits int 0-100.
+        from graph.state_schemas import QualAssessment
+        a = QualAssessment(ticker="AAPL", conviction=72)
+        assert a.conviction == 72
+        with pytest.raises(ValueError):
+            QualAssessment(ticker="AAPL", conviction=120)
+
+    def test_conviction_string_rejected(self):
         from graph.state_schemas import QualAssessment
         with pytest.raises(ValueError):
-            QualAssessment(ticker="AAPL", conviction="extreme")
+            QualAssessment(ticker="AAPL", conviction="high")
 
 
 class TestQuantAcceptanceVerdict:
@@ -548,15 +578,19 @@ class TestHeldThesisUpdateLLMOutput:
         assert "quant_score" not in fields
         assert "qual_score" not in fields
 
-    def test_conviction_agent_format(self):
-        """Held-stock LLM emits agent format (high/med/low), NOT storage
-        format. This is the format normalize_conviction maps from."""
+    def test_conviction_int_format(self):
+        """Held-stock LLM emits agent format — int 0-100 post-Option-A
+        (2026-04-30). Storage format strings are rejected — they belong on
+        the InvestmentThesis side, post-normalize_conviction."""
         from graph.state_schemas import HeldThesisUpdateLLMOutput
-        h = HeldThesisUpdateLLMOutput(conviction="high")
-        assert h.conviction == "high"
+        h = HeldThesisUpdateLLMOutput(conviction=80)
+        assert h.conviction == 80
         with pytest.raises(ValueError):
-            # storage format is rejected — that's the wrong path
             HeldThesisUpdateLLMOutput(conviction="rising")
+        with pytest.raises(ValueError):
+            HeldThesisUpdateLLMOutput(conviction="high")
+        with pytest.raises(ValueError):
+            HeldThesisUpdateLLMOutput(conviction=120)
 
 
 class TestCIORawOutput:
@@ -607,7 +641,7 @@ class TestCIORawOutput:
                     conviction=88,
                     rationale="strong",
                     entry_thesis=HeldThesisUpdateLLMOutput(
-                        bull_case="AI", conviction="high"
+                        bull_case="AI", conviction=85
                     ),
                 ),
                 CIORawDecision(
@@ -619,4 +653,4 @@ class TestCIORawOutput:
             ]
         )
         assert len(c.decisions) == 2
-        assert c.decisions[0].entry_thesis.conviction == "high"
+        assert c.decisions[0].entry_thesis.conviction == 85

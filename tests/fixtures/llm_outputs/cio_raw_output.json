@@ -11,7 +11,7 @@
         "bear_case": "Hyperscaler capex deceleration; valuation rich",
         "catalysts": ["Q3 earnings", "GTC keynote"],
         "risks": ["Capex normalization", "China export controls"],
-        "conviction": "high",
+        "conviction": 88,
         "conviction_rationale": "Multiple catalysts within 90 days",
         "thesis_summary": "Best-of-breed AI infrastructure play with structural tailwinds"
       }
@@ -27,7 +27,7 @@
         "bear_case": "Capex intensity rising",
         "catalysts": ["Q1 Azure growth print"],
         "risks": ["AI capex absorption"],
-        "conviction": "medium",
+        "conviction": 60,
         "conviction_rationale": "Strong fundamentals but valuation full",
         "thesis_summary": "Diversified mega-cap with AI optionality"
       }

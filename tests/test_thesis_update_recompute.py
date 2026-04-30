@@ -169,11 +169,11 @@ class TestThesisUpdateRecompute:
 class TestHeldStockConvictionNormalization:
     """Regression for the 2026-04-30 score_aggregator skipped-normalization
     bug. Held-stock thesis_updates carrying agent-format conviction
-    ('low'/'medium'/'high') previously bypassed normalize_conviction and
-    flowed into InvestmentThesis with values that fail the
-    StoredConvictionLiteral schema (rising/stable/declining). Fix in
-    graph/research_graph.py:826 normalizes the held-stock branch the same
-    way the recommendation branch does.
+    previously bypassed normalize_conviction and flowed into
+    InvestmentThesis with values that fail the StoredConvictionLiteral
+    schema (rising/stable/declining). Fix in graph/research_graph.py:826
+    normalizes the held-stock branch the same way the recommendation branch
+    does. Updated 2026-04-30 (Option A) to use int 0-100 agent format.
     """
 
     def test_held_stock_low_conviction_normalized_to_declining(self):
@@ -189,7 +189,7 @@ class TestHeldStockConvictionNormalization:
                             "quant_score": 50,
                             "qual_score": 40,
                             "rating": "HOLD",
-                            "conviction": "low",
+                            "conviction": 25,  # int < 40 → declining
                         },
                     },
                 },
@@ -211,7 +211,7 @@ class TestHeldStockConvictionNormalization:
                             "quant_score": 60,
                             "qual_score": 60,
                             "rating": "HOLD",
-                            "conviction": "medium",
+                            "conviction": 55,  # int 40-69 → stable
                         },
                     },
                 },
@@ -233,7 +233,7 @@ class TestHeldStockConvictionNormalization:
                             "quant_score": 78,
                             "qual_score": 82,
                             "rating": "BUY",
-                            "conviction": "high",
+                            "conviction": 85,  # int >= 70 → rising
                         },
                     },
                 },
@@ -265,3 +265,32 @@ class TestHeldStockConvictionNormalization:
         )
         out = score_aggregator(state)
         assert out["investment_theses"]["AAPL"]["conviction"] == "rising"
+
+    def test_legacy_agent_string_normalized_at_aggregator(self):
+        """Option A 2026-04-30 transition: research.db rows written before
+        PR #56 may carry agent-format strings ('high'/'medium'/'low') that
+        the StoredConvictionLiteral schema would reject. score_aggregator's
+        normalize_conviction call must flatten them to storage format
+        instead of failing typed-state validation."""
+        state = _state(
+            team_outputs={
+                "industrials": {
+                    "recommendations": [],
+                    "thesis_updates": {
+                        "UNP": {
+                            "ticker": "UNP",
+                            "sector": "Industrials",
+                            "final_score": 60.0,
+                            "quant_score": 60,
+                            "qual_score": 60,
+                            "rating": "HOLD",
+                            "conviction": "medium",  # legacy string
+                        },
+                    },
+                },
+            },
+        )
+        out = score_aggregator(state)
+        # "medium" is no longer a known agent-format string post-Option-A,
+        # so normalize_conviction maps it to the safe default "stable".
+        assert out["investment_theses"]["UNP"]["conviction"] == "stable"

@@ -7,7 +7,7 @@
       "bear_case": "Hyperscaler capex deceleration; competition from custom silicon (TPU, Trainium). Valuation prices in 5y of growth.",
       "catalysts": ["Q3 earnings", "GTC keynote", "Hyperscaler capex prints"],
       "risks": ["Capex normalization", "China export controls"],
-      "conviction": "high"
+      "conviction": 85
     },
     {
       "ticker": "MSFT",
@@ -16,7 +16,7 @@
       "bear_case": "Capex intensity rising; ROI on AI investments not yet proven. Activision integration drag.",
       "catalysts": ["Q1 Azure growth print", "Copilot pricing announcement"],
       "risks": ["AI capex absorption", "Cloud growth deceleration"],
-      "conviction": "medium"
+      "conviction": 60
     }
   ],
   "additional_candidate": {
@@ -26,6 +26,6 @@
     "bear_case": "China-Taiwan geopolitical risk; cyclical capex exposure",
     "catalysts": ["Capacity expansion announcements", "Major customer wins"],
     "risks": ["Geopolitical tail risk", "Capex cycle"],
-    "conviction": "medium"
+    "conviction": 65
   }
 }
