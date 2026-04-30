@@ -61,11 +61,16 @@ def run_quant_analyst(
     # Build system prompt
     system_prompt = _build_system_prompt(team_id, team_params, market_regime, len(sector_tickers))
 
-    # Create ReAct agent via LangGraph
+    # Create ReAct agent via LangGraph. PR 2.3 Step D adds response_format
+    # so the ReAct loop ends with one extra Anthropic call that returns the
+    # parsed Pydantic model directly (available as result['structured_response']).
+    # This retires the _parse_picks_from_response regex parser.
+    from graph.state_schemas import QuantAnalystOutput
     agent = create_react_agent(
         model=llm,
         tools=tools,
         prompt=system_prompt,
+        response_format=QuantAnalystOutput,
     )
 
     # Build input message
@@ -86,11 +91,24 @@ def run_quant_analyst(
             config={"recursion_limit": QUANT_MAX_ITERATIONS * 2},
         )
 
-        # Extract the final response and tool calls from message history
+        # Extract the final response and tool calls from message history.
+        # picks now come from response_format's structured_response Pydantic
+        # model (PR 2.3 Step D); final_text is kept only for the diagnostic
+        # logging path below when picks are empty.
         messages = result.get("messages", [])
         tool_calls = _extract_tool_calls(messages)
         final_text = _get_final_text(messages)
-        picks = _parse_picks_from_response(final_text)
+        structured = result.get("structured_response")
+        if structured is None:
+            # response_format failed to populate — treat as agent failure
+            # so the team's `error` field surfaces to score_aggregator.
+            raise RuntimeError(
+                "create_react_agent did not populate structured_response — "
+                "the response_format extraction call failed (no QuantAnalystOutput)"
+            )
+        # Convert QuantPick Pydantic models to dicts for downstream
+        # consumers (peer_review, score_aggregator) that use dict-access.
+        picks = [p.model_dump() for p in structured.ranked_picks]
 
         log.info("[quant:%s] completed — %d picks, %d tool calls",
                  team_id, len(picks), len(tool_calls))

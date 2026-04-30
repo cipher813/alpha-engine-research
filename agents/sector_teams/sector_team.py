@@ -304,48 +304,42 @@ def _update_thesis_for_held_stock(
         analyst_summary=analyst_summary or "No analyst updates.",
     )
 
+    # PR 2.3 Step E: held-stock LLM updates use HeldThesisUpdateLLMOutput,
+    # which by design has NO score fields (final_score / quant_score /
+    # qual_score / rating). The LLM cannot emit them because they're not in
+    # the schema. This retires the strip-nulls workaround that existed to
+    # defend against LNTH/LLY/PFE/VRTX/CME/JHG/COKE/HSY/KR's
+    # `"final_score": null` overwrites in the 2026-04-11 run.
+    from graph.state_schemas import HeldThesisUpdateLLMOutput
+    from strict_mode import is_strict_validation_enabled
+
+    structured_llm = llm.with_structured_output(HeldThesisUpdateLLMOutput)
     try:
-        response = llm.invoke([HumanMessage(content=prompt)])
-        import re
-        text = response.content
-        match = re.search(r"\{.*\}", text, re.DOTALL)
-        if match:
-            llm_update = json.loads(match.group())
-            # Held-stock updates only revise narrative fields. Scoring fields
-            # (final_score, quant_score, qual_score, rating, sector, team_id)
-            # come from the prior thesis — the LLM is not authoritative on
-            # scores and does not re-run the quant tools for held stocks.
-            #
-            # Strip None values from llm_update BEFORE merging so that an
-            # LLM that emits `"final_score": null` (seen on LNTH/LLY/PFE/
-            # VRTX/CME/JHG/COKE/HSY/KR in the 2026-04-11 run) can't
-            # overwrite valid prior scores with nulls. The merge order
-            # `{**prior_thesis, **llm_update}` still lets the LLM override
-            # narrative fields with real values, but nulls are dropped.
-            #
-            # Prior mitigation was a downstream downgrade in
-            # research_graph._build_signals_payload that catches broken
-            # theses at emit time — this is the upstream fix for the same
-            # 2026-04-04 / 2026-04-11 root cause.
-            llm_update_clean = {k: v for k, v in llm_update.items() if v is not None}
-            if prior_thesis:
-                result = {**prior_thesis, **llm_update_clean}
-            else:
-                result = llm_update_clean
-                result["score_failed"] = True
-            result["last_updated"] = run_date
-            result["triggers"] = triggers
-            result["stale_days"] = 0
-            return result
+        update: HeldThesisUpdateLLMOutput = structured_llm.invoke(
+            [HumanMessage(content=prompt)]
+        )
+        # Convert to dict + drop default-empty fields so they don't overwrite
+        # a populated prior_thesis value with the default (e.g. an empty
+        # bull_case shouldn't blank out a non-empty prior bull_case).
+        llm_update_clean = {
+            k: v for k, v in update.model_dump().items()
+            if v not in (None, "", [])
+        }
+        if prior_thesis:
+            result = {**prior_thesis, **llm_update_clean}
         else:
-            log.warning(
-                "[thesis_update:%s] LLM returned no JSON block — using fallback",
-                ticker,
-            )
+            result = llm_update_clean
+            result["score_failed"] = True
+        result["last_updated"] = run_date
+        result["triggers"] = triggers
+        result["stale_days"] = 0
+        return result
     except Exception as e:
         log.warning("[thesis_update:%s] failed: %s", ticker, e)
+        if is_strict_validation_enabled():
+            raise
 
-    # Fallback: preserve prior thesis
+    # Lax-mode fallback: preserve prior thesis
     if prior_thesis:
         return {**prior_thesis, "triggers": triggers, "stale_days": 0}
     return {"triggers": triggers, "stale_days": 0, "score_failed": True}

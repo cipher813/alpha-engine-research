@@ -23,7 +23,12 @@ import pytest
 
 
 def _fake_llm_factory(response_content: str) -> MagicMock:
-    """Build a MagicMock that mimics ChatAnthropic's invoke() response."""
+    """Build a MagicMock that mimics ChatAnthropic's invoke() response.
+
+    Legacy factory — used by tests against agents that haven't migrated
+    to ``with_structured_output``. New tests should use
+    ``_fake_structured_llm_factory`` below.
+    """
     fake_response = MagicMock()
     fake_response.content = response_content
     fake_llm = MagicMock()
@@ -31,9 +36,33 @@ def _fake_llm_factory(response_content: str) -> MagicMock:
     return fake_llm
 
 
+def _fake_structured_llm_factory(parsed_model) -> MagicMock:
+    """Build a MagicMock that mimics ``llm.with_structured_output(Schema).invoke()``.
+
+    The chain is: ``llm.with_structured_output(Schema)`` returns a wrapped
+    LLM whose ``.invoke(...)`` returns the parsed Pydantic model directly.
+    Used by tests covering agents migrated in PR 2.3.
+    """
+    fake_llm = MagicMock()
+    structured = MagicMock()
+    fake_llm.with_structured_output.return_value = structured
+    structured.invoke.return_value = parsed_model
+    return fake_llm
+
+
 def test_held_stock_thesis_update_preserves_prior_scores():
-    """LLM thesis updates for held stocks must merge over prior_thesis."""
+    """LLM thesis updates for held stocks must merge over prior_thesis.
+
+    PR 2.3 Step E refactored ``_update_thesis_for_held_stock`` to use
+    ``with_structured_output(HeldThesisUpdateLLMOutput)``. The new
+    schema has NO score fields by design — the LLM cannot emit
+    final_score / quant_score / qual_score / rating, which makes
+    overwrite-with-null structurally impossible (the previous
+    strip-nulls workaround is retired). This test pins the new
+    invariant: prior scores survive the merge.
+    """
     from agents.sector_teams import sector_team
+    from graph.state_schemas import HeldThesisUpdateLLMOutput
 
     prior = {
         "ticker": "LNTH",
@@ -48,10 +77,12 @@ def test_held_stock_thesis_update_preserves_prior_scores():
         "bear_case": "old bear",
     }
 
-    fake_llm = _fake_llm_factory(
-        '{"bull_case": "new bull narrative", '
-        '"bear_case": "new bear narrative", '
-        '"conviction": "declining"}'
+    fake_llm = _fake_structured_llm_factory(
+        HeldThesisUpdateLLMOutput(
+            bull_case="new bull narrative",
+            bear_case="new bear narrative",
+            conviction="low",  # agent format (high/medium/low)
+        )
     )
 
     with patch.object(sector_team, "ChatAnthropic", return_value=fake_llm), \
@@ -69,7 +100,7 @@ def test_held_stock_thesis_update_preserves_prior_scores():
             api_key="test-key",
         )
 
-    # Scores must be preserved from prior
+    # Scores must be preserved from prior — schema makes overwrite impossible
     assert result["final_score"] == 45.0
     assert result["quant_score"] == 50.0
     assert result["qual_score"] == 40.0
@@ -80,74 +111,40 @@ def test_held_stock_thesis_update_preserves_prior_scores():
     # Narrative fields must be updated from LLM
     assert result["bull_case"] == "new bull narrative"
     assert result["bear_case"] == "new bear narrative"
-    assert result["conviction"] == "declining"
+    assert result["conviction"] == "low"
 
     # Run metadata must be set
     assert result["last_updated"] == "2026-04-04"
     assert result["stale_days"] == 0
 
 
-def test_held_stock_thesis_update_strips_null_llm_fields():
-    """LLM-provided `null` values must NOT overwrite valid prior fields.
+def test_held_stock_llm_schema_has_no_score_fields():
+    """Structural guarantee: HeldThesisUpdateLLMOutput cannot contain
+    score fields by design.
 
-    Observed 2026-04-11: the held-stock thesis update prompt for LNTH,
-    LLY, PFE, VRTX, CME, JHG, COKE, HSY, KR returned JSON that
-    explicitly included `"final_score": null`. The merge
-    `{**prior_thesis, **llm_update}` let the null override the valid
-    prior score, triggering the downstream `_build_signals_payload`
-    downgrade-to-HOLD safety net for 9 tickers.
+    Replaces the pre-2026-04-30 ``test_held_stock_thesis_update_strips_null_llm_fields``
+    test. The original test verified that the `_update_thesis_for_held_stock`
+    code stripped `final_score: null` (and similar) from the LLM's JSON
+    output before merging into prior_thesis. PR 2.3 Step E migrated to
+    ``with_structured_output(HeldThesisUpdateLLMOutput)``: the schema
+    intentionally omits all score fields, so the LLM cannot emit them
+    AT ALL. The strip-nulls workaround is structurally retired —
+    confirmed by enumerating the schema's fields.
 
-    Fix: strip None values from the LLM JSON BEFORE merging so prior
-    scoring fields survive.
+    This test pins that structural invariant. If anyone ever adds
+    ``final_score`` (or sibling) to ``HeldThesisUpdateLLMOutput``,
+    they'll fail this test before re-introducing the 2026-04-04
+    leak class.
     """
-    from agents.sector_teams import sector_team
+    from graph.state_schemas import HeldThesisUpdateLLMOutput
 
-    prior = {
-        "ticker": "LNTH",
-        "sector": "Healthcare",
-        "team_id": "healthcare",
-        "final_score": 62.0,
-        "quant_score": 65.0,
-        "qual_score": 58.0,
-        "rating": "BUY",
-        "conviction": "stable",
-    }
-
-    # LLM includes explicit nulls — these would have overwritten the
-    # valid prior scores in the pre-fix merge, leaving final_score=None.
-    fake_llm = _fake_llm_factory(
-        '{"bull_case": "updated bull", '
-        '"bear_case": "updated bear", '
-        '"final_score": null, '
-        '"quant_score": null, '
-        '"rating": "BUY"}'
+    fields = HeldThesisUpdateLLMOutput.model_fields.keys()
+    forbidden = {"final_score", "quant_score", "qual_score", "rating"}
+    leaked = forbidden & set(fields)
+    assert not leaked, (
+        f"HeldThesisUpdateLLMOutput must NOT have score fields (regression "
+        f"of 2026-04-04 LNTH/LLY/PFE/etc. leak). Found: {leaked}"
     )
-
-    with patch.object(sector_team, "ChatAnthropic", return_value=fake_llm), \
-         patch.object(sector_team, "load_prompt") as mock_load, \
-         patch.object(sector_team, "format_structured_thesis_for_prompt", return_value=""):
-        mock_load.return_value.format.return_value = "prompt"
-        result = sector_team._update_thesis_for_held_stock(
-            ticker="LNTH",
-            triggers=[],
-            prior_thesis=prior,
-            news_data=None,
-            analyst_data=None,
-            run_date="2026-04-11",
-            team_id="healthcare",
-            api_key="test-key",
-        )
-
-    # Scores must be preserved from prior — null LLM values are stripped
-    assert result["final_score"] == 62.0
-    assert result["quant_score"] == 65.0
-    assert result["qual_score"] == 58.0
-    # Non-null LLM values still override
-    assert result["bull_case"] == "updated bull"
-    assert result["bear_case"] == "updated bear"
-    # Non-null LLM rating still overrides (this is intentional — the LLM
-    # is allowed to change rating narrative even for held stocks)
-    assert result["rating"] == "BUY"
 
 
 def test_held_stock_thesis_update_no_prior_marks_score_failed():
