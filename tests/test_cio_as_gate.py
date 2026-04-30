@@ -14,7 +14,7 @@ Pins two related changes:
 from agents.investment_committee.ic_cio import (
     _compute_advance_bounds,
     _fallback_selection,
-    _parse_cio_response,
+    _post_process_cio_decisions,
 )
 
 
@@ -195,7 +195,7 @@ def test_parse_cio_response_truncates_at_cap():
         for i in range(12)
     ]
     text = _decisions_to_text(decisions)
-    result = _parse_cio_response(text, candidates, floor=2, cap=10)
+    result = _post_process_cio_decisions(decisions, candidates, floor=2, cap=10)
     assert len(result["advanced_tickers"]) == 10
     # First 10 in original ADVANCE order are kept
     assert result["advanced_tickers"] == [f"T{i}" for i in range(10)]
@@ -219,7 +219,7 @@ def test_parse_cio_response_force_advances_to_floor():
         for i in range(15) if i != 5
     ])
     text = _decisions_to_text(decisions)
-    result = _parse_cio_response(text, candidates, floor=3, cap=10)
+    result = _post_process_cio_decisions(decisions, candidates, floor=3, cap=10)
 
     # Must hit floor: 1 rubric-advanced + 2 forced = 3
     assert len(result["advanced_tickers"]) == 3
@@ -248,7 +248,7 @@ def test_parse_cio_response_no_force_when_rubric_meets_floor():
          "rationale": "rubric", "entry_thesis": None},
     ]
     text = _decisions_to_text(decisions)
-    result = _parse_cio_response(text, candidates, floor=2, cap=10)
+    result = _post_process_cio_decisions(decisions, candidates, floor=2, cap=10)
     assert result["advanced_tickers"] == ["T0", "T1"]
     forced = [
         d for d in result["decisions"] if d.get("decision") == "ADVANCE_FORCED"
@@ -268,7 +268,7 @@ def test_parse_cio_response_passes_through_in_band():
         for i in range(5)
     ]
     text = _decisions_to_text(decisions)
-    result = _parse_cio_response(text, candidates, floor=2, cap=10)
+    result = _post_process_cio_decisions(decisions, candidates, floor=2, cap=10)
     assert len(result["advanced_tickers"]) == 5
     assert result["advanced_tickers"] == [f"T{i}" for i in range(5)]
 
