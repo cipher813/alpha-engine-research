@@ -138,6 +138,12 @@ class TestThesisUpdateRecompute:
     def test_present_final_score_is_passed_through_unchanged(self):
         """Happy path: thesis has final_score already. No recompute,
         no extra WARN.
+
+        Post-Step-F (2026-04-30) the InvestmentThesis schema is enforced
+        strictly by default — fixture must include the required ``rating``
+        field. The recompute path injects rating from score_to_rating
+        when missing, but the no-recompute branch (final_score present)
+        passes through whatever the thesis carried.
         """
         state = _state(
             team_outputs={
@@ -150,6 +156,7 @@ class TestThesisUpdateRecompute:
                             "final_score": 82.5,
                             "quant_score": 80,
                             "qual_score": 85,
+                            "rating": "BUY",
                         },
                     },
                 },
