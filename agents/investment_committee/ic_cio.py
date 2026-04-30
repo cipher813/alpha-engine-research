@@ -129,13 +129,35 @@ def run_cio(
         prior_decisions=prior_decisions,
     )
 
+    # PR 2.3 Step E: flip CIO to with_structured_output. The LLM emits a
+    # CIORawOutput (decisions list with ADVANCE | REJECT | NO_ADVANCE_DEADLOCK
+    # literals — distinct from the post-processed CIODecision shape that adds
+    # ADVANCE_FORCED / HOLD via _post_process_cio_decisions below). Strict
+    # mode raises on parse error; lax-mode preserves the load-bearing fallback
+    # to combined-score floor selection — every Saturday SF MUST yield some
+    # advanced tickers for the executor to act on.
+    from graph.state_schemas import CIORawOutput
+    from strict_mode import is_strict_validation_enabled
+
+    structured_llm = llm.with_structured_output(CIORawOutput)
     try:
-        response = llm.invoke([HumanMessage(content=prompt)])
-        text = response.content
-        return _parse_cio_response(text, candidates, floor, cap)
+        raw_output: CIORawOutput = structured_llm.invoke(
+            [HumanMessage(content=prompt)]
+        )
+        decisions_dicts = [d.model_dump() for d in raw_output.decisions]
+        if not decisions_dicts:
+            log.warning("[cio] structured response had empty decisions list")
+            if is_strict_validation_enabled():
+                raise RuntimeError(
+                    "CIO structured response had empty decisions list"
+                )
+            return _fallback_selection(candidates, floor)
+        return _post_process_cio_decisions(decisions_dicts, candidates, floor, cap)
     except Exception as e:
         log.error("[cio] evaluation failed: %s", e)
-        # Fallback advances only `floor` (not `cap`). When the LLM signal is
+        if is_strict_validation_enabled():
+            raise
+        # Lax fallback advances only `floor` (not `cap`). When the LLM signal is
         # unusable, be conservative — don't force max-advance on broken data.
         return _fallback_selection(candidates, floor)
 
@@ -225,13 +247,20 @@ def _combined_score(c: dict) -> float:
     return (qs + qls) / 2 if qls else qs
 
 
-def _parse_cio_response(
-    text: str,
+def _post_process_cio_decisions(
+    decisions: list[dict],
     candidates: list[dict],
     floor: int,
     cap: int,
 ) -> dict:
-    """Parse the CIO's JSON response.
+    """Apply cap/floor/force-fill post-processing to a typed CIO decision list.
+
+    PR 2.3 Step E split: regex/JSON parsing was retired (the LLM call now
+    uses ``with_structured_output(CIORawOutput)`` and we receive a typed
+    list directly). This function preserves the existing post-processing
+    logic — bounds enforcement, ADVANCE_FORCED synthesis, audit trail
+    annotation — operating on a ``list[dict]`` decisions input regardless
+    of how the upstream parsing happened.
 
     Bounds enforcement:
     - Truncate at `cap` if the rubric advanced more than the ceiling.
@@ -240,23 +269,6 @@ def _parse_cio_response(
       floor. Forced promotions are tagged `decision="ADVANCE_FORCED"` so
       the audit trail distinguishes them from rubric-driven advances.
     """
-    # Find JSON block
-    match = re.search(r"\{.*\}", text, re.DOTALL)
-    if not match:
-        log.warning("[cio] could not parse JSON from response")
-        return _fallback_selection(candidates, floor)
-
-    try:
-        result = json.loads(match.group())
-    except json.JSONDecodeError:
-        log.warning("[cio] invalid JSON in response")
-        return _fallback_selection(candidates, floor)
-
-    decisions = result.get("decisions", [])
-    if not decisions:
-        log.warning("[cio] no decisions in response")
-        return _fallback_selection(candidates, floor)
-
     # Extract advanced tickers + theses from rubric ADVANCE decisions
     advanced = []
     entry_theses = {}

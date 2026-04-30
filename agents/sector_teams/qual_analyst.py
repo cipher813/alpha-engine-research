@@ -62,10 +62,15 @@ def run_qual_analyst(
 
     system_prompt = _build_system_prompt(team_id, market_regime, len(quant_top5))
 
+    # PR 2.3 Step D: response_format ends the ReAct loop with a typed
+    # Pydantic model in result['structured_response'], retiring the
+    # _parse_assessments regex parser.
+    from graph.state_schemas import QualAnalystOutput
     agent = create_react_agent(
         model=llm,
         tools=tools,
         prompt=system_prompt,
+        response_format=QualAnalystOutput,
     )
 
     picks_text = "\n".join(
@@ -90,16 +95,28 @@ def run_qual_analyst(
 
         messages = result.get("messages", [])
         tool_calls = _extract_tool_calls(messages)
-        final_text = _get_final_text(messages)
-        parsed = _parse_assessments(final_text)
+        structured = result.get("structured_response")
+        if structured is None:
+            raise RuntimeError(
+                "create_react_agent did not populate structured_response — "
+                "the response_format extraction call failed (no QualAnalystOutput)"
+            )
+        # Convert QualAssessment Pydantic models to dicts for downstream
+        # peer_review consumption (which uses dict-access patterns).
+        assessments = [a.model_dump() for a in structured.assessments]
+        additional_candidate = (
+            structured.additional_candidate.model_dump()
+            if structured.additional_candidate is not None
+            else None
+        )
 
         log.info("[qual:%s] completed — %d assessments, %d tool calls",
-                 team_id, len(parsed.get("assessments", [])), len(tool_calls))
+                 team_id, len(assessments), len(tool_calls))
 
         return {
             "team_id": team_id,
-            "assessments": parsed.get("assessments", []),
-            "additional_candidate": parsed.get("additional_candidate"),
+            "assessments": assessments,
+            "additional_candidate": additional_candidate,
             "tool_calls": tool_calls,
             "iterations": len(tool_calls),
             "error": None,
