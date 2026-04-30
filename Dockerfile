@@ -11,12 +11,16 @@ FROM --platform=linux/amd64 public.ecr.aws/lambda/python:3.12
 COPY vendor/alpha-engine-lib /tmp/alpha-engine-lib
 
 # Install dependencies. Exclude pytest / python-dotenv / pre-installed
-# Lambda runtime deps (boto3 etc.).
+# Lambda runtime deps (boto3 etc.). Filtered list is written to a
+# requirements file and consumed by `pip install -r` so pip's own parser
+# handles inline comments — `$(grep ...)` shell substitution would
+# word-split a `pkg # comment` line into separate args and pip would
+# reject the bare `#` as an invalid requirement.
 COPY requirements.txt ${LAMBDA_TASK_ROOT}/
 RUN pip install --no-cache-dir /tmp/alpha-engine-lib[arcticdb,flow_doctor] && \
-    pip install --no-cache-dir \
-    $(grep -vE "^#|^$|^pytest|^python-dotenv|^boto3|^botocore|^s3transfer|^alpha-engine-lib" requirements.txt) \
-    && rm -rf /root/.cache/pip /tmp/alpha-engine-lib
+    grep -vE "^#|^$|^pytest|^python-dotenv|^boto3|^botocore|^s3transfer|^alpha-engine-lib" requirements.txt > /tmp/req-lambda.txt && \
+    pip install --no-cache-dir -r /tmp/req-lambda.txt && \
+    rm -rf /root/.cache/pip /tmp/alpha-engine-lib /tmp/req-lambda.txt
 
 # Copy application code
 COPY agents/ ${LAMBDA_TASK_ROOT}/agents/
