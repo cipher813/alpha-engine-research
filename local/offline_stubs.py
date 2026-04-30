@@ -9,11 +9,12 @@ Usage:
 Generates synthetic but structurally valid data so every graph node
 receives the dict shapes it expects.
 
-NOTE 2026-04-30: The LLM-only agent stub functions (``_stub_run_*``) are
-duplicated in ``/dry_run.py`` at repo root, which is the Lambda-importable
-copy. Keep them in sync. Single-source consolidation is tracked as a
-follow-up item; this PR keeps two copies to avoid scope creep on the
-Lambda dry-run gate landing.
+The 7 LLM-agent stub functions are imported from ``/dry_run.py`` at
+repo root — the Lambda-importable single source. This file owns the
+data-API + S3 + email stubs (which the Lambda doesn't need) plus the
+``install_*`` orchestration. Output strings carry ``[DRY-RUN]``
+markers (from dry_run.py) rather than ``[OFFLINE]``; cosmetic
+difference, no functional change.
 """
 
 from __future__ import annotations
@@ -162,186 +163,27 @@ def _stub_fetch_institutional_accumulation(tickers):
     return {}
 
 
-# ── LLM agent stubs ─────────────────────────────────────────────────────────
+# ── LLM agent stubs (single-source — imported from /dry_run.py) ─────────────
+#
+# Both this file (local/offline_stubs.py for `local/run.py --offline`
+# and `--stub-llm`) and the Lambda handler's auto-gate (via
+# /dry_run.py::install_dry_run_stubs) need the same 7 synthetic agent
+# functions. dry_run.py is the canonical home (Lambda-importable);
+# this file imports them so there's exactly one definition to maintain.
+#
+# The imports surface the same 7 names this module historically defined,
+# so install_offline_stubs / install_llm_only_stubs / patch_graph_modules
+# below continue to reference them with no signature change.
 
-def _stub_run_macro_agent_with_reflection(prior_report, prior_date, macro_data,
-                                          max_iterations=2, api_key=None, **kwargs):
-    logger.info("[offline] stub run_macro_agent_with_reflection")
-    from config import ALL_SECTORS
-    return {
-        "report_md": "[OFFLINE STUB] Macro environment is neutral. Fed on hold, yields stable.",
-        "macro_json": {
-            "market_regime": "neutral",
-            "sector_modifiers": {s: 1.0 for s in ALL_SECTORS},
-            "sector_ratings": {s: {"rating": "market_weight", "rationale": "Synthetic data"} for s in ALL_SECTORS},
-        },
-        "market_regime": "neutral",
-        "sector_modifiers": {s: 1.0 for s in ALL_SECTORS},
-        "sector_ratings": {s: {"rating": "market_weight", "rationale": "Synthetic data"} for s in ALL_SECTORS},
-    }
-
-
-def _stub_run_macro_agent(prior_report, prior_date, macro_data, api_key=None, **kwargs):
-    return _stub_run_macro_agent_with_reflection(prior_report, prior_date, macro_data)
-
-
-# ── Sector team / CIO stubs ──────────────────────────────────────────────
-
-def _stub_run_quant_analyst(team_id, sector_tickers, market_regime, price_data,
-                            technical_scores, run_date, api_key=None, **kwargs):
-    logger.info("[offline] stub run_quant_analyst: %s (%d tickers)", team_id, len(sector_tickers))
-    rng = random.Random(hash(team_id))
-    picks = []
-    for i, t in enumerate(sector_tickers[:10]):
-        picks.append({
-            "ticker": t,
-            "quant_score": rng.randint(45, 85),
-            "rationale": f"[OFFLINE] Synthetic quant score for {t}",
-            "key_metrics": {"rsi": rng.randint(30, 70), "momentum_20d": round(rng.uniform(-5, 10), 1)},
-        })
-    return {"team_id": team_id, "ranked_picks": picks, "tool_calls": [], "iterations": 0}
-
-
-def _stub_run_qual_analyst(team_id, quant_top5, prior_theses, market_regime,
-                           run_date, api_key=None, price_data=None, **kwargs):
-    logger.info("[offline] stub run_qual_analyst: %s (%d picks)", team_id, len(quant_top5))
-    rng = random.Random(hash(team_id) + 10)
-    assessments = []
-    for pick in quant_top5:
-        assessments.append({
-            "ticker": pick.get("ticker", ""),
-            "qual_score": rng.randint(45, 85),
-            "bull_case": "[OFFLINE] Strong fundamentals",
-            "bear_case": "[OFFLINE] Valuation risk",
-            "catalysts": ["Earnings", "Product launch"],
-            "risks": ["Competition", "Macro headwinds"],
-        })
-    return {"team_id": team_id, "assessments": assessments, "additional_candidate": None, "tool_calls": []}
-
-
-def _stub_run_peer_review(team_id, quant_picks, qual_assessments,
-                          additional_candidate=None, technical_scores=None,
-                          market_regime="neutral", api_key=None, **kwargs):
-    logger.info("[offline] stub run_peer_review: %s", team_id)
-    recs = []
-    for qa in (qual_assessments or [])[:3]:
-        recs.append({
-            "ticker": qa.get("ticker", ""),
-            "quant_score": 65,
-            "qual_score": qa.get("qual_score", 60),
-            "combined_score": 63,
-            "bull_case": qa.get("bull_case", ""),
-            "bear_case": qa.get("bear_case", ""),
-            "catalysts": qa.get("catalysts", []),
-            "conviction": "medium",
-            "quant_rationale": "[OFFLINE] Synthetic peer review",
-            "team_id": team_id,
-        })
-    return {"recommendations": recs, "peer_review_rationale": "[OFFLINE] Synthetic review"}
-
-
-def _stub_run_sector_team(team_id, ctx, **kwargs):
-    """Stub sector team — mirrors the real held-stock thesis update path.
-
-    The real ``run_sector_team`` runs quant + qual + peer_review (LLM) for
-    sector picks AND iterates ``team_held`` to produce ``thesis_updates``.
-    The held loop is exactly where score_aggregator hard-fails surface.
-    A stub that returns ``thesis_updates: {}`` would skip that code path
-    entirely — exactly the path we need to exercise in dry-run debugging.
-
-    This stub:
-      - Runs the (synthetic) quant/qual/peer chain for recommendations.
-      - Iterates ``team_held`` and produces a thesis_update per ticker by
-        carrying forward ``prior_theses[ticker]`` (the no-LLM preservation
-        branch of real code) — this exercises score_aggregator with the
-        real prior_thesis shape.
-    """
-    logger.info("[offline] stub run_sector_team: %s", team_id)
-    from agents.sector_teams.team_config import get_team_tickers
-    from agents.sector_teams.sector_team import _sector_team_inverse
-    scanner_universe = ctx.scanner_universe
-    sector_map = ctx.sector_map
-    price_data = ctx.price_data
-    technical_scores = ctx.technical_scores
-    market_regime = ctx.market_regime
-    prior_theses = ctx.prior_theses
-    held_tickers = ctx.held_tickers
-    run_date = ctx.run_date
-    sector_tickers = get_team_tickers(team_id, scanner_universe, sector_map)
-
-    # Recommendations path (synthetic, since LLM is stubbed)
-    if sector_tickers:
-        quant = _stub_run_quant_analyst(team_id, sector_tickers, market_regime, price_data, technical_scores, run_date)
-        qual = _stub_run_qual_analyst(team_id, quant["ranked_picks"][:5], prior_theses, market_regime, run_date)
-        peer = _stub_run_peer_review(team_id, quant["ranked_picks"][:5], qual["assessments"])
-        recommendations = peer["recommendations"]
-    else:
-        quant, qual, peer = {}, {}, {}
-        recommendations = []
-
-    # Held-stock thesis_updates — mirror the real no-trigger preservation
-    # branch in agents.sector_teams.sector_team.run_sector_team. This is
-    # the load-bearing path for score_aggregator validation.
-    team_sector_set = {s for s, tid in _sector_team_inverse().items() if tid == team_id}
-    team_held = [t for t in held_tickers if sector_map.get(t, "") in team_sector_set]
-    thesis_updates = {}
-    for ticker in team_held:
-        if prior_theses.get(ticker) is None:
-            # Same upstream guard as the real sector_team — fail loudly so
-            # population/investment_thesis sync drift surfaces in dry-run.
-            raise RuntimeError(
-                f"Held ticker {ticker} has no prior_thesis in archive — "
-                f"population/investment_thesis are out of sync."
-            )
-        thesis_updates[ticker] = {
-            **prior_theses[ticker],
-            "stale_days": prior_theses[ticker].get("stale_days", 0) + 1,
-            "triggers": [],
-            "last_updated": run_date,
-        }
-
-    return {
-        "team_id": team_id,
-        "recommendations": recommendations,
-        "thesis_updates": thesis_updates,
-        "quant_output": quant,
-        "qual_output": qual,
-        "peer_review_output": peer,
-        "tool_calls": [],
-    }
-
-
-def _stub_run_cio(candidates, macro_context, sector_ratings, current_population,
-                  open_slots, exits, run_date, api_key=None, **kwargs):
-    logger.info("[offline] stub run_cio: %d candidates, %d open slots", len(candidates), open_slots)
-    decisions = []
-    advanced = []
-    entry_theses = {}
-    for i, c in enumerate(candidates[:open_slots]):
-        ticker = c.get("ticker", f"UNK{i}")
-        decisions.append({
-            "ticker": ticker,
-            "decision": "ADVANCE",
-            "rationale": "[OFFLINE] Synthetic CIO advance decision",
-            "scores": {"conviction": 3, "macro_alignment": 3, "portfolio_fit": 3, "catalyst": 3},
-        })
-        advanced.append(ticker)
-        entry_theses[ticker] = {
-            "bull_case": "[OFFLINE] Synthetic bull case",
-            "bear_case": "[OFFLINE] Synthetic bear case",
-            "catalysts": ["Earnings"],
-            "risks": ["Valuation"],
-            "conviction": "medium",
-            "conviction_rationale": "Synthetic",
-            "score": c.get("combined_score", 60),
-        }
-    for c in candidates[open_slots:]:
-        decisions.append({
-            "ticker": c.get("ticker", ""),
-            "decision": "REJECT",
-            "rationale": "[OFFLINE] No open slots remaining",
-        })
-    return {"decisions": decisions, "advanced_tickers": advanced, "entry_theses": entry_theses}
+from dry_run import (
+    _stub_run_macro_agent_with_reflection,
+    _stub_run_macro_agent,
+    _stub_run_quant_analyst,
+    _stub_run_qual_analyst,
+    _stub_run_peer_review,
+    _stub_run_sector_team,
+    _stub_run_cio,
+)
 
 
 # ── S3 / archive stubs ──────────────────────────────────────────────────────
