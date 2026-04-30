@@ -53,7 +53,21 @@ from data.population_selector import (
 from scoring.composite import compute_composite_score, normalize_conviction, score_to_rating
 from archive.manager import ArchiveManager
 
+from alpha_engine_lib.decision_capture import (
+    DecisionCaptureWriteError,
+    FullPromptContext,
+    ModelMetadata,
+    capture_decision,
+)
+
 from graph.reducers import take_last, merge_typed_dicts, reject_on_conflict
+from graph.decision_capture_helpers import (
+    build_cio_capture_payload,
+    build_macro_economist_capture_payload,
+    build_sector_team_capture_payload,
+    derive_run_id,
+    is_decision_capture_enabled,
+)
 from graph.state_schemas import (
     CIODecision,
     ExitEvent,
@@ -64,6 +78,79 @@ from graph.state_schemas import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# ── Decision-capture helper (gated on ALPHA_ENGINE_DECISION_CAPTURE_ENABLED) ──
+
+
+# Placeholder model metadata — real token counts + cost will be plumbed
+# through via a LangChain callback handler in a follow-up commit (the same
+# work that flips agents to ``with_structured_output()``). Today's metadata
+# captures ``model_name`` only, which is enough for "which model produced
+# this artifact" attribution; cost analysis is owed.
+_PLACEHOLDER_AGENT_MODEL_NAMES: dict[str, str] = {
+    "sector_team": "claude-haiku-4-5",  # per-stock LLM analysis
+    "macro_economist": "claude-sonnet-4-6",  # synthesis / regime call
+    "ic_cio": "claude-sonnet-4-6",  # cross-stock ranking
+}
+
+
+def _capture_if_enabled(
+    *,
+    state: ResearchState,
+    agent_id: str,
+    model_name_key: str,
+    input_data_snapshot: dict,
+    input_data_summary: str,
+    agent_output: dict,
+) -> None:
+    """Write a DecisionArtifact to S3 if capture is enabled, hard-fail on
+    S3 errors per ``feedback_no_silent_fails``. No-op when the env-var
+    flag is off (default).
+
+    The full prompt context is captured as a placeholder pointing at the
+    gitignored prompt files; real plumbing of system_prompt + user_prompt
+    text comes when agents are upgraded to LangChain's
+    ``with_structured_output()``.
+    """
+    if not is_decision_capture_enabled():
+        return
+
+    run_id = derive_run_id(state)
+    model_metadata = ModelMetadata(
+        model_name=_PLACEHOLDER_AGENT_MODEL_NAMES.get(
+            model_name_key, "claude-haiku-4-5",
+        ),
+    )
+    full_prompt_context = FullPromptContext(
+        system_prompt=f"<see config/prompts/{model_name_key}*.txt at run time; "
+                      f"plumb-through pending agent upgrade to with_structured_output()>",
+        user_prompt=f"<rendered from input_data_snapshot at run time; same pending>",
+    )
+
+    try:
+        capture_decision(
+            run_id=run_id,
+            agent_id=agent_id,
+            model_metadata=model_metadata,
+            full_prompt_context=full_prompt_context,
+            input_data_snapshot=input_data_snapshot,
+            input_data_summary=input_data_summary,
+            agent_output=agent_output,
+        )
+    except DecisionCaptureWriteError:
+        # Hard-fail per design — capture failures must be loud so the
+        # corpus doesn't silently rot. Operators see the SF step fail and
+        # investigate (typically IAM or bucket-existence). Re-raising
+        # keeps Saturday SF green only when capture is actually working.
+        logger.error(
+            "[decision_capture] S3 write failed for agent=%s run_id=%s — "
+            "raising to fail the run loud (per feedback_no_silent_fails). "
+            "Disable via ALPHA_ENGINE_DECISION_CAPTURE_ENABLED=false if "
+            "S3/IAM is broken and you need to recover the run.",
+            agent_id, run_id,
+        )
+        raise
 
 
 # ── Warn-mode schema validation helper ────────────────────────────────────────
@@ -487,6 +574,20 @@ def sector_team_node(state: ResearchState) -> dict:
     # after one Saturday SF cycle of clean warn-counts.
     _warn_validate(SectorTeamOutput, result, context=f"sector_team:{team_id}")
 
+    # Decision-artifact capture (gated on ALPHA_ENGINE_DECISION_CAPTURE_ENABLED).
+    team_tickers = get_team_tickers(team_id, ctx.scanner_universe, ctx.sector_map)
+    snapshot, summary = build_sector_team_capture_payload(
+        team_id, ctx, team_tickers=team_tickers,
+    )
+    _capture_if_enabled(
+        state=state,
+        agent_id=f"sector_team:{team_id}",
+        model_name_key="sector_team",
+        input_data_snapshot=snapshot,
+        input_data_summary=summary,
+        agent_output=result,
+    )
+
     # Return partial state update — reject_on_conflict reducer merges team
     # outputs (each team_id is disjoint).
     return {
@@ -518,12 +619,25 @@ def macro_economist_node(state: ResearchState) -> dict:
         prior_snapshots=prior_snapshots,
     )
 
-    return {
+    macro_state_update = {
         "macro_report": result.get("report_md", ""),
         "sector_modifiers": result.get("sector_modifiers", {}),
         "sector_ratings": result.get("sector_ratings", {}),
         "market_regime": result.get("market_regime", "neutral"),
     }
+
+    # Decision-artifact capture (gated on ALPHA_ENGINE_DECISION_CAPTURE_ENABLED).
+    snapshot, summary = build_macro_economist_capture_payload(state)
+    _capture_if_enabled(
+        state=state,
+        agent_id="macro_economist",
+        model_name_key="macro_economist",
+        input_data_snapshot=snapshot,
+        input_data_summary=summary,
+        agent_output=macro_state_update,
+    )
+
+    return macro_state_update
 
 
 def exit_evaluator_node(state: ResearchState) -> dict:
@@ -778,11 +892,26 @@ def cio_node(state: ResearchState) -> dict:
     for ticker, thesis in cio_result.get("entry_theses", {}).items():
         _warn_validate(ThesisUpdate, thesis, context=f"cio:entry_theses:{ticker}")
 
-    return {
+    cio_state_update = {
         "ic_decisions": cio_result.get("decisions", []),
         "advanced_tickers": cio_result.get("advanced_tickers", []),
         "entry_theses": cio_result.get("entry_theses", {}),
     }
+
+    # Decision-artifact capture (gated on ALPHA_ENGINE_DECISION_CAPTURE_ENABLED).
+    snapshot, summary = build_cio_capture_payload(
+        state, candidates=candidates, prior_ic=prior_ic,
+    )
+    _capture_if_enabled(
+        state=state,
+        agent_id="ic_cio",
+        model_name_key="ic_cio",
+        input_data_snapshot=snapshot,
+        input_data_summary=summary,
+        agent_output=cio_state_update,
+    )
+
+    return cio_state_update
 
 
 def population_entry_handler(state: ResearchState) -> dict:

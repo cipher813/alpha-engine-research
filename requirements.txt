@@ -29,7 +29,7 @@ pydantic~=2.7
 #   CI: .github/workflows/ci.yml configures a git URL insteadOf rewrite.
 #   Lambda: Dockerfile installs from vendor/alpha-engine-lib staged by
 #           infrastructure/deploy.sh (sibling checkout in CI, local dev on laptop).
-alpha-engine-lib[arcticdb,flow_doctor] @ git+https://github.com/cipher813/alpha-engine-lib@v0.1.2
+alpha-engine-lib[arcticdb,flow_doctor] @ git+https://github.com/cipher813/alpha-engine-lib@main
 
 # Scheduling / calendar
 exchange-calendars~=4.5
@@ -42,6 +42,7 @@ pytz~=2024.1
 pytest~=8.2
 pytest-asyncio~=0.23
 python-dotenv~=1.0.1
+moto~=5.0  # mocked S3 for decision_capture integration tests
 
 # SEC EDGAR data
 edgartools~=2.0
