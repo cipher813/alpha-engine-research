@@ -1,0 +1,17 @@
+{
+  "ticker": "NVDA",
+  "sector": "Technology",
+  "team_id": "technology",
+  "final_score": 87.0,
+  "quant_score": 88.5,
+  "qual_score": 85.0,
+  "weighted_base": 86.5,
+  "macro_shift": 0.5,
+  "bull_case": "AI compute demand structural; data center revenue growing 30%+ YoY",
+  "bear_case": "Hyperscaler capex deceleration; valuation rich",
+  "catalysts": ["Q3 earnings", "GTC keynote"],
+  "conviction": "rising",
+  "quant_rationale": "RSI 58, momentum_20d +5.2%",
+  "rating": "BUY",
+  "score_failed": false
+}

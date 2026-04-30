@@ -1,0 +1,22 @@
+{
+  "ranked_picks": [
+    {
+      "ticker": "NVDA",
+      "quant_score": 88.5,
+      "rationale": "RSI 58, momentum_20d +5.2%, 50d/200d MA crossover bullish; technicals confirm trend continuation",
+      "key_metrics": {"rsi_14": 58, "momentum_20d": 5.2, "price_vs_ma200": 1.18}
+    },
+    {
+      "ticker": "MSFT",
+      "quant_score": 82.0,
+      "rationale": "Steady momentum (+2.1% 20d), price above all moving averages, low volatility regime",
+      "key_metrics": {"rsi_14": 55, "momentum_20d": 2.1, "atr_pct": 1.4}
+    },
+    {
+      "ticker": "AAPL",
+      "quant_score": 75.5,
+      "rationale": "Consolidating near 200d MA; mean reversion candidate with positive momentum reversal",
+      "key_metrics": {"rsi_14": 48, "momentum_20d": 0.8, "price_vs_ma50": 0.99}
+    }
+  ]
+}

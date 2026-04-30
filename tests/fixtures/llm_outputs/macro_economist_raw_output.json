@@ -1,0 +1,32 @@
+{
+  "report_md": "## Macro Environment — 2026-04-30\n\nFed on hold; 10y yields stable at 4.2%. VIX moderate at 16.5. SPY 30d return +2.1%; advance/decline ratio 1.1 indicates broad participation. Yield curve still inverted (-40bp) but normalizing. Consumer sentiment recovering at 67.8.\n\nKey theme: regime stable; policy uncertainty receding.",
+  "market_regime": "neutral",
+  "sector_modifiers": {
+    "Technology": 1.05,
+    "Healthcare": 1.00,
+    "Financial": 0.95,
+    "Industrials": 1.00,
+    "Consumer Discretionary": 1.02,
+    "Consumer Staples": 0.98,
+    "Energy": 0.95,
+    "Utilities": 1.00,
+    "Real Estate": 0.95,
+    "Materials": 1.00,
+    "Communication Services": 1.00
+  },
+  "sector_ratings": {
+    "Technology": {"rating": "overweight", "rationale": "AI tailwind + earnings momentum"},
+    "Healthcare": {"rating": "market_weight", "rationale": "Defensive characteristics; valuation neutral"},
+    "Financial": {"rating": "underweight", "rationale": "Rate cycle headwinds + credit normalization"},
+    "Industrials": {"rating": "market_weight", "rationale": "Mixed PMI signals"},
+    "Consumer Discretionary": {"rating": "overweight", "rationale": "Real wage growth supports spending"},
+    "Consumer Staples": {"rating": "market_weight", "rationale": "Defensive but stretched valuations"},
+    "Energy": {"rating": "underweight", "rationale": "Oil price weakness + China demand softness"},
+    "Utilities": {"rating": "market_weight", "rationale": "Rate-sensitive but defensive"},
+    "Real Estate": {"rating": "underweight", "rationale": "Rate environment unfavorable"},
+    "Materials": {"rating": "market_weight", "rationale": "Mixed cycle signals"},
+    "Communication Services": {"rating": "market_weight", "rationale": "Mega-cap concentration risk balanced by growth"}
+  },
+  "key_theme": "Regime stable; policy uncertainty receding",
+  "material_changes": ["Yield curve normalization continuing", "VIX returning to baseline"]
+}

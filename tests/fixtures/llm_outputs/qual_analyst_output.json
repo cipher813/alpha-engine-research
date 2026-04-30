@@ -1,0 +1,31 @@
+{
+  "assessments": [
+    {
+      "ticker": "NVDA",
+      "qual_score": 85,
+      "bull_case": "AI compute demand structural; data center revenue growing 30%+ YoY. Blackwell ramp in 2H. Customer concentration risk balanced by ecosystem lock-in.",
+      "bear_case": "Hyperscaler capex deceleration; competition from custom silicon (TPU, Trainium). Valuation prices in 5y of growth.",
+      "catalysts": ["Q3 earnings", "GTC keynote", "Hyperscaler capex prints"],
+      "risks": ["Capex normalization", "China export controls"],
+      "conviction": "high"
+    },
+    {
+      "ticker": "MSFT",
+      "qual_score": 78,
+      "bull_case": "Azure AI revenue accelerating; Copilot enterprise adoption. Diversified revenue base reduces single-product risk.",
+      "bear_case": "Capex intensity rising; ROI on AI investments not yet proven. Activision integration drag.",
+      "catalysts": ["Q1 Azure growth print", "Copilot pricing announcement"],
+      "risks": ["AI capex absorption", "Cloud growth deceleration"],
+      "conviction": "medium"
+    }
+  ],
+  "additional_candidate": {
+    "ticker": "TSM",
+    "qual_score": 80,
+    "bull_case": "Sole source for leading-edge AI chips; pricing power; Arizona ramp de-risks geopolitical concentration",
+    "bear_case": "China-Taiwan geopolitical risk; cyclical capex exposure",
+    "catalysts": ["Capacity expansion announcements", "Major customer wins"],
+    "risks": ["Geopolitical tail risk", "Capex cycle"],
+    "conviction": "medium"
+  }
+}

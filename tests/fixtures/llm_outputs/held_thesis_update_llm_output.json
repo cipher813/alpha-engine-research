@@ -1,0 +1,10 @@
+{
+  "bull_case": "Q3 earnings beat consensus by 8%; data center revenue accelerated to +35% YoY (vs +28% prior quarter). Forward guide raised; Blackwell ramp on schedule.",
+  "bear_case": "Customer concentration: 60% of data center revenue from 4 hyperscalers. Capex normalization risk if any reduces 2026 commitments.",
+  "catalysts": ["Q4 guidance", "GTC keynote H1 2026", "Blackwell shipment cadence"],
+  "risks": ["Hyperscaler capex deceleration", "Inference TCO competition"],
+  "conviction": "high",
+  "conviction_rationale": "Earnings inflection confirms growth trajectory; guidance raise reduces downside.",
+  "thesis_summary": "AI compute leadership intact; structural demand offset by concentrated customer risk.",
+  "triggers_response": "Earnings beat triggered upgrade in narrative confidence; bear case unchanged."
+}
