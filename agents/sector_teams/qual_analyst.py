@@ -9,9 +9,7 @@ May identify 0-1 additional candidates that quant missed.
 
 from __future__ import annotations
 
-import json
 import logging
-import re
 from typing import Optional
 
 from langchain_anthropic import ChatAnthropic
@@ -146,21 +144,3 @@ def _build_system_prompt(team_id: str, market_regime: str, n_picks: int) -> str:
 
 
 from agents.langchain_utils import extract_tool_calls as _extract_tool_calls
-from agents.langchain_utils import get_final_text as _get_final_text
-from agents.json_utils import extract_json_object, extract_json_array
-
-
-def _parse_assessments(text: str) -> dict:
-    """Parse assessments from the agent's final response."""
-    # Try full JSON object with assessments key
-    result = extract_json_object(text, hint_key='"assessments"')
-    if result and "assessments" in result:
-        return result
-
-    # Try JSON array directly. Require "ticker" on each object so that a
-    # malformed array doesn't produce nested sub-objects via the fallback.
-    arr = extract_json_array(text, require_key="ticker")
-    if arr:
-        return {"assessments": arr, "additional_candidate": None}
-
-    return {"assessments": [], "additional_candidate": None}

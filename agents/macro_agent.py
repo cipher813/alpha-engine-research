@@ -10,7 +10,6 @@ and sector_ratings (overweight / market_weight / underweight + rationale).
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import Optional
 
@@ -103,52 +102,6 @@ def _fmt(val, fmt=".1f", default="N/A") -> str:
         return format(float(val), fmt)
     except (TypeError, ValueError):
         return default
-
-
-def _extract_macro_json(text: str) -> dict:
-    """Extract the trailing JSON block with sector_modifiers and sector_ratings."""
-    start, end = _find_json_block(text)
-    match_text = text[start:end + 1] if start != -1 else None
-
-    if match_text:
-        try:
-            data = json.loads(match_text)
-            # Validate and clamp sector modifiers
-            mods = data.get("sector_modifiers", {})
-            for sector in ALL_SECTORS:
-                val = mods.get(sector, 1.0)
-                mods[sector] = round(max(0.70, min(1.30, float(val))), 3)
-            data["sector_modifiers"] = mods
-            # Ensure market_regime is valid
-            valid_regimes = {"bull", "neutral", "caution", "bear"}
-            if data.get("market_regime") not in valid_regimes:
-                data["market_regime"] = "neutral"
-            # Validate sector_ratings; fall back to derived values for any missing/invalid entry
-            raw_ratings = data.get("sector_ratings", {})
-            validated_ratings = {}
-            for sector in ALL_SECTORS:
-                entry = raw_ratings.get(sector, {})
-                rating = entry.get("rating", "")
-                rationale = entry.get("rationale", "")
-                if rating not in _VALID_RATINGS:
-                    # Derive from modifier as fallback
-                    mod = mods.get(sector, 1.0)
-                    fallback = _derive_sector_ratings({sector: mod})[sector]
-                    validated_ratings[sector] = fallback
-                else:
-                    validated_ratings[sector] = {"rating": rating, "rationale": rationale}
-            data["sector_ratings"] = validated_ratings
-            return data
-        except (json.JSONDecodeError, ValueError):
-            pass
-    defaults = {
-        "market_regime": "neutral",
-        "sector_modifiers": _DEFAULT_SECTOR_MODIFIERS.copy(),
-        "key_theme": "Macro data unavailable.",
-        "material_changes": False,
-    }
-    defaults["sector_ratings"] = _derive_sector_ratings(defaults["sector_modifiers"])
-    return defaults
 
 
 def run_macro_agent(
@@ -389,10 +342,6 @@ def run_macro_critic(
 
     Returns: {"action": "accept"|"revise", "critique": str, "suggested_regime": str|None}
     """
-    import logging
-    import re
-    _logger = logging.getLogger(__name__)
-
     llm = ChatAnthropic(
         model=STRATEGIC_MODEL,
         anthropic_api_key=api_key or ANTHROPIC_API_KEY,

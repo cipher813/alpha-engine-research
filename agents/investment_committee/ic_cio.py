@@ -8,9 +8,7 @@ Writes entry theses for advanced stocks. All decisions (advance, reject, deadloc
 
 from __future__ import annotations
 
-import json
 import logging
-import re
 from typing import Optional
 
 from langchain_anthropic import ChatAnthropic
