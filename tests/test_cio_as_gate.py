@@ -12,8 +12,9 @@ Pins two related changes:
 """
 
 from agents.investment_committee.ic_cio import (
-    _compute_effective_cap,
+    _compute_advance_bounds,
     _fallback_selection,
+    _parse_cio_response,
 )
 
 
@@ -124,59 +125,166 @@ def test_held_non_buy_emits_hold():
     assert meta["signal"] == "HOLD"
 
 
-def test_compute_effective_cap_population_gap_within_bounds():
-    """When open_slots is within [min, max], use it directly."""
-    assert _compute_effective_cap(
-        open_slots=5, n_candidates=20, max_new_entrants=10, min_new_entrants=2
-    ) == 5
+def test_compute_advance_bounds_typical_case():
+    """With 20 candidates, max=10, min=2 → cap=10, floor=2."""
+    floor, cap = _compute_advance_bounds(
+        n_candidates=20, max_new_entrants=10, min_new_entrants=2,
+    )
+    assert (floor, cap) == (2, 10)
 
 
-def test_compute_effective_cap_population_gap_above_max_clamps_to_max():
-    """When open_slots > max, clamp down to max."""
-    assert _compute_effective_cap(
-        open_slots=15, n_candidates=20, max_new_entrants=10, min_new_entrants=2
-    ) == 10
+def test_compute_advance_bounds_clamped_by_n_candidates():
+    """Both floor and cap are clamped to n_candidates so we never demand
+    advancing more candidates than exist."""
+    floor, cap = _compute_advance_bounds(
+        n_candidates=1, max_new_entrants=10, min_new_entrants=2,
+    )
+    assert (floor, cap) == (1, 1)
 
 
-def test_compute_effective_cap_population_gap_below_min_floors_at_min():
-    """When open_slots < min, floor to min — exits will rotate names out."""
-    assert _compute_effective_cap(
-        open_slots=0, n_candidates=20, max_new_entrants=10, min_new_entrants=2
-    ) == 2
+def test_compute_advance_bounds_open_slots_does_not_factor_in():
+    """open_slots is intentionally NOT a parameter — the bounds depend only
+    on n_candidates and the configured min/max."""
+    # No `open_slots` argument exists in the signature; this test exists
+    # to pin that decoupling. Calling with n_candidates=20 always yields
+    # (2, 10) regardless of how empty/full the portfolio is elsewhere.
+    floor, cap = _compute_advance_bounds(
+        n_candidates=20, max_new_entrants=10, min_new_entrants=2,
+    )
+    assert (floor, cap) == (2, 10)
 
 
-def test_compute_effective_cap_floor_capped_by_n_candidates():
-    """If fewer candidates exist than the configured floor, the effective
-    floor is n_candidates — never demand advancing more candidates than exist."""
-    assert _compute_effective_cap(
-        open_slots=0, n_candidates=1, max_new_entrants=10, min_new_entrants=2
-    ) == 1
+def test_compute_advance_bounds_zero_when_no_candidates():
+    """Zero candidates → (0, 0)."""
+    assert _compute_advance_bounds(
+        n_candidates=0, max_new_entrants=10, min_new_entrants=2,
+    ) == (0, 0)
 
 
-def test_compute_effective_cap_zero_when_no_candidates():
-    """Zero candidates → zero advances regardless of slots/bounds."""
-    assert _compute_effective_cap(
-        open_slots=10, n_candidates=0, max_new_entrants=10, min_new_entrants=2
-    ) == 0
+def test_compute_advance_bounds_zero_when_max_zero():
+    """max_new_entrants=0 produces (0, 0) (kill-switch behavior)."""
+    assert _compute_advance_bounds(
+        n_candidates=20, max_new_entrants=0, min_new_entrants=0,
+    ) == (0, 0)
 
 
-def test_compute_effective_cap_zero_when_max_zero():
-    """A max_new_entrants of 0 produces a 0 cap (kill-switch behavior)."""
-    assert _compute_effective_cap(
-        open_slots=10, n_candidates=20, max_new_entrants=0, min_new_entrants=0
-    ) == 0
+def test_compute_advance_bounds_floor_never_exceeds_cap():
+    """Defensive: even if min_new_entrants > max_new_entrants slipped past
+    config bounds-checking, the returned floor is clamped to cap."""
+    floor, cap = _compute_advance_bounds(
+        n_candidates=20, max_new_entrants=3, min_new_entrants=10,
+    )
+    assert floor <= cap
+    assert (floor, cap) == (3, 3)
 
 
-def test_fallback_selection_truncates_at_effective_cap():
-    """The fallback path (LLM failure) must also respect effective_cap."""
+def _decisions_to_text(decisions):
+    """Wrap a decisions list as the JSON the LLM would emit."""
+    return json.dumps({"decisions": decisions})
+
+
+def test_parse_cio_response_truncates_at_cap():
+    """When the LLM rubric advances more than cap, truncate to cap."""
     candidates = [
         {"ticker": f"T{i}", "quant_score": 90 - i, "qual_score": 80 - i}
         for i in range(15)
     ]
-    result = _fallback_selection(candidates, effective_cap=3)
+    decisions = [
+        {"ticker": f"T{i}", "decision": "ADVANCE", "rank": i + 1,
+         "conviction": 80, "rationale": "rubric pass", "entry_thesis": None}
+        for i in range(12)
+    ]
+    text = _decisions_to_text(decisions)
+    result = _parse_cio_response(text, candidates, floor=2, cap=10)
+    assert len(result["advanced_tickers"]) == 10
+    # First 10 in original ADVANCE order are kept
+    assert result["advanced_tickers"] == [f"T{i}" for i in range(10)]
+
+
+def test_parse_cio_response_force_advances_to_floor():
+    """When the LLM rubric advances fewer than floor, force-fill from
+    REJECT/DEADLOCK candidates ranked by combined quant+qual score."""
+    candidates = [
+        {"ticker": f"T{i}", "quant_score": 90 - i, "qual_score": 80 - i}
+        for i in range(15)
+    ]
+    # LLM advances only T5 (mid-ranked); rejects everything else
+    decisions = [{
+        "ticker": "T5", "decision": "ADVANCE", "rank": 1,
+        "conviction": 75, "rationale": "rubric pass", "entry_thesis": None,
+    }]
+    decisions.extend([
+        {"ticker": f"T{i}", "decision": "REJECT", "rank": None,
+         "conviction": 0, "rationale": "weak catalyst", "entry_thesis": None}
+        for i in range(15) if i != 5
+    ])
+    text = _decisions_to_text(decisions)
+    result = _parse_cio_response(text, candidates, floor=3, cap=10)
+
+    # Must hit floor: 1 rubric-advanced + 2 forced = 3
     assert len(result["advanced_tickers"]) == 3
-    # Highest combined score is T0 (90+80)/2 = 85
-    assert result["advanced_tickers"] == ["T0", "T1", "T2"]
+    # Forced picks are T0 and T1 (highest combined score among non-advanced)
+    assert "T5" in result["advanced_tickers"]
+    assert "T0" in result["advanced_tickers"]
+    assert "T1" in result["advanced_tickers"]
+    # Audit trail tags forced advances distinctly
+    forced_decisions = [
+        d for d in result["decisions"] if d.get("decision") == "ADVANCE_FORCED"
+    ]
+    assert {d["ticker"] for d in forced_decisions} == {"T0", "T1"}
+
+
+def test_parse_cio_response_no_force_when_rubric_meets_floor():
+    """Rubric advanced exactly at the floor — no force needed; no
+    ADVANCE_FORCED decisions emitted."""
+    candidates = [
+        {"ticker": f"T{i}", "quant_score": 90 - i, "qual_score": 80 - i}
+        for i in range(15)
+    ]
+    decisions = [
+        {"ticker": "T0", "decision": "ADVANCE", "rank": 1, "conviction": 85,
+         "rationale": "rubric", "entry_thesis": None},
+        {"ticker": "T1", "decision": "ADVANCE", "rank": 2, "conviction": 84,
+         "rationale": "rubric", "entry_thesis": None},
+    ]
+    text = _decisions_to_text(decisions)
+    result = _parse_cio_response(text, candidates, floor=2, cap=10)
+    assert result["advanced_tickers"] == ["T0", "T1"]
+    forced = [
+        d for d in result["decisions"] if d.get("decision") == "ADVANCE_FORCED"
+    ]
+    assert forced == []
+
+
+def test_parse_cio_response_passes_through_in_band():
+    """Rubric advanced 5 with floor=2, cap=10 → passes through unchanged."""
+    candidates = [
+        {"ticker": f"T{i}", "quant_score": 90 - i, "qual_score": 80 - i}
+        for i in range(15)
+    ]
+    decisions = [
+        {"ticker": f"T{i}", "decision": "ADVANCE", "rank": i + 1,
+         "conviction": 80, "rationale": "rubric", "entry_thesis": None}
+        for i in range(5)
+    ]
+    text = _decisions_to_text(decisions)
+    result = _parse_cio_response(text, candidates, floor=2, cap=10)
+    assert len(result["advanced_tickers"]) == 5
+    assert result["advanced_tickers"] == [f"T{i}" for i in range(5)]
+
+
+def test_fallback_selection_uses_floor_not_cap():
+    """LLM-failure fallback advances `floor`, not `cap`. When LLM signal is
+    unusable we don't know which candidates would clear the rubric — be
+    conservative."""
+    candidates = [
+        {"ticker": f"T{i}", "quant_score": 90 - i, "qual_score": 80 - i}
+        for i in range(15)
+    ]
+    result = _fallback_selection(candidates, floor=2)
+    assert len(result["advanced_tickers"]) == 2
+    # Highest combined score takes T0 then T1
+    assert result["advanced_tickers"] == ["T0", "T1"]
 
 
 # ── Offline replay against 2026-04-24 signals fixture ───────────────────────
