@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from datetime import datetime, timezone
 from typing import Annotated, Any, Optional, TypedDict
 
@@ -155,28 +156,69 @@ def _capture_if_enabled(
         raise
 
 
-# ── Warn-mode schema validation helper ────────────────────────────────────────
+# ── Schema validation helper (warn-mode → hard-fail toggle) ──────────────────
 
-def _warn_validate(model_cls, payload, *, context: str) -> None:
-    """
-    Validate ``payload`` against ``model_cls`` and log on ValidationError —
-    NEVER raise. Used to surface agent-output schema drift without changing
-    runtime behavior. Once the schemas are stable across one full Saturday
-    SF cycle, downstream commits flip this to hard-fail (the behavior change
-    that introduces real validation gating).
 
-    The state value itself is unchanged — this helper validates and discards
-    the model. Storing the typed model would change runtime semantics; the
-    annotation in ``ResearchState`` documents the intended shape, but
-    LangGraph's TypedDict reducers see the raw dict either way.
+def _strict_validation_enabled() -> bool:
+    """Return True when typed-state validation should hard-fail on
+    schema violations.
+
+    Default ``False`` during the typed-state rollout — preserves warn-mode
+    behavior so PR 2.1 (schemas + plumbing) can ship without flipping
+    behavior. Step F of the PR-2 sequence flips this default to ``True``
+    once every agent is migrated to ``with_structured_output()``.
+
+    Operators can override via Lambda env: set ``STRICT_VALIDATION=true``
+    to enable hard-fail early, or ``STRICT_VALIDATION=false`` once the
+    default is flipped to disable hard-fail in an emergency. The env var
+    is read fresh on each call so a console flip takes effect on warm
+    containers without redeploy.
     """
+    return os.environ.get("STRICT_VALIDATION", "false").lower() in (
+        "true", "1", "yes"
+    )
+
+
+def _validate(
+    model_cls,
+    payload,
+    *,
+    context: str,
+    strict: bool | None = None,
+) -> None:
+    """Validate ``payload`` against ``model_cls``.
+
+    If ``strict`` is True (or ``STRICT_VALIDATION=true`` in env), raise
+    ``RuntimeError`` on validation failure. Otherwise log a warning and
+    continue (the warn-mode posture this helper started as).
+
+    The state value itself is unchanged — this helper validates and
+    discards the model. Storing the typed model would change runtime
+    semantics; the annotation in ``ResearchState`` documents the intended
+    shape, but LangGraph's TypedDict reducers see the raw dict either way.
+
+    Renamed from ``_warn_validate`` in PR 2.1 (2026-04-30) to support the
+    strict-flip without changing the call signature at the 5 invocation
+    sites.
+    """
+    if strict is None:
+        strict = _strict_validation_enabled()
     try:
         model_cls.model_validate(payload)
     except ValidationError as e:
+        if strict:
+            raise RuntimeError(
+                f"[schema-fail:{context}] {model_cls.__name__} validation: {e}"
+            ) from e
         logger.warning(
             "[schema-warn:%s] %s schema violation: %s",
             context, model_cls.__name__, e,
         )
+
+
+# Backward-compatibility alias — to be removed after PR 2.x sequence
+# completes. New call sites should use ``_validate``.
+_warn_validate = _validate
 
 
 # ── State Schema ──────────────────────────────────────────────────────────────
@@ -574,7 +616,7 @@ def sector_team_node(state: ResearchState) -> dict:
     # Warn-mode schema validation — surfaces agent-output drift without
     # changing runtime behavior. Hard-fail flip lands in a follow-up PR
     # after one Saturday SF cycle of clean warn-counts.
-    _warn_validate(SectorTeamOutput, result, context=f"sector_team:{team_id}")
+    _validate(SectorTeamOutput, result, context=f"sector_team:{team_id}")
 
     # Decision-artifact capture (gated on ALPHA_ENGINE_DECISION_CAPTURE_ENABLED).
     team_tickers = get_team_tickers(team_id, ctx.scanner_universe, ctx.sector_map)
@@ -670,7 +712,7 @@ def exit_evaluator_node(state: ResearchState) -> dict:
 
     # Warn-mode schema validation on per-exit shape.
     for ev in exits:
-        _warn_validate(ExitEvent, ev, context="exit_evaluator")
+        _validate(ExitEvent, ev, context="exit_evaluator")
 
     return {
         "remaining_population": remaining,
@@ -848,7 +890,7 @@ def score_aggregator(state: ResearchState) -> dict:
 
     # Warn-mode schema validation on every produced thesis.
     for ticker, thesis in investment_theses.items():
-        _warn_validate(InvestmentThesis, thesis, context=f"score_aggregator:{ticker}")
+        _validate(InvestmentThesis, thesis, context=f"score_aggregator:{ticker}")
 
     return {"investment_theses": investment_theses}
 
@@ -907,9 +949,9 @@ def cio_node(state: ResearchState) -> dict:
 
     # Warn-mode schema validation on CIO output shapes.
     for decision in cio_result.get("decisions", []):
-        _warn_validate(CIODecision, decision, context="cio")
+        _validate(CIODecision, decision, context="cio")
     for ticker, thesis in cio_result.get("entry_theses", {}).items():
-        _warn_validate(ThesisUpdate, thesis, context=f"cio:entry_theses:{ticker}")
+        _validate(ThesisUpdate, thesis, context=f"cio:entry_theses:{ticker}")
 
     cio_state_update = {
         "ic_decisions": cio_result.get("decisions", []),

@@ -401,3 +401,222 @@ class TestPopulationRotationEvent:
     def test_event_type_literal(self):
         with pytest.raises(ValueError):
             PopulationRotationEvent(event_type="rotation")
+
+
+# ── PR 2 LLM-extraction schemas ──────────────────────────────────────────
+
+
+class TestMacroEconomistRawOutput:
+    def test_minimal(self):
+        from graph.state_schemas import MacroEconomistRawOutput
+        m = MacroEconomistRawOutput(report_md="...", market_regime="neutral")
+        assert m.market_regime == "neutral"
+        assert m.sector_modifiers == {}
+        assert m.key_theme == ""
+
+    def test_clamp_modifiers_in_range(self):
+        from graph.state_schemas import MacroEconomistRawOutput
+        m = MacroEconomistRawOutput(
+            sector_modifiers={"Technology": 1.10, "Healthcare": 0.95}
+        )
+        assert m.sector_modifiers["Technology"] == 1.10
+
+    def test_clamp_modifiers_out_of_range_raises(self):
+        from graph.state_schemas import MacroEconomistRawOutput
+        with pytest.raises(ValueError, match=r"outside \[0.70, 1.30\]"):
+            MacroEconomistRawOutput(sector_modifiers={"Technology": 1.50})
+
+    def test_extra_fields_preserved(self):
+        from graph.state_schemas import MacroEconomistRawOutput
+        m = MacroEconomistRawOutput(
+            report_md="x", market_regime="bull", undocumented="kept"
+        )
+        assert m.model_dump()["undocumented"] == "kept"
+
+
+class TestMacroCriticOutput:
+    def test_accept(self):
+        from graph.state_schemas import MacroCriticOutput
+        c = MacroCriticOutput(action="accept")
+        assert c.action == "accept"
+        assert c.suggested_regime is None
+
+    def test_revise_with_suggested_regime(self):
+        from graph.state_schemas import MacroCriticOutput
+        c = MacroCriticOutput(
+            action="revise",
+            critique="too aggressive",
+            suggested_regime="caution",
+        )
+        assert c.suggested_regime == "caution"
+
+    def test_action_literal_enforced(self):
+        from graph.state_schemas import MacroCriticOutput
+        with pytest.raises(ValueError):
+            MacroCriticOutput(action="maybe")
+
+
+class TestQuantAnalystOutput:
+    def test_minimal(self):
+        from graph.state_schemas import QuantAnalystOutput
+        q = QuantAnalystOutput()
+        assert q.ranked_picks == []
+
+    def test_picks_score_clamping(self):
+        from graph.state_schemas import QuantPick
+        with pytest.raises(ValueError):
+            QuantPick(ticker="AAPL", quant_score=120)
+        with pytest.raises(ValueError):
+            QuantPick(ticker="AAPL", quant_score=-1)
+
+    def test_full_construction(self):
+        from graph.state_schemas import QuantAnalystOutput, QuantPick
+        q = QuantAnalystOutput(
+            ranked_picks=[
+                QuantPick(ticker="NVDA", quant_score=85, rationale="..."),
+                QuantPick(ticker="AAPL", quant_score=72, rationale="..."),
+            ]
+        )
+        assert len(q.ranked_picks) == 2
+        assert q.ranked_picks[0].ticker == "NVDA"
+
+
+class TestQualAnalystOutput:
+    def test_minimal(self):
+        from graph.state_schemas import QualAnalystOutput
+        q = QualAnalystOutput()
+        assert q.assessments == []
+        assert q.additional_candidate is None
+
+    def test_qual_score_optional(self):
+        """Mirror PR #59 fix — qual_score=None must be valid."""
+        from graph.state_schemas import QualAssessment
+        a = QualAssessment(ticker="AAPL", qual_score=None)
+        assert a.qual_score is None
+
+    def test_conviction_literal(self):
+        from graph.state_schemas import QualAssessment
+        with pytest.raises(ValueError):
+            QualAssessment(ticker="AAPL", conviction="extreme")
+
+
+class TestQuantAcceptanceVerdict:
+    def test_accept(self):
+        from graph.state_schemas import QuantAcceptanceVerdict
+        v = QuantAcceptanceVerdict(accept=True, reason="strong technicals")
+        assert v.accept is True
+
+    def test_reject(self):
+        from graph.state_schemas import QuantAcceptanceVerdict
+        v = QuantAcceptanceVerdict(accept=False)
+        assert v.accept is False
+        assert v.reason == ""
+
+
+class TestJointFinalizationOutput:
+    def test_minimal(self):
+        from graph.state_schemas import JointFinalizationOutput
+        j = JointFinalizationOutput()
+        assert j.selected_tickers == []
+
+    def test_full(self):
+        from graph.state_schemas import JointFinalizationOutput
+        j = JointFinalizationOutput(
+            selected_tickers=["AAPL", "MSFT", "NVDA"],
+            rationale="Top 3 by combined conviction",
+        )
+        assert len(j.selected_tickers) == 3
+
+
+class TestHeldThesisUpdateLLMOutput:
+    def test_minimal(self):
+        from graph.state_schemas import HeldThesisUpdateLLMOutput
+        h = HeldThesisUpdateLLMOutput()
+        assert h.bull_case == ""
+        assert h.conviction is None
+
+    def test_no_score_fields_in_schema(self):
+        """The schema MUST NOT enumerate score fields — that's the whole
+        point. The held-stock LLM update path must not emit
+        final_score/quant_score/qual_score, and the schema enforces this
+        by simply not having those fields. extra='allow' means an LLM
+        that ignores the schema and emits them anyway preserves them, but
+        downstream consumers should ignore extras."""
+        from graph.state_schemas import HeldThesisUpdateLLMOutput
+        fields = HeldThesisUpdateLLMOutput.model_fields.keys()
+        assert "final_score" not in fields
+        assert "quant_score" not in fields
+        assert "qual_score" not in fields
+
+    def test_conviction_agent_format(self):
+        """Held-stock LLM emits agent format (high/med/low), NOT storage
+        format. This is the format normalize_conviction maps from."""
+        from graph.state_schemas import HeldThesisUpdateLLMOutput
+        h = HeldThesisUpdateLLMOutput(conviction="high")
+        assert h.conviction == "high"
+        with pytest.raises(ValueError):
+            # storage format is rejected — that's the wrong path
+            HeldThesisUpdateLLMOutput(conviction="rising")
+
+
+class TestCIORawOutput:
+    def test_minimal(self):
+        from graph.state_schemas import CIORawOutput
+        c = CIORawOutput()
+        assert c.decisions == []
+
+    def test_decision_literal_includes_no_advance_deadlock(self):
+        from graph.state_schemas import CIORawDecision
+        # All three valid LLM-emitted values
+        for d in ["ADVANCE", "REJECT", "NO_ADVANCE_DEADLOCK"]:
+            CIORawDecision(ticker="AAPL", decision=d)
+
+    def test_decision_literal_rejects_advance_forced(self):
+        """ADVANCE_FORCED is synthesized by post-processing; LLM must NOT
+        emit it directly. Schema rejects it."""
+        from graph.state_schemas import CIORawDecision
+        with pytest.raises(ValueError):
+            CIORawDecision(ticker="AAPL", decision="ADVANCE_FORCED")
+
+    def test_decision_literal_rejects_hold(self):
+        """HOLD is what post-processing maps REJECT to for held tickers;
+        LLM does not emit it directly."""
+        from graph.state_schemas import CIORawDecision
+        with pytest.raises(ValueError):
+            CIORawDecision(ticker="AAPL", decision="HOLD")
+
+    def test_conviction_int_range(self):
+        from graph.state_schemas import CIORawDecision
+        c = CIORawDecision(ticker="JPM", decision="ADVANCE", conviction=78)
+        assert c.conviction == 78
+        with pytest.raises(ValueError):
+            CIORawDecision(ticker="JPM", decision="ADVANCE", conviction=120)
+
+    def test_full_construction(self):
+        from graph.state_schemas import (
+            CIORawDecision,
+            CIORawOutput,
+            HeldThesisUpdateLLMOutput,
+        )
+        c = CIORawOutput(
+            decisions=[
+                CIORawDecision(
+                    ticker="NVDA",
+                    decision="ADVANCE",
+                    rank=1,
+                    conviction=88,
+                    rationale="strong",
+                    entry_thesis=HeldThesisUpdateLLMOutput(
+                        bull_case="AI", conviction="high"
+                    ),
+                ),
+                CIORawDecision(
+                    ticker="JPM",
+                    decision="REJECT",
+                    rank=2,
+                    rationale="rate cycle",
+                ),
+            ]
+        )
+        assert len(c.decisions) == 2
+        assert c.decisions[0].entry_thesis.conviction == "high"

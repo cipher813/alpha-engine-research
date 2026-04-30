@@ -289,3 +289,197 @@ class PopulationRotationEvent(BaseModel):
     ticker_in: str | None = None
     ticker_out: str | None = None
     reason: str = ""
+
+
+# ── LLM-extraction schemas (for `with_structured_output()` in PR 2) ───────
+#
+# These are the typed shapes passed to ``llm.with_structured_output(Schema)``
+# at each agent boundary. They are distinct from the state-shape schemas
+# above:
+#
+#   - State schemas (SectorTeamOutput, CIODecision, InvestmentThesis, ...)
+#     describe what flows through ``ResearchState`` after agent post-
+#     processing — they include fields downstream nodes compute or merge
+#     in (e.g. ``score_aggregator`` populates ``rating`` from sub-scores).
+#
+#   - LLM-extraction schemas (below) describe the EXACT shape the LLM
+#     must emit. The agent code reads the typed model and may transform
+#     it before writing to state. Keeping them separate avoids the
+#     trap of asking the LLM to emit fields that downstream code is
+#     supposed to compute.
+#
+# ``extra="allow"`` matches the state-schema convention so prompts that
+# emit additional context (e.g. macro_economist's ``key_theme``) are
+# preserved even when the schema doesn't enumerate them. PR 2 Step F may
+# revisit this once the agent contracts have soaked.
+
+
+class MacroEconomistRawOutput(BaseModel):
+    """Wrapping schema for ``run_macro_agent`` output. The agent emits
+    free-form prose (``report_md``) interleaved with a JSON block carrying
+    structured fields; ``with_structured_output`` extracts both."""
+
+    model_config = ConfigDict(extra="allow")
+
+    report_md: str = ""
+    market_regime: RegimeLiteral = "neutral"
+    sector_modifiers: dict[str, float] = Field(default_factory=dict)
+    sector_ratings: dict[str, dict] = Field(default_factory=dict)
+    key_theme: str = ""
+    material_changes: list[str] = Field(default_factory=list)
+
+    @field_validator("sector_modifiers")
+    @classmethod
+    def clamp_modifiers(cls, v: dict[str, float]) -> dict[str, float]:
+        """Mirror MacroEconomistOutput's clamp on the [0.70, 1.30] band."""
+        for sector, m in v.items():
+            if not (0.70 <= float(m) <= 1.30):
+                raise ValueError(
+                    f"sector_modifiers[{sector!r}]={m} outside [0.70, 1.30]"
+                )
+        return v
+
+
+class MacroCriticOutput(BaseModel):
+    """Reflection-loop critic output for the macro agent.
+
+    The critic accepts or revises the macro_economist's draft. ``revise``
+    triggers another macro_economist call; ``accept`` ends the loop.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    action: Literal["accept", "revise"]
+    critique: str = ""
+    suggested_regime: RegimeLiteral | None = None
+
+
+class QuantPick(BaseModel):
+    """One ranked candidate from the quant analyst's ReAct loop."""
+
+    model_config = ConfigDict(extra="allow")
+
+    ticker: str
+    quant_score: float = Field(ge=0, le=100)
+    rationale: str = ""
+    key_metrics: dict = Field(default_factory=dict)
+
+
+class QuantAnalystOutput(BaseModel):
+    """Wrapper for the quant ReAct agent's structured response.
+
+    LangGraph ``create_react_agent(response_format=...)`` runs an extra
+    LLM call after the tool-loop terminates to extract this typed shape
+    from the conversation."""
+
+    model_config = ConfigDict(extra="allow")
+
+    ranked_picks: list[QuantPick] = Field(default_factory=list)
+
+
+class QualAssessment(BaseModel):
+    """One per-ticker qualitative assessment from the qual analyst."""
+
+    model_config = ConfigDict(extra="allow")
+
+    ticker: str
+    qual_score: float | None = Field(default=None, ge=0, le=100)
+    bull_case: str = ""
+    bear_case: str = ""
+    catalysts: list[str] = Field(default_factory=list)
+    risks: list[str] = Field(default_factory=list)
+    conviction: AgentConvictionLiteral | None = None
+
+
+class QualAnalystOutput(BaseModel):
+    """Wrapper for the qual ReAct agent's structured response.
+
+    ``additional_candidate`` is the qual-side proposal that the peer-review
+    quant gate then accepts or rejects (see QuantAcceptanceVerdict).
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    assessments: list[QualAssessment] = Field(default_factory=list)
+    additional_candidate: QualAssessment | None = None
+
+
+class QuantAcceptanceVerdict(BaseModel):
+    """Side-LLM call: peer_review's quant analyst rules on whether to
+    accept the qual analyst's added candidate."""
+
+    model_config = ConfigDict(extra="allow")
+
+    accept: bool
+    reason: str = ""
+
+
+class JointFinalizationOutput(BaseModel):
+    """Side-LLM call: peer_review's joint quant+qual finalization, picks
+    the team's 2-3 final recommendations from the merged candidate set."""
+
+    model_config = ConfigDict(extra="allow")
+
+    selected_tickers: list[str] = Field(default_factory=list)
+    rationale: str = ""
+
+
+class HeldThesisUpdateLLMOutput(BaseModel):
+    """LLM-extraction shape for ``_update_thesis_for_held_stock``.
+
+    Intentionally narrative-only — NO score fields. The held-stock LLM
+    update path must NOT overwrite prior_scores; the existing strip-nulls
+    merge logic exists today specifically because the LLM occasionally
+    emits ``final_score: null``. By omitting score fields from the schema
+    entirely, the LLM cannot emit them, and the strip-nulls workaround
+    becomes unnecessary.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    bull_case: str = ""
+    bear_case: str = ""
+    catalysts: list[str] = Field(default_factory=list)
+    risks: list[str] = Field(default_factory=list)
+    conviction: AgentConvictionLiteral | None = None
+    conviction_rationale: str = ""
+    thesis_summary: str = ""
+    triggers_response: str = ""
+
+
+# CIO emits the literal ``NO_ADVANCE_DEADLOCK`` for low-conviction picks
+# that don't clear the floor; post-processing in ``_parse_cio_response``
+# may synthesize ``ADVANCE_FORCED`` to fill below-floor open slots, but
+# that synthesis happens AFTER the LLM extraction, so the raw schema
+# only enumerates the three values the LLM is allowed to emit.
+CIORawDecisionLiteral = Literal["ADVANCE", "REJECT", "NO_ADVANCE_DEADLOCK"]
+
+
+class CIORawDecision(BaseModel):
+    """One CIO decision as emitted by the LLM (pre-post-processing).
+
+    Note ``decision`` (LLM-emitted) vs ``thesis_type`` (post-processed,
+    used in ``CIODecision``): the LLM never emits ``HOLD`` directly —
+    ``HOLD`` is what the post-processing maps ``REJECT`` to for held
+    tickers in the current population. The two shapes are kept separate
+    so each can describe its own contract precisely.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    ticker: str
+    decision: CIORawDecisionLiteral
+    rank: int | None = Field(default=None, ge=0)
+    conviction: int | None = Field(default=None, ge=0, le=100)
+    rationale: str = ""
+    entry_thesis: HeldThesisUpdateLLMOutput | None = None
+
+
+class CIORawOutput(BaseModel):
+    """Wrapper for the CIO agent's structured response. The list-of-
+    decisions shape mirrors what ``_parse_cio_response`` consumes today
+    via balanced-brace JSON extraction."""
+
+    model_config = ConfigDict(extra="allow")
+
+    decisions: list[CIORawDecision] = Field(default_factory=list)
