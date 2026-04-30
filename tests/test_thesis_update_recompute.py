@@ -157,3 +157,104 @@ class TestThesisUpdateRecompute:
         )
         out = score_aggregator(state)
         assert out["investment_theses"]["AAPL"]["final_score"] == 82.5
+
+
+class TestHeldStockConvictionNormalization:
+    """Regression for the 2026-04-30 score_aggregator skipped-normalization
+    bug. Held-stock thesis_updates carrying agent-format conviction
+    ('low'/'medium'/'high') previously bypassed normalize_conviction and
+    flowed into InvestmentThesis with values that fail the
+    StoredConvictionLiteral schema (rising/stable/declining). Fix in
+    graph/research_graph.py:826 normalizes the held-stock branch the same
+    way the recommendation branch does.
+    """
+
+    def test_held_stock_low_conviction_normalized_to_declining(self):
+        state = _state(
+            team_outputs={
+                "energy": {
+                    "recommendations": [],
+                    "thesis_updates": {
+                        "DVN": {
+                            "ticker": "DVN",
+                            "sector": "Energy",
+                            "final_score": 45.0,
+                            "quant_score": 50,
+                            "qual_score": 40,
+                            "rating": "HOLD",
+                            "conviction": "low",
+                        },
+                    },
+                },
+            },
+        )
+        out = score_aggregator(state)
+        assert out["investment_theses"]["DVN"]["conviction"] == "declining"
+
+    def test_held_stock_medium_conviction_normalized_to_stable(self):
+        state = _state(
+            team_outputs={
+                "healthcare": {
+                    "recommendations": [],
+                    "thesis_updates": {
+                        "PODD": {
+                            "ticker": "PODD",
+                            "sector": "Healthcare",
+                            "final_score": 60.0,
+                            "quant_score": 60,
+                            "qual_score": 60,
+                            "rating": "HOLD",
+                            "conviction": "medium",
+                        },
+                    },
+                },
+            },
+        )
+        out = score_aggregator(state)
+        assert out["investment_theses"]["PODD"]["conviction"] == "stable"
+
+    def test_held_stock_high_conviction_normalized_to_rising(self):
+        state = _state(
+            team_outputs={
+                "tech": {
+                    "recommendations": [],
+                    "thesis_updates": {
+                        "NVDA": {
+                            "ticker": "NVDA",
+                            "sector": "Technology",
+                            "final_score": 80.0,
+                            "quant_score": 78,
+                            "qual_score": 82,
+                            "rating": "BUY",
+                            "conviction": "high",
+                        },
+                    },
+                },
+            },
+        )
+        out = score_aggregator(state)
+        assert out["investment_theses"]["NVDA"]["conviction"] == "rising"
+
+    def test_held_stock_already_storage_format_passes_through(self):
+        """Idempotency: if upstream already normalized, normalize_conviction
+        is a pass-through."""
+        state = _state(
+            team_outputs={
+                "tech": {
+                    "recommendations": [],
+                    "thesis_updates": {
+                        "AAPL": {
+                            "ticker": "AAPL",
+                            "sector": "Technology",
+                            "final_score": 75.0,
+                            "quant_score": 75,
+                            "qual_score": 75,
+                            "rating": "BUY",
+                            "conviction": "rising",
+                        },
+                    },
+                },
+            },
+        )
+        out = score_aggregator(state)
+        assert out["investment_theses"]["AAPL"]["conviction"] == "rising"
