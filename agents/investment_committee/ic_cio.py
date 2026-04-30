@@ -22,6 +22,27 @@ from agents.prompt_loader import load_prompt
 log = logging.getLogger(__name__)
 
 
+def _compute_effective_cap(
+    open_slots: int,
+    n_candidates: int,
+    max_new_entrants: int,
+    min_new_entrants: int,
+) -> int:
+    """
+    Compute the actual number of new entrants the CIO may advance this week.
+
+    Combines the natural population gap with explicit weekly entrant bounds:
+        effective = min(max, max(min, open_slots), n_candidates)
+
+    The floor is clamped to n_candidates so we never demand advancing more
+    candidates than exist. Returns 0 if no candidates exist or max is 0.
+    """
+    if n_candidates <= 0 or max_new_entrants <= 0:
+        return 0
+    floor = min(min_new_entrants, n_candidates)
+    return min(max_new_entrants, max(floor, open_slots), n_candidates)
+
+
 def run_cio(
     candidates: list[dict],
     macro_context: dict,
@@ -32,6 +53,9 @@ def run_cio(
     run_date: str,
     api_key: Optional[str] = None,
     prior_decisions: list[dict] | None = None,
+    *,
+    max_new_entrants: int = 10,
+    min_new_entrants: int = 2,
 ) -> dict:
     """
     Run the CIO evaluation in a single batch Sonnet call.
@@ -43,9 +67,13 @@ def run_cio(
         macro_context: {market_regime, macro_report_summary, ...}
         sector_ratings: {sector: {rating, modifier, rationale}}
         current_population: Current held stocks (for portfolio fit analysis).
-        open_slots: Number of population slots available.
+        open_slots: Number of population slots available (population gap).
         exits: Stocks being removed this week (for context).
         run_date: YYYY-MM-DD.
+        max_new_entrants: Hard ceiling on new entrants per week.
+        min_new_entrants: Floor on new entrants per week, when candidates are
+            available. Forces CIO to advance at least this many even if the
+            population gap is smaller — exits will rotate names out.
 
     Returns:
         {
@@ -58,11 +86,21 @@ def run_cio(
         log.info("[cio] no candidates to evaluate")
         return {"decisions": [], "advanced_tickers": [], "entry_theses": {}}
 
-    if open_slots <= 0:
-        log.info("[cio] no open slots — rejecting all %d candidates", len(candidates))
+    effective_cap = _compute_effective_cap(
+        open_slots, len(candidates), max_new_entrants, min_new_entrants,
+    )
+    log.info(
+        "[cio] effective_cap=%d (open_slots=%d, n_candidates=%d, "
+        "max_new=%d, min_new=%d)",
+        effective_cap, open_slots, len(candidates),
+        max_new_entrants, min_new_entrants,
+    )
+
+    if effective_cap <= 0:
+        log.info("[cio] effective_cap=0 — rejecting all %d candidates", len(candidates))
         return {
             "decisions": [
-                _reject_decision(c, "no open slots") for c in candidates
+                _reject_decision(c, "no open slots and floor is zero") for c in candidates
             ],
             "advanced_tickers": [],
             "entry_theses": {},
@@ -76,18 +114,18 @@ def run_cio(
 
     prompt = _build_cio_prompt(
         candidates, macro_context, sector_ratings,
-        current_population, open_slots, exits, run_date,
+        current_population, effective_cap, exits, run_date,
         prior_decisions=prior_decisions,
     )
 
     try:
         response = llm.invoke([HumanMessage(content=prompt)])
         text = response.content
-        return _parse_cio_response(text, candidates, open_slots)
+        return _parse_cio_response(text, candidates, effective_cap)
     except Exception as e:
         log.error("[cio] evaluation failed: %s", e)
         # Fallback: rank by combined score, take top N
-        return _fallback_selection(candidates, open_slots)
+        return _fallback_selection(candidates, effective_cap)
 
 
 def _format_prior_decisions(prior_decisions: list[dict] | None) -> str:
@@ -171,25 +209,25 @@ def _build_cio_prompt(
 def _parse_cio_response(
     text: str,
     candidates: list[dict],
-    open_slots: int,
+    effective_cap: int,
 ) -> dict:
     """Parse the CIO's JSON response."""
     # Find JSON block
     match = re.search(r"\{.*\}", text, re.DOTALL)
     if not match:
         log.warning("[cio] could not parse JSON from response")
-        return _fallback_selection(candidates, open_slots)
+        return _fallback_selection(candidates, effective_cap)
 
     try:
         result = json.loads(match.group())
     except json.JSONDecodeError:
         log.warning("[cio] invalid JSON in response")
-        return _fallback_selection(candidates, open_slots)
+        return _fallback_selection(candidates, effective_cap)
 
     decisions = result.get("decisions", [])
     if not decisions:
         log.warning("[cio] no decisions in response")
-        return _fallback_selection(candidates, open_slots)
+        return _fallback_selection(candidates, effective_cap)
 
     # Extract advanced tickers and theses
     advanced = []
@@ -201,8 +239,8 @@ def _parse_cio_response(
             if d.get("entry_thesis"):
                 entry_theses[ticker] = d["entry_thesis"]
 
-    # Cap at open_slots
-    advanced = advanced[:open_slots]
+    # Cap at effective_cap (combines population gap with weekly entrant budget)
+    advanced = advanced[:effective_cap]
 
     log.info("[cio] %d advanced, %d rejected, %d deadlocked out of %d candidates",
              len([d for d in decisions if d.get("decision") == "ADVANCE"]),
@@ -217,7 +255,7 @@ def _parse_cio_response(
     }
 
 
-def _fallback_selection(candidates: list[dict], open_slots: int) -> dict:
+def _fallback_selection(candidates: list[dict], effective_cap: int) -> dict:
     """Fallback: rank by combined quant+qual score."""
     scored = []
     for c in candidates:
@@ -232,7 +270,7 @@ def _fallback_selection(candidates: list[dict], open_slots: int) -> dict:
     advanced = []
     entry_theses = {}
     for i, (score, c) in enumerate(scored):
-        if i < open_slots:
+        if i < effective_cap:
             decisions.append({
                 "ticker": c["ticker"],
                 "decision": "ADVANCE",
