@@ -22,25 +22,35 @@ from agents.prompt_loader import load_prompt
 log = logging.getLogger(__name__)
 
 
-def _compute_effective_cap(
-    open_slots: int,
+def _compute_advance_bounds(
     n_candidates: int,
     max_new_entrants: int,
     min_new_entrants: int,
-) -> int:
+) -> tuple[int, int]:
     """
-    Compute the actual number of new entrants the CIO may advance this week.
+    Compute (floor, cap) for new-entrant advances this week.
 
-    Combines the natural population gap with explicit weekly entrant bounds:
-        effective = min(max, max(min, open_slots), n_candidates)
+    Both bounds are clamped to n_candidates so we never demand advancing
+    or permit advancing more candidates than exist:
 
-    The floor is clamped to n_candidates so we never demand advancing more
-    candidates than exist. Returns 0 if no candidates exist or max is 0.
+        cap   = min(max_new_entrants, n_candidates)
+        floor = min(min_new_entrants, n_candidates)
+
+    Note: open_slots (population gap) is intentionally NOT a factor.
+    The cap range [min, max] is decoupled from how empty the portfolio is —
+    exits handle population-size pressure separately. Logged for ops in
+    `run_cio` but not used in this calculation.
+
+    Returns (0, 0) if no candidates exist or max_new_entrants <= 0.
     """
     if n_candidates <= 0 or max_new_entrants <= 0:
-        return 0
+        return (0, 0)
+    cap = min(max_new_entrants, n_candidates)
     floor = min(min_new_entrants, n_candidates)
-    return min(max_new_entrants, max(floor, open_slots), n_candidates)
+    # Defensive: floor must never exceed cap (config bounds-check guards
+    # this at startup, but belt-and-suspenders).
+    floor = min(floor, cap)
+    return (floor, cap)
 
 
 def run_cio(
@@ -86,21 +96,22 @@ def run_cio(
         log.info("[cio] no candidates to evaluate")
         return {"decisions": [], "advanced_tickers": [], "entry_theses": {}}
 
-    effective_cap = _compute_effective_cap(
-        open_slots, len(candidates), max_new_entrants, min_new_entrants,
+    floor, cap = _compute_advance_bounds(
+        len(candidates), max_new_entrants, min_new_entrants,
     )
     log.info(
-        "[cio] effective_cap=%d (open_slots=%d, n_candidates=%d, "
-        "max_new=%d, min_new=%d)",
-        effective_cap, open_slots, len(candidates),
-        max_new_entrants, min_new_entrants,
+        "[cio] bounds: floor=%d cap=%d (n_candidates=%d, max_new=%d, "
+        "min_new=%d, open_slots=%d [informational only])",
+        floor, cap, len(candidates),
+        max_new_entrants, min_new_entrants, open_slots,
     )
 
-    if effective_cap <= 0:
-        log.info("[cio] effective_cap=0 — rejecting all %d candidates", len(candidates))
+    if cap <= 0:
+        log.info("[cio] cap=0 — rejecting all %d candidates", len(candidates))
         return {
             "decisions": [
-                _reject_decision(c, "no open slots and floor is zero") for c in candidates
+                _reject_decision(c, "cap=0: no candidates or max_new_entrants<=0")
+                for c in candidates
             ],
             "advanced_tickers": [],
             "entry_theses": {},
@@ -114,18 +125,19 @@ def run_cio(
 
     prompt = _build_cio_prompt(
         candidates, macro_context, sector_ratings,
-        current_population, effective_cap, exits, run_date,
+        current_population, cap, exits, run_date,
         prior_decisions=prior_decisions,
     )
 
     try:
         response = llm.invoke([HumanMessage(content=prompt)])
         text = response.content
-        return _parse_cio_response(text, candidates, effective_cap)
+        return _parse_cio_response(text, candidates, floor, cap)
     except Exception as e:
         log.error("[cio] evaluation failed: %s", e)
-        # Fallback: rank by combined score, take top N
-        return _fallback_selection(candidates, effective_cap)
+        # Fallback advances only `floor` (not `cap`). When the LLM signal is
+        # unusable, be conservative — don't force max-advance on broken data.
+        return _fallback_selection(candidates, floor)
 
 
 def _format_prior_decisions(prior_decisions: list[dict] | None) -> str:
@@ -206,30 +218,46 @@ def _build_cio_prompt(
     )
 
 
+def _combined_score(c: dict) -> float:
+    """Combined quant+qual score used for floor force-fill ranking."""
+    qs = c.get("quant_score") or 0
+    qls = c.get("qual_score") or 0
+    return (qs + qls) / 2 if qls else qs
+
+
 def _parse_cio_response(
     text: str,
     candidates: list[dict],
-    effective_cap: int,
+    floor: int,
+    cap: int,
 ) -> dict:
-    """Parse the CIO's JSON response."""
+    """Parse the CIO's JSON response.
+
+    Bounds enforcement:
+    - Truncate at `cap` if the rubric advanced more than the ceiling.
+    - Force-fill to `floor` from REJECT/DEADLOCK candidates (ranked by
+      combined quant+qual score) when the rubric advanced fewer than the
+      floor. Forced promotions are tagged `decision="ADVANCE_FORCED"` so
+      the audit trail distinguishes them from rubric-driven advances.
+    """
     # Find JSON block
     match = re.search(r"\{.*\}", text, re.DOTALL)
     if not match:
         log.warning("[cio] could not parse JSON from response")
-        return _fallback_selection(candidates, effective_cap)
+        return _fallback_selection(candidates, floor)
 
     try:
         result = json.loads(match.group())
     except json.JSONDecodeError:
         log.warning("[cio] invalid JSON in response")
-        return _fallback_selection(candidates, effective_cap)
+        return _fallback_selection(candidates, floor)
 
     decisions = result.get("decisions", [])
     if not decisions:
         log.warning("[cio] no decisions in response")
-        return _fallback_selection(candidates, effective_cap)
+        return _fallback_selection(candidates, floor)
 
-    # Extract advanced tickers and theses
+    # Extract advanced tickers + theses from rubric ADVANCE decisions
     advanced = []
     entry_theses = {}
     for d in decisions:
@@ -239,14 +267,76 @@ def _parse_cio_response(
             if d.get("entry_thesis"):
                 entry_theses[ticker] = d["entry_thesis"]
 
-    # Cap at effective_cap (combines population gap with weekly entrant budget)
-    advanced = advanced[:effective_cap]
+    rubric_advanced_count = len(advanced)
 
-    log.info("[cio] %d advanced, %d rejected, %d deadlocked out of %d candidates",
-             len([d for d in decisions if d.get("decision") == "ADVANCE"]),
-             len([d for d in decisions if d.get("decision") == "REJECT"]),
-             len([d for d in decisions if d.get("decision") == "NO_ADVANCE_DEADLOCK"]),
-             len(decisions))
+    # Ceiling: truncate if rubric exceeded cap
+    advanced = advanced[:cap]
+    truncated_count = rubric_advanced_count - len(advanced)
+
+    # Floor: force-fill from non-advanced candidates if rubric came up short.
+    # The team-level Quant+Qual+Peer Review already validated all candidates;
+    # the CIO rubric is a secondary editorial gate. When the rubric is too
+    # strict in a given week, fall back to the best of the team-validated
+    # pool ranked by combined quant+qual score.
+    forced_tickers: list[str] = []
+    if len(advanced) < floor:
+        advanced_set = set(advanced)
+        not_advanced = [
+            c for c in candidates if c.get("ticker") not in advanced_set
+        ]
+        not_advanced.sort(key=_combined_score, reverse=True)
+        shortfall = floor - len(advanced)
+        for c in not_advanced[:shortfall]:
+            ticker = c["ticker"]
+            advanced.append(ticker)
+            forced_tickers.append(ticker)
+        # Mutate matching decision entries so the audit trail reflects the
+        # forced promotion. Add synthetic entries for any forced ticker
+        # missing from the LLM's decisions list.
+        existing_decision_tickers = {d.get("ticker") for d in decisions}
+        for ticker in forced_tickers:
+            matched = False
+            for d in decisions:
+                if d.get("ticker") == ticker:
+                    d["decision"] = "ADVANCE_FORCED"
+                    prior_rationale = d.get("rationale", "") or ""
+                    d["rationale"] = (
+                        f"{prior_rationale} | Floor enforcement: rubric "
+                        f"advanced {rubric_advanced_count} of {len(candidates)}; "
+                        f"promoted to hit min_new_entrants={floor}."
+                    ).strip(" |")
+                    matched = True
+                    break
+            if not matched and ticker not in existing_decision_tickers:
+                cand = next(
+                    (c for c in candidates if c.get("ticker") == ticker), None,
+                )
+                decisions.append({
+                    "ticker": ticker,
+                    "decision": "ADVANCE_FORCED",
+                    "rank": None,
+                    "conviction": int(_combined_score(cand or {})),
+                    "rationale": (
+                        f"Floor enforcement: rubric advanced "
+                        f"{rubric_advanced_count} of {len(candidates)}; "
+                        f"promoted to hit min_new_entrants={floor}."
+                    ),
+                    "entry_thesis": None,
+                })
+
+    log.info(
+        "[cio] %d advanced (%d rubric + %d forced), %d truncated, "
+        "%d rejected, %d deadlocked out of %d candidates "
+        "[floor=%d cap=%d]",
+        len(advanced),
+        rubric_advanced_count - truncated_count,
+        len(forced_tickers),
+        truncated_count,
+        len([d for d in decisions if d.get("decision") == "REJECT"]),
+        len([d for d in decisions if d.get("decision") == "NO_ADVANCE_DEADLOCK"]),
+        len(decisions),
+        floor, cap,
+    )
 
     return {
         "decisions": decisions,
@@ -255,28 +345,32 @@ def _parse_cio_response(
     }
 
 
-def _fallback_selection(candidates: list[dict], effective_cap: int) -> dict:
-    """Fallback: rank by combined quant+qual score."""
-    scored = []
-    for c in candidates:
-        qs = c.get("quant_score") or 0
-        qls = c.get("qual_score") or 0
-        combined = (qs + qls) / 2 if qls else qs
-        scored.append((combined, c))
+def _fallback_selection(candidates: list[dict], floor: int) -> dict:
+    """Fallback when the LLM signal is unusable.
 
+    Advances exactly `floor` candidates by combined quant+qual score —
+    NOT `cap`. When the LLM call fails, parsing breaks, or no decisions
+    come back, we have no rubric output to truncate against. Be
+    conservative: hit the floor and stop. Don't force max-advance on
+    broken data.
+    """
+    scored = [(_combined_score(c), c) for c in candidates]
     scored.sort(key=lambda x: x[0], reverse=True)
 
     decisions = []
     advanced = []
-    entry_theses = {}
+    entry_theses: dict = {}
     for i, (score, c) in enumerate(scored):
-        if i < effective_cap:
+        if i < floor:
             decisions.append({
                 "ticker": c["ticker"],
                 "decision": "ADVANCE",
                 "rank": i + 1,
                 "conviction": int(score),
-                "rationale": "Fallback: selected by combined score",
+                "rationale": (
+                    "Fallback (LLM unusable): selected by combined score "
+                    f"to hit floor={floor}"
+                ),
                 "entry_thesis": None,
             })
             advanced.append(c["ticker"])
@@ -286,7 +380,7 @@ def _fallback_selection(candidates: list[dict], effective_cap: int) -> dict:
                 "decision": "REJECT",
                 "rank": None,
                 "conviction": int(score),
-                "rationale": "Fallback: below cutoff",
+                "rationale": "Fallback: below floor cutoff",
                 "entry_thesis": None,
             })
 
