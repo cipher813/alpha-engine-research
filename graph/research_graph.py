@@ -823,10 +823,25 @@ def score_aggregator(state: ResearchState) -> dict:
                             sell_threshold=RATING_SELL_THRESHOLD,
                         )
 
+                # Normalize conviction to storage format BEFORE spreading.
+                # The recommendation path above (line ~752) calls
+                # normalize_conviction explicitly; the held-stock thesis_updates
+                # path was previously skipping it, so peer_review's raw
+                # 'low'/'medium'/'high' agent output flowed unnormalized into
+                # InvestmentThesis whose schema expects the storage format
+                # (rising/stable/declining). 2026-04-30 warn-mode validation
+                # surfaced 2 such violations (DVN, PODD); typed-state hard-fail
+                # would crash on this same path. Single source of normalization:
+                # both score_aggregator branches must run normalize_conviction.
+                normalized_thesis = dict(thesis)
+                if "conviction" in normalized_thesis:
+                    normalized_thesis["conviction"] = normalize_conviction(
+                        normalized_thesis["conviction"]
+                    )
                 investment_theses[ticker] = {
                     "ticker": ticker,
                     "team_id": team_id,
-                    **thesis,
+                    **normalized_thesis,
                 }
 
     logger.info("[score_aggregator] scored %d tickers", len(investment_theses))
