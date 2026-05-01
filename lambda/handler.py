@@ -50,9 +50,18 @@ _install_ls_patch()
 # log.error() call routes through flow-doctor's dispatch (email +
 # optional GitHub issue) without explicit fd.report() plumbing.
 # flow-doctor.yaml ships in the Lambda task root (Dockerfile COPY).
-from alpha_engine_lib.logging import setup_logging, get_flow_doctor
+# exclude_patterns starts empty by deliberate convention: add patterns
+# only after observing real ERROR-level noise from the Saturday SF — the
+# canonical lib pattern (mirrors executor/main.py:65-67) forces every
+# entrypoint to think about it explicitly rather than inherit defaults.
+from alpha_engine_lib.logging import setup_logging
+_FLOW_DOCTOR_EXCLUDE_PATTERNS: list[str] = []
 _FLOW_DOCTOR_YAML = os.path.join(os.environ.get("LAMBDA_TASK_ROOT", os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "flow-doctor.yaml")
-setup_logging("research", flow_doctor_yaml=_FLOW_DOCTOR_YAML)
+setup_logging(
+    "research",
+    flow_doctor_yaml=_FLOW_DOCTOR_YAML,
+    exclude_patterns=_FLOW_DOCTOR_EXCLUDE_PATTERNS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -281,10 +290,6 @@ def handler(event, context):
             is_early_close=early_close,
         )
         initial_state["performance_summary"] = perf_summary
-        # Carry the shared flow-doctor instance on state so downstream
-        # graph nodes can call fd.report() explicitly when needed. None
-        # when FLOW_DOCTOR_ENABLED=0 (local dev / --dry-run).
-        initial_state["flow_doctor"] = get_flow_doctor()
 
         # Extract episodic memories from newly completed signal outcomes
         try:
@@ -313,7 +318,6 @@ def handler(event, context):
                     is_early_close=early_close,
                 )
                 _stub_state["performance_summary"] = perf_summary
-                _stub_state["flow_doctor"] = get_flow_doctor()
                 _stub_graph.invoke(_stub_state)
                 print("Stub-LLM dry-run gate: OK (proceeding to real pass)")
             except Exception as _se:
@@ -344,7 +348,6 @@ def handler(event, context):
                 is_early_close=early_close,
             )
             initial_state["performance_summary"] = perf_summary
-            initial_state["flow_doctor"] = get_flow_doctor()
 
         if dry_run_llm:
             # Exclusive stub-only mode — no real LLM calls. Caller asked
@@ -370,7 +373,6 @@ def handler(event, context):
                     is_early_close=early_close,
                 )
                 initial_state["performance_summary"] = perf_summary
-                initial_state["flow_doctor"] = get_flow_doctor()
                 final_state = graph.invoke(initial_state)
             finally:
                 _restore()
