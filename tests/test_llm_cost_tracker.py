@@ -14,16 +14,25 @@ Locks down:
   ``cost_usd``.
 - ``pop_metadata_for`` removes the entry on read (bounded under fan-out).
 - Frame stack underflow is detected.
+- **PR 3** — per-call JSONL sink: rows buffered + flushed at scope exit
+  to ``s3://alpha-engine-research/decision_artifacts/_cost_raw/{date}/
+  {run_id}/{agent_id}.jsonl``; gated on the same env flag as
+  decision_capture; hard-fails on S3 error per
+  ``feedback_no_silent_fails``.
 """
 
 from __future__ import annotations
 
+import json
 import os
 from datetime import date
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import boto3
 import pytest
+from botocore.exceptions import ClientError
+from moto import mock_aws
 
 from alpha_engine_lib.cost import PriceCard, PriceTable
 from alpha_engine_lib.decision_capture import FullPromptContext, ModelMetadata
@@ -457,3 +466,268 @@ class TestPriceTableCache:
 
         assert t1 is t2 is t3
         assert load_count["n"] == 1
+
+
+# ── PR 3: per-call JSONL sink ─────────────────────────────────────────────
+
+
+_TEST_BUCKET = "alpha-engine-research"
+
+
+@pytest.fixture
+def mocked_s3():
+    """Stand up a moto-mocked S3 + create the cost-raw bucket."""
+    with mock_aws():
+        s3 = boto3.client("s3", region_name="us-east-1")
+        s3.create_bucket(Bucket=_TEST_BUCKET)
+        yield s3
+
+
+@pytest.fixture
+def capture_enabled(monkeypatch):
+    monkeypatch.setenv("ALPHA_ENGINE_DECISION_CAPTURE_ENABLED", "true")
+
+
+@pytest.fixture
+def capture_disabled(monkeypatch):
+    monkeypatch.delenv("ALPHA_ENGINE_DECISION_CAPTURE_ENABLED", raising=False)
+
+
+def _read_jsonl_object(s3, bucket: str, key: str) -> list[dict]:
+    """Helper: read a moto-stored JSONL object back as a list of dicts."""
+    obj = s3.get_object(Bucket=bucket, Key=key)
+    body = obj["Body"].read().decode("utf-8")
+    return [json.loads(line) for line in body.splitlines() if line.strip()]
+
+
+class TestPerCallRowAccumulation:
+    def test_callback_appends_per_call_row(self, patched_pricing_path):
+        """Each on_llm_end fires appends one row to frame.per_call_rows."""
+        from graph.llm_cost_tracker import (
+            CostTelemetryCallback, track_llm_cost,
+        )
+
+        cb = CostTelemetryCallback()
+        with track_llm_cost(
+            agent_id="test_agent",
+            model_name_fallback="claude-haiku-4-5",
+        ) as frame:
+            cb.on_llm_end(_make_modern_response(input_tokens=100, output_tokens=50))
+            cb.on_llm_end(_make_modern_response(input_tokens=200, output_tokens=80))
+            assert len(frame.per_call_rows) == 2
+            assert frame.per_call_rows[0]["call_seq"] == 1
+            assert frame.per_call_rows[1]["call_seq"] == 2
+            assert frame.per_call_rows[0]["input_tokens"] == 100
+            assert frame.per_call_rows[1]["input_tokens"] == 200
+
+    def test_per_call_row_carries_timestamp(self, patched_pricing_path):
+        from graph.llm_cost_tracker import (
+            CostTelemetryCallback, track_llm_cost,
+        )
+
+        cb = CostTelemetryCallback()
+        with track_llm_cost(
+            agent_id="test_agent",
+            model_name_fallback="claude-haiku-4-5",
+        ) as frame:
+            cb.on_llm_end(_make_modern_response(input_tokens=10, output_tokens=5))
+            ts = frame.per_call_rows[0]["timestamp"]
+            assert isinstance(ts, str)
+            # Round-trip-able ISO 8601 (UTC).
+            from datetime import datetime
+            datetime.fromisoformat(ts.replace("Z", "+00:00"))
+
+
+class TestJsonlFlushHappyPath:
+    def test_flush_writes_jsonl_at_canonical_key(
+        self, mocked_s3, capture_enabled, patched_pricing_path,
+    ):
+        from graph.llm_cost_tracker import (
+            CostTelemetryCallback, track_llm_cost,
+        )
+
+        cb = CostTelemetryCallback()
+        with track_llm_cost(
+            agent_id="sector_team:technology",
+            sector_team_id="technology",
+            node_name="sector_team_node",
+            run_type="weekly_research",
+            run_id="2026-05-02",
+            model_name_fallback="claude-haiku-4-5",
+        ):
+            cb.on_llm_end(_make_modern_response(input_tokens=4000, output_tokens=1200))
+
+        # Key should be: decision_artifacts/_cost_raw/{date}/{run_id}/{agent_id}.jsonl
+        # (date from frame.enter_time = today UTC).
+        listing = mocked_s3.list_objects_v2(
+            Bucket=_TEST_BUCKET,
+            Prefix="decision_artifacts/_cost_raw/",
+        )
+        keys = [obj["Key"] for obj in listing.get("Contents", [])]
+        assert len(keys) == 1
+        assert "/2026-05-02/sector_team:technology.jsonl" in keys[0]
+
+        rows = _read_jsonl_object(mocked_s3, _TEST_BUCKET, keys[0])
+        assert len(rows) == 1
+        row = rows[0]
+        # Row carries frame-level dimensions.
+        assert row["agent_id"] == "sector_team:technology"
+        assert row["sector_team_id"] == "technology"
+        assert row["node_name"] == "sector_team_node"
+        assert row["run_type"] == "weekly_research"
+        assert row["run_id"] == "2026-05-02"
+        # Row carries call-level data.
+        assert row["call_seq"] == 1
+        assert row["input_tokens"] == 4000
+        assert row["output_tokens"] == 1200
+        assert row["model_name"] == "claude-haiku-4-5"
+        # cost_usd computed: (4000*1.0 + 1200*5.0) / 1M = 0.01
+        assert row["cost_usd"] == pytest.approx(0.01)
+        # Schema versioning present for future migrations.
+        assert row["schema_version"] == 1
+
+    def test_react_loop_writes_multiple_rows(
+        self, mocked_s3, capture_enabled, patched_pricing_path,
+    ):
+        from graph.llm_cost_tracker import (
+            CostTelemetryCallback, track_llm_cost,
+        )
+
+        cb = CostTelemetryCallback()
+        with track_llm_cost(
+            agent_id="sector_quant:tech",
+            run_id="2026-05-02",
+            model_name_fallback="claude-haiku-4-5",
+        ):
+            cb.on_llm_end(_make_modern_response(input_tokens=1000, output_tokens=200))
+            cb.on_llm_end(_make_modern_response(input_tokens=1500, output_tokens=300))
+            cb.on_llm_end(_make_modern_response(input_tokens=500, output_tokens=400))
+
+        listing = mocked_s3.list_objects_v2(
+            Bucket=_TEST_BUCKET, Prefix="decision_artifacts/_cost_raw/",
+        )
+        keys = [obj["Key"] for obj in listing.get("Contents", [])]
+        rows = _read_jsonl_object(mocked_s3, _TEST_BUCKET, keys[0])
+        assert len(rows) == 3
+        assert [r["call_seq"] for r in rows] == [1, 2, 3]
+        assert [r["input_tokens"] for r in rows] == [1000, 1500, 500]
+
+
+class TestJsonlFlushGating:
+    def test_flag_off_skips_flush(
+        self, mocked_s3, capture_disabled, patched_pricing_path,
+    ):
+        from graph.llm_cost_tracker import (
+            CostTelemetryCallback, track_llm_cost,
+        )
+
+        cb = CostTelemetryCallback()
+        with track_llm_cost(
+            agent_id="sector_team:tech",
+            run_id="2026-05-02",
+            model_name_fallback="claude-haiku-4-5",
+        ):
+            cb.on_llm_end(_make_modern_response(input_tokens=10, output_tokens=5))
+
+        # No JSONL written.
+        listing = mocked_s3.list_objects_v2(
+            Bucket=_TEST_BUCKET, Prefix="decision_artifacts/_cost_raw/",
+        )
+        assert listing.get("Contents", []) == []
+
+    def test_no_calls_no_flush(
+        self, mocked_s3, capture_enabled, patched_pricing_path,
+    ):
+        """Frames with zero LLM calls don't emit empty JSONLs."""
+        from graph.llm_cost_tracker import track_llm_cost
+
+        with track_llm_cost(
+            agent_id="silent_agent",
+            run_id="2026-05-02",
+            model_name_fallback="claude-haiku-4-5",
+        ):
+            pass
+
+        listing = mocked_s3.list_objects_v2(
+            Bucket=_TEST_BUCKET, Prefix="decision_artifacts/_cost_raw/",
+        )
+        assert listing.get("Contents", []) == []
+
+    def test_no_run_id_skips_flush(
+        self, mocked_s3, capture_enabled, patched_pricing_path,
+    ):
+        """Without run_id we can't compute the partition key — flush is
+        skipped (in-process metadata stash still works)."""
+        from graph.llm_cost_tracker import (
+            CostTelemetryCallback, track_llm_cost, pop_metadata_for,
+        )
+
+        cb = CostTelemetryCallback()
+        with track_llm_cost(
+            agent_id="agent_no_run_id",
+            model_name_fallback="claude-haiku-4-5",
+        ):
+            cb.on_llm_end(_make_modern_response(input_tokens=10, output_tokens=5))
+
+        # In-process metadata still landed.
+        assert pop_metadata_for("agent_no_run_id") is not None
+        # But no JSONL on S3.
+        listing = mocked_s3.list_objects_v2(
+            Bucket=_TEST_BUCKET, Prefix="decision_artifacts/_cost_raw/",
+        )
+        assert listing.get("Contents", []) == []
+
+
+class TestJsonlFlushHardFail:
+    def test_s3_put_failure_raises_cost_raw_write_error(
+        self, capture_enabled, patched_pricing_path,
+    ):
+        """When the env flag is on AND S3 unreachable, the flush raises
+        instead of silently swallowing per ``feedback_no_silent_fails``."""
+        from graph.llm_cost_tracker import (
+            CostRawWriteError, CostTelemetryCallback, track_llm_cost,
+            _flush_cost_rows_to_s3, _Frame,
+        )
+
+        # Construct a frame with one row and call the flush helper directly
+        # against a stub S3 client that always raises ClientError.
+        stub = MagicMock()
+        stub.put_object.side_effect = ClientError(
+            {"Error": {"Code": "AccessDenied", "Message": "no perm"}},
+            "PutObject",
+        )
+
+        from datetime import datetime, timezone
+        frame = _Frame(
+            agent_id="ic_cio",
+            sector_team_id=None,
+            node_name="cio_node",
+            run_type="weekly_research",
+            prompt=None,
+            run_id="2026-05-02",
+            enter_time=datetime(2026, 5, 2, tzinfo=timezone.utc),
+            per_call_rows=[{
+                "schema_version": 1,
+                "timestamp": "2026-05-02T13:30:00+00:00",
+                "call_seq": 1,
+                "model_name": "claude-haiku-4-5",
+                "input_tokens": 10, "output_tokens": 5,
+                "cache_read_tokens": 0, "cache_create_tokens": 0,
+            }],
+        )
+
+        with pytest.raises(CostRawWriteError, match="AccessDenied"):
+            _flush_cost_rows_to_s3(frame=frame, table=None, s3_client=stub)
+
+
+class TestS3KeyBuilder:
+    def test_key_format(self):
+        from datetime import datetime, timezone
+        from graph.llm_cost_tracker import _build_cost_raw_s3_key
+
+        key = _build_cost_raw_s3_key(
+            capture_dt=datetime(2026, 5, 2, 13, 30, tzinfo=timezone.utc),
+            run_id="2026-05-02",
+            agent_id="sector_team:technology",
+        )
+        assert key == "decision_artifacts/_cost_raw/2026-05-02/2026-05-02/sector_team:technology.jsonl"
