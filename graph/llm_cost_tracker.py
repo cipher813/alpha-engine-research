@@ -69,6 +69,15 @@ Usage pattern (one ChatAnthropic instance, one agent decision)::
   fields are an upstream change worth surfacing immediately.
 - Price-table lookup hard-fails on unknown model (delegated to
   ``alpha_engine_lib.cost.recompute_cost``).
+- **Run budget ceiling (PR 5)** — per-run cumulative cost is tracked in
+  a ContextVar. At each ``track_llm_cost`` frame exit, the cumulative
+  cost for the active ``run_id`` is compared against
+  ``ALPHA_ENGINE_RUN_BUDGET_USD`` (default $100). When exceeded, the
+  frame raises ``RunBudgetExceededError`` AFTER the in-flight call
+  completes — runaway prompt loops kill the run before they bill us
+  into the next decade. Disable for tests / smoke runs by setting
+  ``ALPHA_ENGINE_RUN_BUDGET_USD=0`` (zero or negative disables the
+  check; positive values enforce the ceiling).
 
 Thread + async safety: state lives in ``ContextVar`` so it's per-task in
 asyncio, per-thread otherwise. ``contextvars.copy_context()`` semantics
@@ -130,11 +139,103 @@ class CostRawWriteError(RuntimeError):
     """
 
 
+class RunBudgetExceededError(RuntimeError):
+    """Raised at frame exit when the per-run cumulative cost exceeds the
+    configured ceiling.
+
+    Surfaces the offending run_id, the cumulative cost, and the
+    threshold so operators can map the failure back to the SF run that
+    blew the budget. Per ``feedback_no_silent_fails`` — runaway prompt
+    loops should kill the run, not silently bill us into the next
+    decade. Disable for tests / smoke runs via
+    ``ALPHA_ENGINE_RUN_BUDGET_USD=0`` (zero or negative disables).
+    """
+
+    def __init__(self, *, run_id: str, cumulative_cost_usd: float, ceiling_usd: float) -> None:
+        self.run_id = run_id
+        self.cumulative_cost_usd = cumulative_cost_usd
+        self.ceiling_usd = ceiling_usd
+        super().__init__(
+            f"[cost_tracker] run budget exceeded: run_id={run_id!r} "
+            f"cumulative_cost=${cumulative_cost_usd:.4f} > "
+            f"ceiling=${ceiling_usd:.4f}. Set "
+            f"ALPHA_ENGINE_RUN_BUDGET_USD=<higher_value> to raise the cap, "
+            f"or =0 to disable. Investigate the offending agent before "
+            f"raising the cap — a runaway prompt loop will keep growing.",
+        )
+
+
 def _is_capture_enabled() -> bool:
     """Same flag as decision_capture's gate; the two streams co-fire."""
     return os.environ.get(_DECISION_CAPTURE_ENV_VAR, "").lower() in (
         "true", "1", "yes",
     )
+
+
+# ── Run budget ceiling (PR 5) ─────────────────────────────────────────────
+
+
+_RUN_BUDGET_ENV_VAR = "ALPHA_ENGINE_RUN_BUDGET_USD"
+_RUN_BUDGET_DEFAULT_USD = 100.0
+
+
+def _resolve_run_budget_ceiling() -> float:
+    """Read ``ALPHA_ENGINE_RUN_BUDGET_USD`` per-call (allows test toggling).
+
+    Returns 0.0 (which disables enforcement) on parse failure rather than
+    raising — a malformed env var shouldn't take down a Sat SF run; the
+    parse-failure log is loud enough that the operator notices.
+
+    Returns a positive float to enforce the ceiling; zero or negative
+    disables enforcement entirely. Default $100 reflects the
+    workstream's "runaway prompt loop should fire well before the
+    monthly Anthropic bill" intent.
+    """
+    raw = os.environ.get(_RUN_BUDGET_ENV_VAR, "")
+    if not raw:
+        return _RUN_BUDGET_DEFAULT_USD
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        logger.warning(
+            "[cost_tracker] ALPHA_ENGINE_RUN_BUDGET_USD=%r is not a number; "
+            "disabling run-budget enforcement (set to a positive float to "
+            "enable, 0 to explicitly disable)",
+            raw,
+        )
+        return 0.0
+
+
+# Per-run cumulative cost accumulator. Keyed by run_id; values in USD.
+# Lives in a ContextVar so async + threaded runs (LangGraph Send fan-out)
+# share the same accumulator across frames within a single pipeline
+# invocation.
+_run_cost_totals: contextvars.ContextVar[dict[str, float]] = contextvars.ContextVar(
+    "alpha_engine_cost_tracker_run_totals", default={},
+)
+
+
+def _accumulate_run_cost(run_id: str, frame_cost_usd: float) -> float:
+    """Add ``frame_cost_usd`` to the per-run accumulator and return the new total."""
+    totals = dict(_run_cost_totals.get())
+    totals[run_id] = totals.get(run_id, 0.0) + frame_cost_usd
+    new_total = totals[run_id]
+    _run_cost_totals.set(totals)
+    return new_total
+
+
+def _reset_run_cost_totals_for_tests() -> None:
+    """Clear the per-run accumulator — exposed for tests that simulate
+    multiple runs in one process. Not used in production code paths."""
+    _run_cost_totals.set({})
+
+
+def get_run_cost(run_id: str) -> float:
+    """Return the cumulative cost for ``run_id`` so far in this pipeline
+    invocation. Used by tests and, optionally, by diagnostic logging.
+    Returns 0.0 if the run has no recorded cost (unknown run_id, or
+    capture flag was off so cost wasn't computed)."""
+    return _run_cost_totals.get().get(run_id, 0.0)
 
 
 def _build_cost_raw_s3_key(*, capture_dt: datetime, run_id: str, agent_id: str) -> str:
@@ -680,6 +781,16 @@ def track_llm_cost(
     completed[agent_id] = (metadata, prompt_context)
     _completed_metadata.set(completed)
 
+    # PR 5: per-run cumulative-cost accumulator. Accumulates regardless
+    # of the capture flag (tests + smoke runs without S3 access still
+    # benefit from the runaway-loop guard). The ceiling check runs
+    # AFTER the JSONL flush below so operators can inspect the per-call
+    # rows on S3 to diagnose what broke the budget — raising before the
+    # flush would lose the calls that contributed to the breach.
+    cumulative_after_frame: Optional[float] = None
+    if run_id:
+        cumulative_after_frame = _accumulate_run_cost(run_id, metadata.cost_usd)
+
     # PR 3: flush the per-call buffer to S3 as JSONL — gated on the
     # same ALPHA_ENGINE_DECISION_CAPTURE_ENABLED flag as the existing
     # decision-artifact capture. Hard-fail on S3 error per
@@ -720,6 +831,28 @@ def track_llm_cost(
         prompt.name if prompt else "<none>",
         prompt.version if prompt else "<none>",
     )
+
+    # PR 5: hard ceiling check fires LAST — capture metadata + JSONL
+    # flush both ran above, so even when the budget is breached the
+    # captured artifacts on S3 + the in-process metadata stash for
+    # ``_capture_if_enabled`` are intact. Operators can diagnose what
+    # broke the budget by inspecting the JSONLs without re-running.
+    if cumulative_after_frame is not None:
+        ceiling = _resolve_run_budget_ceiling()
+        if ceiling > 0 and cumulative_after_frame > ceiling:
+            logger.error(
+                "[cost_tracker] run budget exceeded for run_id=%s after "
+                "frame agent_id=%s: cumulative=$%.4f > ceiling=$%.4f "
+                "(ALPHA_ENGINE_RUN_BUDGET_USD). Raising RunBudgetExceededError "
+                "to fail the run loud. JSONL + decision-artifact flushes "
+                "completed before raise so per-call detail is preserved on S3.",
+                run_id, agent_id, cumulative_after_frame, ceiling,
+            )
+            raise RunBudgetExceededError(
+                run_id=run_id,  # type: ignore[arg-type]
+                cumulative_cost_usd=cumulative_after_frame,
+                ceiling_usd=ceiling,
+            )
 
 
 def pop_metadata_for(agent_id: str) -> Optional[tuple[ModelMetadata, FullPromptContext]]:
