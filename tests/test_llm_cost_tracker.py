@@ -731,3 +731,257 @@ class TestS3KeyBuilder:
             agent_id="sector_team:technology",
         )
         assert key == "decision_artifacts/_cost_raw/2026-05-02/2026-05-02/sector_team:technology.jsonl"
+
+
+# ── PR 5: hard ceiling (RunBudgetExceededError) ──────────────────────────
+
+
+@pytest.fixture(autouse=True)
+def reset_run_budget_state(monkeypatch):
+    """Clear per-run accumulator + restore default ceiling between tests."""
+    from graph import llm_cost_tracker
+    llm_cost_tracker._reset_run_cost_totals_for_tests()
+    monkeypatch.delenv("ALPHA_ENGINE_RUN_BUDGET_USD", raising=False)
+    yield
+    llm_cost_tracker._reset_run_cost_totals_for_tests()
+
+
+class TestRunBudgetCeilingResolution:
+    def test_default_ceiling_is_100_usd(self):
+        from graph.llm_cost_tracker import _resolve_run_budget_ceiling
+        assert _resolve_run_budget_ceiling() == 100.0
+
+    def test_env_override(self, monkeypatch):
+        from graph.llm_cost_tracker import _resolve_run_budget_ceiling
+        monkeypatch.setenv("ALPHA_ENGINE_RUN_BUDGET_USD", "5.50")
+        assert _resolve_run_budget_ceiling() == 5.50
+
+    def test_zero_disables(self, monkeypatch):
+        from graph.llm_cost_tracker import _resolve_run_budget_ceiling
+        monkeypatch.setenv("ALPHA_ENGINE_RUN_BUDGET_USD", "0")
+        assert _resolve_run_budget_ceiling() == 0.0
+
+    def test_negative_treated_as_disabled_at_check_site(self, monkeypatch):
+        # Resolver returns the negative value as-is; the check at frame
+        # exit treats `ceiling <= 0` as disabled.
+        from graph.llm_cost_tracker import _resolve_run_budget_ceiling
+        monkeypatch.setenv("ALPHA_ENGINE_RUN_BUDGET_USD", "-1")
+        assert _resolve_run_budget_ceiling() == -1.0
+
+    def test_unparseable_returns_zero_with_warn(self, monkeypatch, caplog):
+        from graph.llm_cost_tracker import _resolve_run_budget_ceiling
+        monkeypatch.setenv("ALPHA_ENGINE_RUN_BUDGET_USD", "not-a-number")
+        with caplog.at_level("WARNING"):
+            result = _resolve_run_budget_ceiling()
+        assert result == 0.0
+        assert any("not a number" in r.message for r in caplog.records)
+
+
+class TestRunCostAccumulator:
+    def test_single_frame_accumulates(self, patched_pricing_path):
+        from graph.llm_cost_tracker import (
+            CostTelemetryCallback, track_llm_cost, get_run_cost,
+        )
+
+        cb = CostTelemetryCallback()
+        with track_llm_cost(
+            agent_id="agent_a", run_id="run-x",
+            model_name_fallback="claude-haiku-4-5",
+        ):
+            cb.on_llm_end(_make_modern_response(input_tokens=1_000_000, output_tokens=0))
+        # 1M input × $1/M = $1.00
+        assert get_run_cost("run-x") == pytest.approx(1.0)
+
+    def test_multiple_frames_one_run_sum(self, patched_pricing_path):
+        from graph.llm_cost_tracker import (
+            CostTelemetryCallback, track_llm_cost, get_run_cost,
+        )
+
+        cb = CostTelemetryCallback()
+        with track_llm_cost(
+            agent_id="agent_a", run_id="run-x",
+            model_name_fallback="claude-haiku-4-5",
+        ):
+            cb.on_llm_end(_make_modern_response(input_tokens=500_000, output_tokens=0))
+        with track_llm_cost(
+            agent_id="agent_b", run_id="run-x",
+            model_name_fallback="claude-haiku-4-5",
+        ):
+            cb.on_llm_end(_make_modern_response(input_tokens=300_000, output_tokens=0))
+        # 800k × $1/M = $0.80
+        assert get_run_cost("run-x") == pytest.approx(0.80)
+
+    def test_separate_runs_isolated(self, patched_pricing_path):
+        from graph.llm_cost_tracker import (
+            CostTelemetryCallback, track_llm_cost, get_run_cost,
+        )
+
+        cb = CostTelemetryCallback()
+        with track_llm_cost(
+            agent_id="a", run_id="run-1",
+            model_name_fallback="claude-haiku-4-5",
+        ):
+            cb.on_llm_end(_make_modern_response(input_tokens=1_000_000, output_tokens=0))
+        with track_llm_cost(
+            agent_id="a", run_id="run-2",
+            model_name_fallback="claude-haiku-4-5",
+        ):
+            cb.on_llm_end(_make_modern_response(input_tokens=500_000, output_tokens=0))
+        assert get_run_cost("run-1") == pytest.approx(1.0)
+        assert get_run_cost("run-2") == pytest.approx(0.5)
+
+    def test_unknown_run_id_returns_zero(self):
+        from graph.llm_cost_tracker import get_run_cost
+        assert get_run_cost("never-seen") == 0.0
+
+
+class TestRunBudgetCeilingEnforcement:
+    def test_under_ceiling_does_not_raise(self, monkeypatch, patched_pricing_path):
+        """1M input tokens at $1/M = $1.00 < $5 ceiling → no raise."""
+        from graph.llm_cost_tracker import (
+            CostTelemetryCallback, track_llm_cost,
+        )
+
+        monkeypatch.setenv("ALPHA_ENGINE_RUN_BUDGET_USD", "5.00")
+        cb = CostTelemetryCallback()
+        with track_llm_cost(
+            agent_id="cheap_agent", run_id="run-x",
+            model_name_fallback="claude-haiku-4-5",
+        ):
+            cb.on_llm_end(_make_modern_response(input_tokens=1_000_000, output_tokens=0))
+        # Frame closed cleanly.
+
+    def test_over_ceiling_raises_run_budget_exceeded(
+        self, monkeypatch, patched_pricing_path,
+    ):
+        """10M input tokens × $1/M = $10 > $5 ceiling → raise."""
+        from graph.llm_cost_tracker import (
+            CostTelemetryCallback, RunBudgetExceededError, track_llm_cost,
+        )
+
+        monkeypatch.setenv("ALPHA_ENGINE_RUN_BUDGET_USD", "5.00")
+        cb = CostTelemetryCallback()
+        with pytest.raises(RunBudgetExceededError) as excinfo:
+            with track_llm_cost(
+                agent_id="runaway_agent", run_id="run-budget-test",
+                model_name_fallback="claude-haiku-4-5",
+            ):
+                cb.on_llm_end(_make_modern_response(input_tokens=10_000_000, output_tokens=0))
+        err = excinfo.value
+        assert err.run_id == "run-budget-test"
+        assert err.cumulative_cost_usd == pytest.approx(10.0)
+        assert err.ceiling_usd == 5.0
+
+    def test_ceiling_fires_after_cumulative_exceeds(
+        self, monkeypatch, patched_pricing_path,
+    ):
+        """Three frames each $0.50 < $1 ceiling individually; cumulative
+        $1.50 > $1 trips the ceiling on the 3rd frame's exit."""
+        from graph.llm_cost_tracker import (
+            CostTelemetryCallback, RunBudgetExceededError, track_llm_cost,
+        )
+
+        monkeypatch.setenv("ALPHA_ENGINE_RUN_BUDGET_USD", "1.00")
+        cb = CostTelemetryCallback()
+
+        # Frame 1: $0.50, ok.
+        with track_llm_cost(
+            agent_id="agent_a", run_id="run-x",
+            model_name_fallback="claude-haiku-4-5",
+        ):
+            cb.on_llm_end(_make_modern_response(input_tokens=500_000, output_tokens=0))
+        # Frame 2: another $0.50, total now $1.00, NOT > ceiling.
+        with track_llm_cost(
+            agent_id="agent_b", run_id="run-x",
+            model_name_fallback="claude-haiku-4-5",
+        ):
+            cb.on_llm_end(_make_modern_response(input_tokens=500_000, output_tokens=0))
+        # Frame 3: another $0.50 pushes total to $1.50, > $1.00 → raise.
+        with pytest.raises(RunBudgetExceededError):
+            with track_llm_cost(
+                agent_id="agent_c", run_id="run-x",
+                model_name_fallback="claude-haiku-4-5",
+            ):
+                cb.on_llm_end(_make_modern_response(input_tokens=500_000, output_tokens=0))
+
+    def test_ceiling_zero_disables_check(
+        self, monkeypatch, patched_pricing_path,
+    ):
+        """ALPHA_ENGINE_RUN_BUDGET_USD=0 turns off enforcement."""
+        from graph.llm_cost_tracker import (
+            CostTelemetryCallback, track_llm_cost,
+        )
+
+        monkeypatch.setenv("ALPHA_ENGINE_RUN_BUDGET_USD", "0")
+        cb = CostTelemetryCallback()
+        with track_llm_cost(
+            agent_id="big_spender", run_id="run-x",
+            model_name_fallback="claude-haiku-4-5",
+        ):
+            # 1B tokens — astronomical cost; but ceiling=0 disables.
+            cb.on_llm_end(_make_modern_response(input_tokens=1_000_000_000, output_tokens=0))
+        # No raise.
+
+    def test_no_run_id_skips_ceiling(self, monkeypatch, patched_pricing_path):
+        """Frames without run_id can't accumulate per-run cost; ceiling
+        check is skipped (the diagnostic cost-on-frame is still computed
+        and stashed)."""
+        from graph.llm_cost_tracker import (
+            CostTelemetryCallback, track_llm_cost,
+        )
+
+        monkeypatch.setenv("ALPHA_ENGINE_RUN_BUDGET_USD", "0.01")  # tiny
+        cb = CostTelemetryCallback()
+        # No run_id, no per-run accumulation, no ceiling check.
+        with track_llm_cost(
+            agent_id="anonymous", model_name_fallback="claude-haiku-4-5",
+        ):
+            cb.on_llm_end(_make_modern_response(input_tokens=10_000_000, output_tokens=0))
+        # No raise even though frame cost ($10) >> ceiling ($0.01).
+
+    def test_jsonl_flushes_before_ceiling_raise(
+        self, monkeypatch, patched_pricing_path,
+    ):
+        """When the ceiling fires, the JSONL flush must complete first
+        so operators can diagnose the offending calls on S3."""
+        import boto3
+        from moto import mock_aws
+        from graph.llm_cost_tracker import (
+            CostTelemetryCallback, RunBudgetExceededError, track_llm_cost,
+        )
+
+        monkeypatch.setenv("ALPHA_ENGINE_RUN_BUDGET_USD", "1.00")
+        monkeypatch.setenv("ALPHA_ENGINE_DECISION_CAPTURE_ENABLED", "true")
+        with mock_aws():
+            s3 = boto3.client("s3", region_name="us-east-1")
+            s3.create_bucket(Bucket="alpha-engine-research")
+
+            cb = CostTelemetryCallback()
+            with pytest.raises(RunBudgetExceededError):
+                with track_llm_cost(
+                    agent_id="big_agent", run_id="run-fail",
+                    model_name_fallback="claude-haiku-4-5",
+                ):
+                    cb.on_llm_end(_make_modern_response(input_tokens=10_000_000, output_tokens=0))
+
+            # Verify the JSONL landed on S3 BEFORE the raise.
+            listing = s3.list_objects_v2(
+                Bucket="alpha-engine-research",
+                Prefix="decision_artifacts/_cost_raw/",
+            )
+            assert "Contents" in listing
+            keys = [o["Key"] for o in listing["Contents"]]
+            assert any("/run-fail/big_agent.jsonl" in k for k in keys)
+
+
+class TestRunBudgetExceededErrorMessage:
+    def test_includes_diagnostic_fields(self):
+        from graph.llm_cost_tracker import RunBudgetExceededError
+        err = RunBudgetExceededError(
+            run_id="abc-123", cumulative_cost_usd=125.50, ceiling_usd=100.00,
+        )
+        msg = str(err)
+        assert "abc-123" in msg
+        assert "$125.50" in msg
+        assert "$100.00" in msg
+        assert "ALPHA_ENGINE_RUN_BUDGET_USD" in msg
