@@ -11,6 +11,7 @@ No LLM, no agents. Execution time: ~15 seconds. Lambda memory: 256 MB.
 from __future__ import annotations
 
 import datetime
+import logging
 import os
 import sys
 import tempfile
@@ -29,10 +30,19 @@ load_secrets()
 
 # Structured logging + flow-doctor singleton from alpha-engine-lib.
 # See lambda/handler.py for the full rationale. flow-doctor.yaml ships
-# in the Lambda task root (Dockerfile.alerts COPY).
+# in the Lambda task root (Dockerfile.alerts COPY). exclude_patterns
+# starts empty by deliberate convention — add patterns only after
+# observing real ERROR-level noise from this Lambda.
 from alpha_engine_lib.logging import setup_logging
+_FLOW_DOCTOR_EXCLUDE_PATTERNS: list[str] = []
 _FLOW_DOCTOR_YAML = os.path.join(os.environ.get("LAMBDA_TASK_ROOT", os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "flow-doctor.yaml")
-setup_logging("research-alerts", flow_doctor_yaml=_FLOW_DOCTOR_YAML)
+setup_logging(
+    "research-alerts",
+    flow_doctor_yaml=_FLOW_DOCTOR_YAML,
+    exclude_patterns=_FLOW_DOCTOR_EXCLUDE_PATTERNS,
+)
+
+logger = logging.getLogger(__name__)
 
 from config import (
     PRICE_MOVE_THRESHOLD_PCT,
@@ -93,7 +103,9 @@ def _get_prior_closes(db_path: str) -> dict[str, float]:
             if price:
                 closes[symbol] = float(price)
     except Exception as e:
-        print(f"Error reading prior closes: {e}")
+        # WARNING because the function returns an empty dict and the
+        # caller continues with degraded coverage — not a hard failure.
+        logger.warning("Error reading prior closes: %s", e)
     return closes
 
 
@@ -143,7 +155,9 @@ def _get_current_prices(tickers: list[str]) -> dict[str, float]:
                     pass
         return prices
     except Exception as e:
-        print(f"Price fetch error: {e}")
+        # WARNING — caller continues with empty dict (no alerts fire
+        # for this 30-min window), not a hard failure for the Lambda.
+        logger.warning("Price fetch error: %s", e)
         return {}
 
 
@@ -180,9 +194,14 @@ def _send_alert_email(alerts: list[dict], prior_closes: dict, ratings: dict) -> 
                 "Body": {"Text": {"Data": body}},
             },
         )
-        print(f"Alert sent for: {[a['ticker'] for a in alerts]}")
+        logger.info("Alert sent for: %s", [a["ticker"] for a in alerts])
     except ClientError as e:
-        print(f"SES alert error: {e.response['Error']['Message']}")
+        # ERROR — alert delivery failed; flow-doctor should escalate
+        # because the operator needs to know the 30-min alert pipeline
+        # is dropping price-move signals.
+        logger.error(
+            "SES alert error: %s", e.response["Error"]["Message"]
+        )
 
 
 def handler(event, context):

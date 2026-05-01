@@ -50,9 +50,18 @@ _install_ls_patch()
 # log.error() call routes through flow-doctor's dispatch (email +
 # optional GitHub issue) without explicit fd.report() plumbing.
 # flow-doctor.yaml ships in the Lambda task root (Dockerfile COPY).
-from alpha_engine_lib.logging import setup_logging, get_flow_doctor
+# exclude_patterns starts empty by deliberate convention: add patterns
+# only after observing real ERROR-level noise from the Saturday SF — the
+# canonical lib pattern (mirrors executor/main.py:65-67) forces every
+# entrypoint to think about it explicitly rather than inherit defaults.
+from alpha_engine_lib.logging import setup_logging
+_FLOW_DOCTOR_EXCLUDE_PATTERNS: list[str] = []
 _FLOW_DOCTOR_YAML = os.path.join(os.environ.get("LAMBDA_TASK_ROOT", os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "flow-doctor.yaml")
-setup_logging("research", flow_doctor_yaml=_FLOW_DOCTOR_YAML)
+setup_logging(
+    "research",
+    flow_doctor_yaml=_FLOW_DOCTOR_YAML,
+    exclude_patterns=_FLOW_DOCTOR_EXCLUDE_PATTERNS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -192,9 +201,9 @@ def handler(event, context):
     # unless it's a rare Monday holiday like MLK Day or Presidents' Day)
     if not force and not is_trading_day(today):
         if weekly:
-            print(f"Monday holiday on {today} — running anyway (weekly population refresh).")
+            logger.info("Monday holiday on %s — running anyway (weekly population refresh).", today)
         else:
-            print(f"Market holiday on {today} — skipping run.")
+            logger.info("Market holiday on %s — skipping run.", today)
             return {"status": "SKIPPED", "reason": "market_holiday", "date": str(today)}
 
     # Preflight runs AFTER the skip gates — no point paying head_bucket +
@@ -233,17 +242,19 @@ def handler(event, context):
             s3 = boto3.client("s3")
             s3.head_object(Bucket=os.environ.get("RESEARCH_BUCKET", "alpha-engine-research"),
                            Key=f"signals/{run_date}/signals.json")
-            print(f"Signals already exist for {run_date} — skipping (use force=True to override)")
+            logger.info("Signals already exist for %s — skipping (use force=True to override)", run_date)
             return {"status": "SKIPPED", "reason": "already_run", "date": run_date}
         except ClientError as e:
             if e.response["Error"]["Code"] != "404":
-                print(f"WARNING: S3 idempotency check failed: {e} — proceeding with run")
+                logger.warning("S3 idempotency check failed: %s — proceeding with run", e)
         except Exception as e:
-            print(f"WARNING: S3 idempotency check failed: {e} — proceeding with run")
+            logger.warning("S3 idempotency check failed: %s — proceeding with run", e)
 
     run_type = "weekly population refresh" if weekly else "weekday"
-    print(f"Starting alpha-engine-research run for {run_date} ({run_type})"
-          + (" [early close]" if early_close else ""))
+    logger.info(
+        "Starting alpha-engine-research run for %s (%s)%s",
+        run_date, run_type, " [early close]" if early_close else "",
+    )
 
     _health_start = time.time()
 
@@ -263,7 +274,10 @@ def handler(event, context):
             _missing.append("FRED_API_KEY")
         if _missing:
             msg = f"Missing required env vars: {', '.join(_missing)}"
-            print(f"FATAL: {msg}")
+            # ERROR — pipeline can't proceed; flow-doctor should escalate
+            # so the operator notices the missing-secret class fast
+            # (vs surfacing only via Step Function failure email).
+            logger.error("FATAL: %s", msg)
             return {"statusCode": 500, "body": msg}
 
         archive = ArchiveManager()
@@ -281,19 +295,15 @@ def handler(event, context):
             is_early_close=early_close,
         )
         initial_state["performance_summary"] = perf_summary
-        # Carry the shared flow-doctor instance on state so downstream
-        # graph nodes can call fd.report() explicitly when needed. None
-        # when FLOW_DOCTOR_ENABLED=0 (local dev / --dry-run).
-        initial_state["flow_doctor"] = get_flow_doctor()
 
         # Extract episodic memories from newly completed signal outcomes
         try:
             from memory.episodic import extract_memories
             n_memories = extract_memories(archive.db_conn)
             if n_memories:
-                print(f"Extracted {n_memories} new episodic memories from outcomes")
+                logger.info("Extracted %d new episodic memories from outcomes", n_memories)
         except Exception as _me:
-            print(f"WARNING: memory extraction skipped: {_me}")
+            logger.warning("memory extraction skipped: %s", _me)
 
         # ── Auto-gate: stub-LLM dry-run before real pass ─────────────
         # Catches bugs below the LLM layer (graph orchestration, schema
@@ -303,7 +313,7 @@ def handler(event, context):
         # (which is itself the stub-only mode, no real pass to gate).
         if not skip_dry_run_gate and not dry_run_llm:
             from dry_run import install_dry_run_stubs
-            print("Stub-LLM dry-run gate: starting...")
+            logger.info("Stub-LLM dry-run gate: starting...")
             _restore = install_dry_run_stubs(archive)
             try:
                 _stub_graph = build_graph()
@@ -313,14 +323,18 @@ def handler(event, context):
                     is_early_close=early_close,
                 )
                 _stub_state["performance_summary"] = perf_summary
-                _stub_state["flow_doctor"] = get_flow_doctor()
                 _stub_graph.invoke(_stub_state)
-                print("Stub-LLM dry-run gate: OK (proceeding to real pass)")
+                logger.info("Stub-LLM dry-run gate: OK (proceeding to real pass)")
             except Exception as _se:
-                import traceback as _tb
-                _stub_tb = _tb.format_exc()
-                print(f"Stub-LLM dry-run gate: FAILED — halting before real LLM calls")
-                print(f"Stub-pass error: {_se}\n{_stub_tb}")
+                # ERROR — the stub-pass is the cheap-tokens gate that
+                # catches sub-LLM-layer bugs before we burn Anthropic
+                # budget on the real pass. flow-doctor must escalate.
+                logger.error(
+                    "Stub-LLM dry-run gate: FAILED — halting before real LLM calls. "
+                    "Stub-pass error: %s",
+                    _se,
+                    exc_info=True,
+                )
                 return {
                     "status": "ERROR",
                     "phase": "stub_pass",
@@ -344,7 +358,6 @@ def handler(event, context):
                 is_early_close=early_close,
             )
             initial_state["performance_summary"] = perf_summary
-            initial_state["flow_doctor"] = get_flow_doctor()
 
         if dry_run_llm:
             # Exclusive stub-only mode — no real LLM calls. Caller asked
@@ -360,7 +373,7 @@ def handler(event, context):
             # either way; this guard is specifically for the direct-bound
             # archive_writer/email_sender pair.)
             from dry_run import install_dry_run_stubs
-            print("dry_run_llm=True: stub-only mode (no real LLM calls)")
+            logger.info("dry_run_llm=True: stub-only mode (no real LLM calls)")
             _restore = install_dry_run_stubs(archive)
             try:
                 graph = build_graph()
@@ -370,7 +383,6 @@ def handler(event, context):
                     is_early_close=early_close,
                 )
                 initial_state["performance_summary"] = perf_summary
-                initial_state["flow_doctor"] = get_flow_doctor()
                 final_state = graph.invoke(initial_state)
             finally:
                 _restore()
@@ -390,7 +402,7 @@ def handler(event, context):
                     "Trajectory validation failed: %s", _trajectory_result["failures"]
                 )
         except Exception as _te:
-            print(f"WARNING: trajectory validation skipped: {_te}")
+            logger.warning("trajectory validation skipped: %s", _te)
 
         archive.close()
 
@@ -412,7 +424,7 @@ def handler(event, context):
                 },
             )
         except Exception as he:
-            print(f"WARNING: health status write failed: {he}")
+            logger.warning("health status write failed: %s", he)
 
         # Write data manifest
         try:
@@ -432,9 +444,9 @@ def handler(event, context):
                 },
             )
         except Exception as _me:
-            print(f"WARNING: data manifest write failed: {_me}")
+            logger.warning("data manifest write failed: %s", _me)
 
-        print(f"Run complete. Email sent: {final_state.get('email_sent', False)}")
+        logger.info("Run complete. Email sent: %s", final_state.get("email_sent", False))
         return {
             "status": "OK",
             "date": run_date,
@@ -445,9 +457,10 @@ def handler(event, context):
         }
 
     except Exception as e:
-        import traceback
-        tb = traceback.format_exc()
-        print(f"Pipeline error: {e}\n{tb}")
+        # ERROR — top-level pipeline crash; flow-doctor must escalate
+        # so the operator gets paged before the next Step Function tick
+        # (vs only finding out via the SF failure email).
+        logger.error("Pipeline error: %s", e, exc_info=True)
 
         # Write health status on failure
         try:
@@ -461,6 +474,6 @@ def handler(event, context):
                 error=str(e),
             )
         except Exception as he:
-            print(f"WARNING: health status write failed: {he}")
+            logger.warning("health status write failed: %s", he)
 
         return {"status": "ERROR", "date": run_date, "error": str(e)}
