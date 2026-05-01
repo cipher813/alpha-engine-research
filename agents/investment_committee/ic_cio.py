@@ -115,10 +115,13 @@ def run_cio(
             "entry_theses": {},
         }
 
+    from graph.llm_cost_tracker import get_cost_telemetry_callback
+
     llm = ChatAnthropic(
         model=STRATEGIC_MODEL,
         anthropic_api_key=api_key or ANTHROPIC_API_KEY,
         max_tokens=MAX_TOKENS_STRATEGIC,
+        callbacks=[get_cost_telemetry_callback()],
     )
 
     prompt = _build_cio_prompt(

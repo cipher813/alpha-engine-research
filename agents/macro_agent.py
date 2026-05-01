@@ -119,10 +119,15 @@ def run_macro_agent(
       market_regime: str
       sector_modifiers: dict[str, float]
     """
+    # Defer-import the cost-telemetry callback so this module's import
+    # path stays leaf-side of graph/* (research_graph imports macro_agent).
+    from graph.llm_cost_tracker import get_cost_telemetry_callback
+
     llm = ChatAnthropic(
         model=STRATEGIC_MODEL,
         anthropic_api_key=api_key or ANTHROPIC_API_KEY,
         max_tokens=MAX_TOKENS_STRATEGIC,
+        callbacks=[get_cost_telemetry_callback()],
     )
 
     prior_text = _truncate_prior(prior_report) if prior_report else "NONE — initial report"
@@ -342,10 +347,13 @@ def run_macro_critic(
 
     Returns: {"action": "accept"|"revise", "critique": str, "suggested_regime": str|None}
     """
+    from graph.llm_cost_tracker import get_cost_telemetry_callback
+
     llm = ChatAnthropic(
         model=STRATEGIC_MODEL,
         anthropic_api_key=api_key or ANTHROPIC_API_KEY,
         max_tokens=512,
+        callbacks=[get_cost_telemetry_callback()],
     )
     macro_json = initial_result.get("macro_json", {})
     breadth = macro_data.get("breadth")
