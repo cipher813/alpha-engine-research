@@ -625,12 +625,14 @@ def sector_team_node(state: ResearchState) -> dict:
     # Cost-telemetry scope spans the whole sector team's LLM activity:
     # quant ReAct + qual ReAct + peer_review (×2) + thesis updates. The
     # CostTelemetryCallback attached to each ChatAnthropic instance
-    # accumulates token usage into this single frame.
+    # accumulates token usage into this single frame; per-call rows are
+    # flushed to a JSONL at scope exit (PR 3 cost-raw stream).
     with track_llm_cost(
         agent_id=f"sector_team:{team_id}",
         sector_team_id=team_id,
         node_name="sector_team_node",
         run_type="weekly_research",
+        run_id=derive_run_id(state),
     ):
         result = run_sector_team(team_id, ctx)
 
@@ -683,6 +685,7 @@ def macro_economist_node(state: ResearchState) -> dict:
         agent_id="macro_economist",
         node_name="macro_economist_node",
         run_type="weekly_research",
+        run_id=derive_run_id(state),
     ):
         result = run_macro_agent_with_reflection(
             prior_report=prior_report,
@@ -964,6 +967,7 @@ def cio_node(state: ResearchState) -> dict:
         agent_id="ic_cio",
         node_name="cio_node",
         run_type="weekly_research",
+        run_id=derive_run_id(state),
     ):
         cio_result = run_cio(
             candidates=candidates,

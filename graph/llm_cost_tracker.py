@@ -1,6 +1,6 @@
 """
 LLM cost telemetry tracker — wires Anthropic SDK token counts into the
-``DecisionArtifact`` capture stream.
+``DecisionArtifact`` capture stream and emits a per-call JSONL cost stream.
 
 This is the consumer side of the per-run LLM cost telemetry workstream
 (ROADMAP P1). The price-table primitive lives in ``alpha_engine_lib.cost``
@@ -10,6 +10,21 @@ This module is the glue: a LangChain callback handler that pulls
 ``cache_creation_input_tokens`` from every ``ChatAnthropic`` response, plus
 a context manager that scopes the accumulation to one logical agent
 decision (one node — sector_team, macro_economist, or ic_cio).
+
+**Two output streams** (PR 2 + PR 3):
+
+1. **Aggregate per-node** — populated ``ModelMetadata`` (sum across all
+   LLM calls in the scope) is stashed for ``_capture_if_enabled`` to
+   embed in the existing ``DecisionArtifact`` at
+   ``s3://alpha-engine-research/decision_artifacts/{Y}/{M}/{D}/{agent_id}/{run_id}.json``.
+2. **Per-call JSONL stream (PR 3)** — every Anthropic API call gets one
+   line in a JSONL flushed at scope exit to
+   ``s3://alpha-engine-research/decision_artifacts/_cost_raw/{YYYY-MM-DD}/{run_id}/{agent_id}.jsonl``.
+   PR 3's daily aggregator (``scripts/aggregate_costs.py``) reads these
+   into a single ``_cost/{date}/cost.parquet`` for analytics.
+
+Both streams gated on ``ALPHA_ENGINE_DECISION_CAPTURE_ENABLED`` — same
+flag governs both since they're complementary views of the same data.
 
 Why aggregate per-node rather than per-call:
 
@@ -65,16 +80,23 @@ Workstream design: ``alpha-engine-docs/private/ROADMAP.md`` line ~1708.
 from __future__ import annotations
 
 import contextvars
+import json
 import logging
+import os
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator, Literal, Optional
 
+import boto3
+from botocore.exceptions import BotoCoreError, ClientError
+
 from alpha_engine_lib.cost import (
+    PriceCardLookupError,
     PriceTable,
     PriceTableLoadError,
+    compute_cost,
     load_pricing,
     recompute_cost,
 )
@@ -88,6 +110,45 @@ from agents.prompt_loader import LoadedPrompt
 from config import _find_config
 
 logger = logging.getLogger(__name__)
+
+
+# ── Per-call JSONL sink (PR 3) ────────────────────────────────────────────
+
+
+_COST_RAW_BUCKET = "alpha-engine-research"
+_COST_RAW_PREFIX = "decision_artifacts/_cost_raw"
+_PER_CALL_SCHEMA_VERSION = 1
+_DECISION_CAPTURE_ENV_VAR = "ALPHA_ENGINE_DECISION_CAPTURE_ENABLED"
+
+
+class CostRawWriteError(RuntimeError):
+    """Raised when the S3 write of the per-call JSONL sink fails.
+
+    Per ``feedback_no_silent_fails``, the cost stream does not swallow
+    S3 errors — every captured artifact must land or the run hard-fails.
+    Mirror of ``DecisionCaptureWriteError`` for the cost-raw stream.
+    """
+
+
+def _is_capture_enabled() -> bool:
+    """Same flag as decision_capture's gate; the two streams co-fire."""
+    return os.environ.get(_DECISION_CAPTURE_ENV_VAR, "").lower() in (
+        "true", "1", "yes",
+    )
+
+
+def _build_cost_raw_s3_key(*, capture_dt: datetime, run_id: str, agent_id: str) -> str:
+    """Compute the JSONL S3 key for a frame's flushed cost stream.
+
+    Format: ``decision_artifacts/_cost_raw/{YYYY-MM-DD}/{run_id}/{agent_id}.jsonl``
+
+    Date-partitioned by capture date (UTC) to match the
+    ``decision_artifacts/{Y}/{M}/{D}/...`` partition scheme. ``run_id``
+    is the leaf-prior so all artifacts from one pipeline run can be
+    discovered by listing the directory; the aggregator scans by date.
+    """
+    date_str = capture_dt.strftime("%Y-%m-%d")
+    return f"{_COST_RAW_PREFIX}/{date_str}/{run_id}/{agent_id}.jsonl"
 
 
 # ── Pricing table loader (cached at module level) ────────────────────────
@@ -146,10 +207,12 @@ class _Frame:
     """One agent decision's accumulating LLM-cost surface.
 
     Multiple LLM calls fire within a single ``track_llm_cost`` scope
-    (especially for ReAct loops); this frame sums their token counts.
-    The model_name is captured from the FIRST call's response and
-    locked — mixed-model frames (e.g. agent retries on a different
-    model) would corrupt cost recompute, so we surface that explicitly.
+    (especially for ReAct loops); this frame sums their token counts
+    AND keeps a per-call buffer (``per_call_rows``) for the JSONL sink
+    flushed at scope exit. The model_name is captured from the FIRST
+    call's response and locked — mixed-model frames (e.g. agent retries
+    on a different model) would corrupt cost recompute, so we surface
+    that explicitly.
     """
 
     agent_id: str
@@ -157,6 +220,7 @@ class _Frame:
     node_name: Optional[str]
     run_type: Optional[RunType]
     prompt: Optional[LoadedPrompt]
+    run_id: Optional[str] = None
 
     model_name: Optional[str] = None
     input_tokens: int = 0
@@ -165,6 +229,9 @@ class _Frame:
     cache_create_tokens: int = 0
     call_count: int = 0
     enter_time: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    # Per-call rows buffered in memory for the JSONL sink. One dict per
+    # Anthropic API call; flushed in JSONL form at scope exit.
+    per_call_rows: list[dict] = field(default_factory=list)
 
 
 # Stack of frames — supports nested ``track_llm_cost`` (rare, but legal).
@@ -235,8 +302,25 @@ class CostTelemetryCallback(BaseCallbackHandler):
         # the configured model on the response message in every shape,
         # so we pull from the AIMessage's ``response_metadata.model_name``
         # if available, else from llm_output's ``model``.
+        call_model = self._extract_model_name(response)
         if frame.model_name is None:
-            frame.model_name = self._extract_model_name(response)
+            frame.model_name = call_model
+
+        # PR 3: per-call row for the JSONL sink. cost_usd is left at
+        # None here — populated at flush time when the price table is
+        # loaded once for all rows. Persisting tokens immutable +
+        # cost-derived-at-flush matches the workstream's "tokens are
+        # immutable, dollars are derived" rule.
+        frame.per_call_rows.append({
+            "schema_version": _PER_CALL_SCHEMA_VERSION,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "call_seq": frame.call_count,
+            "model_name": call_model or frame.model_name,
+            "input_tokens": usage["input_tokens"],
+            "output_tokens": usage["output_tokens"],
+            "cache_read_tokens": usage["cache_read_tokens"],
+            "cache_create_tokens": usage["cache_create_tokens"],
+        })
 
     @staticmethod
     def _extract_usage(response: Any) -> dict[str, int]:
@@ -314,6 +398,120 @@ class CostTelemetryCallback(BaseCallbackHandler):
 _callback_singleton: Optional[CostTelemetryCallback] = None
 
 
+# ── Per-call JSONL flush ──────────────────────────────────────────────────
+
+
+def _enrich_row_with_frame_dimensions(
+    row: dict, frame: _Frame, *, table: Optional[PriceTable],
+) -> dict:
+    """Stamp frame-level dimensions onto a per-call row + compute cost_usd.
+
+    Frame-level fields (run_id, agent_id, sector_team_id, node_name,
+    run_type, prompt_*) are constant within a frame so they live on the
+    frame, not on each row. We copy them onto each row at flush time so
+    the JSONL stream is self-describing (the aggregator doesn't need
+    out-of-band frame metadata to interpret a row).
+
+    Cost is derived from token counts × the active price card at row
+    timestamp. Hard-fails on lookup error per ``feedback_no_silent_fails``
+    only when the price table is loadable; if pricing yaml is missing or
+    malformed (caught at frame exit), we set cost_usd=None and the
+    aggregator can re-derive later.
+    """
+    enriched = dict(row)
+    enriched["run_id"] = frame.run_id
+    enriched["agent_id"] = frame.agent_id
+    enriched["sector_team_id"] = frame.sector_team_id
+    enriched["node_name"] = frame.node_name
+    enriched["run_type"] = frame.run_type
+    enriched["prompt_id"] = frame.prompt.name if frame.prompt else None
+    enriched["prompt_version"] = frame.prompt.version if frame.prompt else None
+    enriched["prompt_version_hash"] = frame.prompt.hash if frame.prompt else None
+
+    cost: Optional[float] = None
+    model_name = enriched.get("model_name")
+    if table is not None and model_name and model_name != "unknown":
+        try:
+            row_dt = datetime.fromisoformat(enriched["timestamp"].replace("Z", "+00:00")) \
+                if isinstance(enriched.get("timestamp"), str) else frame.enter_time
+            card = table.get(model_name, row_dt)
+            cost = compute_cost(
+                input_tokens=enriched["input_tokens"],
+                output_tokens=enriched["output_tokens"],
+                cache_read_tokens=enriched["cache_read_tokens"],
+                cache_create_tokens=enriched["cache_create_tokens"],
+                card=card,
+            )
+        except PriceCardLookupError as exc:
+            # Unknown model in the price table — log and leave cost None.
+            # This is not a hard-fail because the JSONL is best-effort
+            # for analytics; the aggregator can re-derive later if the
+            # price table is updated.
+            logger.warning(
+                "[cost_tracker] no price card for model=%s at %s — "
+                "row cost_usd left None (token counts preserved): %s",
+                model_name, enriched.get("timestamp"), exc,
+            )
+    enriched["cost_usd"] = cost
+    return enriched
+
+
+def _flush_cost_rows_to_s3(
+    *,
+    frame: _Frame,
+    table: Optional[PriceTable],
+    s3_client: Any | None = None,
+) -> Optional[str]:
+    """Serialize ``frame.per_call_rows`` to JSONL + write to S3.
+
+    Returns the S3 key written, or None if the buffer is empty (frames
+    that opened but had no LLM calls don't emit a JSONL — keeps the
+    prefix clean of empty objects).
+
+    Raises :exc:`CostRawWriteError` on any S3 failure per
+    ``feedback_no_silent_fails``. Mirrors the hard-fail posture of
+    ``capture_decision``.
+    """
+    if not frame.per_call_rows:
+        return None
+    if not frame.run_id:
+        # Without run_id we can't compute the S3 key. Log + skip — the
+        # frame's metadata stash still works for the in-process
+        # ``_capture_if_enabled`` consumer; only the JSONL is dropped.
+        logger.warning(
+            "[cost_tracker] frame for agent_id=%s closed with no run_id — "
+            "JSONL flush skipped. Pass run_id= to track_llm_cost to enable.",
+            frame.agent_id,
+        )
+        return None
+
+    enriched_rows = [
+        _enrich_row_with_frame_dimensions(row, frame, table=table)
+        for row in frame.per_call_rows
+    ]
+    body = "\n".join(json.dumps(row, default=str) for row in enriched_rows).encode("utf-8")
+
+    s3_key = _build_cost_raw_s3_key(
+        capture_dt=frame.enter_time,
+        run_id=frame.run_id,
+        agent_id=frame.agent_id,
+    )
+    client = s3_client if s3_client is not None else boto3.client("s3")
+    try:
+        client.put_object(
+            Bucket=_COST_RAW_BUCKET,
+            Key=s3_key,
+            Body=body,
+            ContentType="application/x-ndjson",
+        )
+    except (BotoCoreError, ClientError) as exc:
+        raise CostRawWriteError(
+            f"Failed to write cost-raw JSONL to "
+            f"s3://{_COST_RAW_BUCKET}/{s3_key}: {exc}"
+        ) from exc
+    return s3_key
+
+
 def get_cost_telemetry_callback() -> CostTelemetryCallback:
     """Return the process-singleton callback handler.
 
@@ -339,6 +537,7 @@ def track_llm_cost(
     run_type: Optional[RunType] = "weekly_research",
     prompt: Optional[LoadedPrompt] = None,
     model_name_fallback: Optional[str] = None,
+    run_id: Optional[str] = None,
 ) -> Iterator[_Frame]:
     """Scope LLM token accumulation to one agent decision.
 
@@ -371,6 +570,12 @@ def track_llm_cost(
         If the callback can't extract model_name from the response shape,
         use this. Should match what was passed to ``ChatAnthropic(model=...)``.
         Required for ``recompute_cost`` to look up the right card.
+    run_id
+        Pipeline-invocation identifier (typically ``state["run_date"]`` or
+        Lambda's ``aws_request_id``). Stamped onto per-call JSONL rows
+        and used as the partition key in the S3 path. Without it, the
+        per-call JSONL flush is skipped (in-process metadata stash for
+        ``_capture_if_enabled`` still works).
 
     Yields
     ------
@@ -392,6 +597,7 @@ def track_llm_cost(
         node_name=node_name,
         run_type=run_type,
         prompt=prompt,
+        run_id=run_id,
     )
     stack = _frame_stack.get()
     new_stack = stack + [frame]
@@ -440,14 +646,17 @@ def track_llm_cost(
     )
 
     # Compute cost if we have a real model and the price table is loadable.
+    # The same loaded table is reused for the JSONL flush below — one load
+    # covers the aggregate ModelMetadata + every per-call row.
+    table_for_flush: Optional[PriceTable] = None
     if model_name != "unknown":
         try:
-            table = _load_price_table()
-            recompute_cost(metadata, table, at=frame.enter_time)
+            table_for_flush = _load_price_table()
+            recompute_cost(metadata, table_for_flush, at=frame.enter_time)
         except (PriceTableLoadError, FileNotFoundError) as exc:
             # Pricing yaml absent or malformed — record tokens, leave
             # cost_usd at 0, log loudly. Cost recompute is a downstream
-            # concern and PR 3's aggregator can re-derive from tokens.
+            # concern and the aggregator can re-derive from tokens.
             logger.warning(
                 "[cost_tracker] price-table load failed for agent_id=%s: %s "
                 "(token counts captured; cost_usd left at 0)",
@@ -470,6 +679,36 @@ def track_llm_cost(
     completed = dict(_completed_metadata.get())
     completed[agent_id] = (metadata, prompt_context)
     _completed_metadata.set(completed)
+
+    # PR 3: flush the per-call buffer to S3 as JSONL — gated on the
+    # same ALPHA_ENGINE_DECISION_CAPTURE_ENABLED flag as the existing
+    # decision-artifact capture. Hard-fail on S3 error per
+    # feedback_no_silent_fails, mirroring DecisionCaptureWriteError.
+    if _is_capture_enabled():
+        try:
+            written_key = _flush_cost_rows_to_s3(
+                frame=frame, table=table_for_flush,
+            )
+            if written_key:
+                logger.debug(
+                    "[cost_tracker] flushed %d per-call rows for agent_id=%s "
+                    "to s3://%s/%s",
+                    len(frame.per_call_rows), agent_id,
+                    _COST_RAW_BUCKET, written_key,
+                )
+        except CostRawWriteError:
+            # Hard-fail per design — flush failures must be loud so the
+            # cost stream doesn't silently rot. Operators see the SF step
+            # fail and investigate (typically IAM or bucket-existence).
+            logger.error(
+                "[cost_tracker] cost-raw JSONL write failed for "
+                "agent_id=%s run_id=%s — raising to fail the run loud "
+                "(per feedback_no_silent_fails). Disable via "
+                "ALPHA_ENGINE_DECISION_CAPTURE_ENABLED=false if S3/IAM is "
+                "broken and you need to recover the run.",
+                agent_id, frame.run_id,
+            )
+            raise
 
     logger.debug(
         "[cost_tracker] frame closed: agent_id=%s model=%s tokens=%d/%d/%d/%d "
