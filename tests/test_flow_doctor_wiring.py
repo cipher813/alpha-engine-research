@@ -204,6 +204,73 @@ class TestEntrypointModuleTopWiring:
         assert "exclude_patterns=" in text[setup_idx:handler_def_idx]
 
 
+class TestNoBarePrintsInHandlers:
+    """Lock in the migration of bare ``print()`` calls to ``logger``.
+
+    Audit 2026-05-01 found 21 prints in handler.py + 4 in
+    alerts_handler.py — all bypassed setup_logging and never reached
+    flow-doctor's ERROR escalation. Each was migrated to the
+    appropriate logger.{info,warning,error}() call. Re-introductions
+    silently re-open the bypass class, so this regression check fails
+    the suite if a `print(` reappears outside comments/docstrings.
+    """
+
+    @staticmethod
+    def _strip_comments_and_docstrings(text: str) -> str:
+        import re
+        # Remove triple-quoted blocks (docstrings + multi-line strings).
+        stripped = re.sub(r'"""[\s\S]*?"""', "", text)
+        # Remove full-line comments.
+        stripped = re.sub(r"^\s*#.*$", "", stripped, flags=re.MULTILINE)
+        return stripped
+
+    def test_handler_has_no_bare_print(self):
+        text = (REPO_ROOT / "lambda" / "handler.py").read_text()
+        stripped = self._strip_comments_and_docstrings(text)
+        assert "print(" not in stripped, (
+            "bare print() found in lambda/handler.py — convert to "
+            "logger.info/warning/error so the record propagates through "
+            "flow-doctor's root handler"
+        )
+
+    def test_alerts_handler_has_no_bare_print(self):
+        text = (REPO_ROOT / "lambda" / "alerts_handler.py").read_text()
+        stripped = self._strip_comments_and_docstrings(text)
+        assert "print(" not in stripped, (
+            "bare print() found in lambda/alerts_handler.py — convert to "
+            "logger.info/warning/error"
+        )
+
+
+class TestAlertsHandlerHasLogger:
+    """alerts_handler.py defines its own logger.
+
+    Without this, the print()-to-logger migration above would silently
+    NameError at runtime. Catches the case where a future refactor
+    drops the ``logger = logging.getLogger(__name__)`` declaration.
+    """
+
+    def test_alerts_handler_defines_logger(self):
+        text = (REPO_ROOT / "lambda" / "alerts_handler.py").read_text()
+        assert "logger = logging.getLogger(__name__)" in text
+
+
+class TestDockerfileAlertsCopiesSsmSecrets:
+    """Dockerfile.alerts must COPY ssm_secrets.py.
+
+    alerts_handler.py imports ssm_secrets at module-top; without the
+    COPY, cold-start crashes with ModuleNotFoundError. Caught by the
+    docker smoke for the PR 2 fixup arc 2026-05-01.
+    """
+
+    def test_dockerfile_alerts_copies_ssm_secrets(self):
+        dockerfile = (REPO_ROOT / "Dockerfile.alerts").read_text()
+        assert "COPY ssm_secrets.py" in dockerfile, (
+            "Dockerfile.alerts must COPY ssm_secrets.py — alerts_handler "
+            "imports it at module-top and the Lambda would crash without it"
+        )
+
+
 class TestNoDeadFlowDoctorPlumbing:
     """Lock in the deletion of the dead ``state["flow_doctor"]`` injections.
 
