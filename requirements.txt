@@ -29,7 +29,7 @@ pydantic~=2.7
 #   CI: .github/workflows/ci.yml configures a git URL insteadOf rewrite.
 #   Lambda: Dockerfile installs from vendor/alpha-engine-lib staged by
 #           infrastructure/deploy.sh (sibling checkout in CI, local dev on laptop).
-alpha-engine-lib[arcticdb,flow_doctor] @ git+https://github.com/cipher813/alpha-engine-lib@v0.2.3
+alpha-engine-lib[arcticdb,flow_doctor] @ git+https://github.com/cipher813/alpha-engine-lib@v0.2.4
 
 # Scheduling / calendar
 exchange-calendars~=4.5
