@@ -284,10 +284,15 @@ def _update_thesis_for_held_stock(
     api_key: str | None = None,
 ) -> dict:
     """Update thesis for a held stock with material triggers (single Haiku call)."""
+    # Defer-import to avoid module-init cycle (sector_team is imported by
+    # research_graph during cost-tracker setup).
+    from graph.llm_cost_tracker import get_cost_telemetry_callback
+
     llm = ChatAnthropic(
         model=PER_STOCK_MODEL,
         anthropic_api_key=api_key or ANTHROPIC_API_KEY,
         max_tokens=500,
+        callbacks=[get_cost_telemetry_callback()],
     )
 
     prior_text = ""

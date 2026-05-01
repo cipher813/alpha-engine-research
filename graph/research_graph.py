@@ -71,6 +71,7 @@ from graph.decision_capture_helpers import (
     derive_run_id,
     is_decision_capture_enabled,
 )
+from graph.llm_cost_tracker import pop_metadata_for, track_llm_cost
 from graph.state_schemas import (
     CIODecision,
     ExitEvent,
@@ -86,12 +87,11 @@ logger = logging.getLogger(__name__)
 # ── Decision-capture helper (gated on ALPHA_ENGINE_DECISION_CAPTURE_ENABLED) ──
 
 
-# Placeholder model metadata — real token counts + cost will be plumbed
-# through via a LangChain callback handler in a follow-up commit (the same
-# work that flips agents to ``with_structured_output()``). Today's metadata
-# captures ``model_name`` only, which is enough for "which model produced
-# this artifact" attribution; cost analysis is owed.
-_PLACEHOLDER_AGENT_MODEL_NAMES: dict[str, str] = {
+# Fallback model names — used only when ``track_llm_cost`` did not run
+# before the capture call (e.g. early development of a new agent that
+# hasn't been wired through the cost tracker yet). Real token counts +
+# cost USD come from the tracker via ``pop_metadata_for(agent_id)``.
+_FALLBACK_AGENT_MODEL_NAMES: dict[str, str] = {
     "sector_team": "claude-haiku-4-5",  # per-stock LLM analysis
     "macro_economist": "claude-sonnet-4-6",  # synthesis / regime call
     "ic_cio": "claude-sonnet-4-6",  # cross-stock ranking
@@ -111,25 +111,49 @@ def _capture_if_enabled(
     S3 errors per ``feedback_no_silent_fails``. No-op when the env-var
     flag is off (default).
 
-    The full prompt context is captured as a placeholder pointing at the
-    gitignored prompt files; real plumbing of system_prompt + user_prompt
-    text comes when agents are upgraded to LangChain's
-    ``with_structured_output()``.
+    Reads populated ``ModelMetadata`` + ``FullPromptContext`` from the
+    cost tracker (via ``pop_metadata_for``) when ``track_llm_cost`` ran
+    before this call. Falls back to a model-name-only stub for paths
+    that haven't been wired yet — those captures still land on S3, just
+    with token counts at 0 and cost_usd at 0 (the artifact carries enough
+    metadata to be repriced later if the call is replayed under the
+    replay harness).
     """
     if not is_decision_capture_enabled():
         return
 
     run_id = derive_run_id(state)
-    model_metadata = ModelMetadata(
-        model_name=_PLACEHOLDER_AGENT_MODEL_NAMES.get(
-            model_name_key, "claude-haiku-4-5",
-        ),
-    )
-    full_prompt_context = FullPromptContext(
-        system_prompt=f"<see config/prompts/{model_name_key}*.txt at run time; "
-                      f"plumb-through pending agent upgrade to with_structured_output()>",
-        user_prompt=f"<rendered from input_data_snapshot at run time; same pending>",
-    )
+
+    # Try the populated metadata path first — this is the canonical
+    # post-PR-2 source of truth. The tracker handles model-name resolution,
+    # token aggregation across multi-call decisions (ReAct + peer review),
+    # and cost recompute against the active price card.
+    populated = pop_metadata_for(agent_id)
+    if populated is not None:
+        model_metadata, full_prompt_context = populated
+    else:
+        # Fallback path — agent not yet wired through the tracker. Logs
+        # a warning so dropped capture wiring is visible in CloudWatch
+        # and fixed forward; hard-failing here would mean any new agent
+        # added without tracker wiring blocks captures system-wide.
+        logger.warning(
+            "[decision_capture] no cost-tracker metadata for agent_id=%s — "
+            "wiring gap. Capturing with model_name-only ModelMetadata "
+            "(0 tokens, $0 cost). Wire the call site through track_llm_cost "
+            "to close this.",
+            agent_id,
+        )
+        model_metadata = ModelMetadata(
+            model_name=_FALLBACK_AGENT_MODEL_NAMES.get(
+                model_name_key, "claude-haiku-4-5",
+            ),
+        )
+        full_prompt_context = FullPromptContext(
+            system_prompt=f"<see config/prompts/{model_name_key}*.txt at run time; "
+                          f"call site not yet wired through track_llm_cost>",
+            user_prompt=f"<rendered from input_data_snapshot at run time; "
+                        f"call site not yet wired through track_llm_cost>",
+        )
 
     try:
         capture_decision(
@@ -598,7 +622,17 @@ def sector_team_node(state: ResearchState) -> dict:
         episodic_memories=state.get("episodic_memories", {}),
         semantic_memories=state.get("semantic_memories", {}),
     )
-    result = run_sector_team(team_id, ctx)
+    # Cost-telemetry scope spans the whole sector team's LLM activity:
+    # quant ReAct + qual ReAct + peer_review (×2) + thesis updates. The
+    # CostTelemetryCallback attached to each ChatAnthropic instance
+    # accumulates token usage into this single frame.
+    with track_llm_cost(
+        agent_id=f"sector_team:{team_id}",
+        sector_team_id=team_id,
+        node_name="sector_team_node",
+        run_type="weekly_research",
+    ):
+        result = run_sector_team(team_id, ctx)
 
     # Warn-mode schema validation — surfaces agent-output drift without
     # changing runtime behavior. Hard-fail flip lands in a follow-up PR
@@ -643,12 +677,19 @@ def macro_economist_node(state: ResearchState) -> dict:
     else:
         logger.info("[macro] no prior report — generating fresh")
 
-    result = run_macro_agent_with_reflection(
-        prior_report=prior_report,
-        prior_date=prior_date,
-        macro_data=macro_data,
-        prior_snapshots=prior_snapshots,
-    )
+    # Cost-telemetry scope wraps the macro-economist primary call + the
+    # macro-critic reflection call as one logical decision.
+    with track_llm_cost(
+        agent_id="macro_economist",
+        node_name="macro_economist_node",
+        run_type="weekly_research",
+    ):
+        result = run_macro_agent_with_reflection(
+            prior_report=prior_report,
+            prior_date=prior_date,
+            macro_data=macro_data,
+            prior_snapshots=prior_snapshots,
+        )
 
     macro_state_update = {
         "macro_report": result.get("report_md", ""),
@@ -918,21 +959,27 @@ def cio_node(state: ResearchState) -> dict:
     except Exception as e:
         logger.debug("[cio] prior IC decisions not available: %s", e)
 
-    cio_result = run_cio(
-        candidates=candidates,
-        macro_context={
-            "market_regime": state.get("market_regime", "neutral"),
-            "macro_report": state.get("macro_report", ""),
-        },
-        sector_ratings=state.get("sector_ratings", {}),
-        current_population=state.get("remaining_population", []),
-        open_slots=state.get("open_slots", 0),
-        exits=state.get("exits", []),
-        run_date=state.get("run_date", ""),
-        prior_decisions=prior_ic,
-        max_new_entrants=CIO_MAX_NEW_ENTRANTS,
-        min_new_entrants=CIO_MIN_NEW_ENTRANTS,
-    )
+    # Cost-telemetry scope wraps the single CIO Anthropic call.
+    with track_llm_cost(
+        agent_id="ic_cio",
+        node_name="cio_node",
+        run_type="weekly_research",
+    ):
+        cio_result = run_cio(
+            candidates=candidates,
+            macro_context={
+                "market_regime": state.get("market_regime", "neutral"),
+                "macro_report": state.get("macro_report", ""),
+            },
+            sector_ratings=state.get("sector_ratings", {}),
+            current_population=state.get("remaining_population", []),
+            open_slots=state.get("open_slots", 0),
+            exits=state.get("exits", []),
+            run_date=state.get("run_date", ""),
+            prior_decisions=prior_ic,
+            max_new_entrants=CIO_MAX_NEW_ENTRANTS,
+            min_new_entrants=CIO_MIN_NEW_ENTRANTS,
+        )
 
     # Warn-mode schema validation on CIO output shapes.
     for decision in cio_result.get("decisions", []):

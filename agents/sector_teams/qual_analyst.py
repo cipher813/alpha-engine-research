@@ -18,6 +18,7 @@ from langgraph.prebuilt import create_react_agent
 from config import PER_STOCK_MODEL, ANTHROPIC_API_KEY, QUAL_MAX_ITERATIONS
 from agents.prompt_loader import load_prompt
 from agents.sector_teams.qual_tools import create_qual_tools
+from graph.llm_cost_tracker import get_cost_telemetry_callback
 
 log = logging.getLogger(__name__)
 
@@ -49,6 +50,7 @@ def run_qual_analyst(
         model=PER_STOCK_MODEL,
         anthropic_api_key=api_key or ANTHROPIC_API_KEY,
         max_tokens=4096,
+        callbacks=[get_cost_telemetry_callback()],
     )
 
     tools = create_qual_tools({
@@ -86,6 +88,9 @@ def run_qual_analyst(
     log.info("[qual:%s] starting ReAct agent with %d picks", team_id, len(quant_top5))
 
     try:
+        # Token usage from this ReAct loop's multiple Anthropic calls
+        # accumulates into the active ``track_llm_cost`` frame opened
+        # by the outer ``sector_team_node`` in research_graph.py.
         result = agent.invoke(
             {"messages": [{"role": "user", "content": user_message}]},
             config={"recursion_limit": QUAL_MAX_ITERATIONS * 2},

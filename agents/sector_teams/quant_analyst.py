@@ -18,6 +18,7 @@ from config import PER_STOCK_MODEL, ANTHROPIC_API_KEY, QUANT_MAX_ITERATIONS
 from agents.prompt_loader import load_prompt
 from agents.sector_teams.quant_tools import create_quant_tools
 from agents.sector_teams.team_config import TEAM_SCREENING_PARAMS, QUANT_TOP_N, MAX_TICKERS_IN_PROMPT
+from graph.llm_cost_tracker import get_cost_telemetry_callback
 
 log = logging.getLogger(__name__)
 
@@ -44,11 +45,14 @@ def run_quant_analyst(
     """
     team_params = TEAM_SCREENING_PARAMS.get(team_id, {})
 
-    # Create LLM
+    # Create LLM. Cost-telemetry callback aggregates token usage across
+    # the ReAct loop's multiple Anthropic calls into the active
+    # ``track_llm_cost`` frame.
     llm = ChatAnthropic(
         model=PER_STOCK_MODEL,
         anthropic_api_key=api_key or ANTHROPIC_API_KEY,
         max_tokens=4096,
+        callbacks=[get_cost_telemetry_callback()],
     )
 
     # Create tools with shared context
@@ -85,6 +89,9 @@ def run_quant_analyst(
     log.info("[quant:%s] starting ReAct agent with %d tickers", team_id, len(sector_tickers))
 
     try:
+        # Token usage from this ReAct loop's multiple Anthropic calls
+        # accumulates into the active ``track_llm_cost`` frame opened
+        # by the outer ``sector_team_node`` in research_graph.py.
         result = agent.invoke(
             {"messages": [{"role": "user", "content": user_message}]},
             config={"recursion_limit": QUANT_MAX_ITERATIONS * 2},

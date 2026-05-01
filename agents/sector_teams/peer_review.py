@@ -16,6 +16,8 @@ from typing import Optional
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage
 
+from graph.llm_cost_tracker import get_cost_telemetry_callback
+
 from config import PER_STOCK_MODEL, MAX_TOKENS_PER_STOCK, ANTHROPIC_API_KEY, TEAM_PICKS_PER_RUN
 from agents.prompt_loader import load_prompt
 
@@ -54,6 +56,7 @@ def run_peer_review(
         model=PER_STOCK_MODEL,
         anthropic_api_key=api_key or ANTHROPIC_API_KEY,
         max_tokens=MAX_TOKENS_PER_STOCK,
+        callbacks=[get_cost_telemetry_callback()],
     )
 
     # Step 1: If qual added a candidate, quant reviews it

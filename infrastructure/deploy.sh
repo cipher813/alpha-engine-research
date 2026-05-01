@@ -157,6 +157,28 @@ build_and_deploy_main() {
     fi
   done
 
+  # -- model_pricing.yaml (cost telemetry) --------------------------------
+  # Lives under cost/ in alpha-engine-config and gets flattened to
+  # config/model_pricing.yaml in the Lambda image to match _find_config()'s
+  # subdir-flattened search step.
+  if [ -f "config/model_pricing.yaml" ]; then
+    echo "Using existing config/model_pricing.yaml (local dev workflow)"
+  else
+    src="$CONFIG_REPO_DIR/cost/model_pricing.yaml"
+    if [ -f "$src" ]; then
+      echo "Staging config/model_pricing.yaml from $src..."
+      cp "$src" "config/model_pricing.yaml"
+      YAMLS_STAGED_FROM_CONFIG_REPO+=("model_pricing.yaml")
+    else
+      echo "ERROR: config/model_pricing.yaml not found — tried:"
+      echo "  config/model_pricing.yaml (local dev)"
+      echo "  $src (config repo sibling)"
+      echo "Hint: clone cipher813/alpha-engine-config as a sibling directory,"
+      echo "      or set CONFIG_REPO_DIR=/path/to/alpha-engine-config"
+      exit 1
+    fi
+  fi
+
   # Build Docker image
   echo "Building Docker image..."
   docker build --platform linux/amd64 --provenance=false -t "$FUNCTION_MAIN:latest" .
