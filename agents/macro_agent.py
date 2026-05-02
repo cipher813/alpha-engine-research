@@ -147,6 +147,7 @@ def run_macro_agent(
         breadth = {}
 
     prompt = _PROMPT_TEMPLATE.format(
+        sector_list_text="\n".join(f"- {s}" for s in ALL_SECTORS),
         prior_date=prior_date,
         prior_report=prior_text,
         fed_funds=_fmt(macro_data.get("fed_funds_rate")),

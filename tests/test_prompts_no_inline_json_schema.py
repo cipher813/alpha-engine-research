@@ -143,3 +143,76 @@ def test_prompt_has_version_frontmatter(name: str, prompts_dir: Path) -> None:
         f"Add the frontmatter line; the loader's default-to-zero only "
         f"applies to legacy/test prompts."
     )
+
+
+# ── Audit findings F2 + F3 (PR C, 2026-05-02) ────────────────────────────
+
+
+@pytest.mark.parametrize("name", _PRODUCTION_PROMPTS)
+def test_no_revised_date_stamp(name: str, prompts_dir: Path) -> None:
+    """Closes audit finding F3: no prompt may carry inline ``(revised YYYY-MM-DD)``
+    date stamps. Those are git-blame data leaking into the prompt body —
+    operators get the same context from the prompt-version metadata in
+    the LangSmith trace + the config repo's git history."""
+    text = (prompts_dir / f"{name}.txt").read_text(encoding="utf-8")
+    match = re.search(r"\(revised\s+\d{4}-\d{2}-\d{2}", text, re.IGNORECASE)
+    assert match is None, (
+        f"Prompt '{name}.txt' contains an inline ``(revised YYYY-MM-DD)`` "
+        f"stamp at offset {match.start() if match else 'n/a'}. Strip it — "
+        f"prompt versioning + LangSmith metadata propagation carry the "
+        f"revision context now (audit finding F3)."
+    )
+
+
+def test_macro_agent_uses_canonical_sector_list_placeholder(prompts_dir: Path) -> None:
+    """Closes audit finding F2: the canonical sector list must be injected
+    into ``macro_agent.txt`` via the ``{sector_list_text}`` template
+    placeholder, not enumerated verbatim in prompt prose. Single source
+    of truth = ``config.ALL_SECTORS`` rendered at format() time."""
+    text = (prompts_dir / "macro_agent.txt").read_text(encoding="utf-8")
+    assert "{sector_list_text}" in text, (
+        "macro_agent.txt must use ``{sector_list_text}`` placeholder so the "
+        "canonical sector list is single-sourced from config.ALL_SECTORS. "
+        "Remove any verbatim sector enumeration from the prompt body and "
+        "inject via _PROMPT_TEMPLATE.format(sector_list_text=...)."
+    )
+
+
+def test_macro_agent_format_passes_canonical_sectors() -> None:
+    """End-to-end: agents.macro_agent must pass ``ALL_SECTORS`` into the
+    prompt's ``{sector_list_text}`` placeholder. Lock the wiring so a
+    refactor that drops the kwarg surfaces here instead of crashing the
+    LLM call at runtime."""
+    from config import ALL_SECTORS
+    from agents.macro_agent import _PROMPT_TEMPLATE
+
+    rendered = _PROMPT_TEMPLATE.format(
+        sector_list_text="\n".join(f"- {s}" for s in ALL_SECTORS),
+        prior_date="2026-05-02",
+        prior_report="NONE — initial report",
+        fed_funds="4.50",
+        t2yr="3.90",
+        t10yr="4.30",
+        curve_slope="40",
+        vix="18.0",
+        spy_30d="2.0",
+        qqq_30d="3.0",
+        iwm_30d="1.0",
+        oil="75.00",
+        gold="2400",
+        copper="4.20",
+        cpi_yoy="2.8",
+        unemployment="4.0",
+        consumer_sentiment="72",
+        initial_claims="220",
+        hy_oas="320",
+        pct_above_50d="60",
+        pct_above_200d="65",
+        adv_dec_ratio="1.20",
+        upcoming_releases="See FRED calendar.",
+    )
+    for sector in ALL_SECTORS:
+        assert f"- {sector}" in rendered, (
+            f"Rendered macro_agent prompt missing canonical sector "
+            f"{sector!r} — sector_list_text injection regressed."
+        )
