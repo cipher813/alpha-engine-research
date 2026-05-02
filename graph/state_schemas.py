@@ -419,14 +419,45 @@ class QuantAcceptanceVerdict(BaseModel):
     reason: str = ""
 
 
-class JointFinalizationOutput(BaseModel):
-    """Side-LLM call: peer_review's joint quant+qual finalization, picks
-    the team's 2-3 final recommendations from the merged candidate set."""
+class JointFinalizationDecision(BaseModel):
+    """One per-ticker decision from peer_review's joint finalization.
+
+    Per-ticker rationale enables LLM-as-judge eval to score the
+    synthesis reasoning at decision granularity (rather than one
+    rationale string covering all 2-3 picks). Composes with the
+    LLM-as-judge workstream (ROADMAP Phase 2 P1).
+    """
 
     model_config = ConfigDict(extra="allow")
 
-    selected_tickers: list[str] = Field(default_factory=list)
-    rationale: str = ""
+    ticker: str
+    rationale: str = Field(
+        default="",
+        description=(
+            "Why this ticker was selected — name R/R reasoning, score "
+            "asymmetry, catalyst. 1-2 sentences."
+        ),
+    )
+
+
+class JointFinalizationOutput(BaseModel):
+    """Side-LLM call: peer_review's joint quant+qual finalization, picks
+    the team's 2-3 final recommendations from the merged candidate set.
+
+    Per-ticker rationale lives on each ``selected_decisions`` entry;
+    ``team_rationale`` carries cross-pick context (sector concentration,
+    regime fit across the slate)."""
+
+    model_config = ConfigDict(extra="allow")
+
+    selected_decisions: list[JointFinalizationDecision] = Field(default_factory=list)
+    team_rationale: str = Field(
+        default="",
+        description=(
+            "Cross-pick rationale — sector concentration, regime fit "
+            "across the slate, asymmetry mix. 1-2 sentences."
+        ),
+    )
 
 
 class HeldThesisUpdateLLMOutput(BaseModel):
