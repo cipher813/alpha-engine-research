@@ -154,6 +154,23 @@ def run_cio(
                     "CIO structured response had empty decisions list"
                 )
             return _fallback_selection(candidates, floor)
+        # Per-candidate invariant: every input candidate must receive a
+        # decision (ADVANCE / REJECT / NO_ADVANCE_DEADLOCK). Caught
+        # 2026-05-02 — PR B's strip of the inline JSON example in
+        # ic_cio_evaluation.txt let Sonnet emit a partial decisions
+        # list. Prompt fix (config #21) + schema min_length=1 close the
+        # empty-list edge; this assertion closes the partial-list edge.
+        if len(decisions_dicts) != len(candidates):
+            msg = (
+                f"CIO returned {len(decisions_dicts)} decisions for "
+                f"{len(candidates)} candidates — every candidate must "
+                f"appear exactly once in the decisions list."
+            )
+            log.warning("[cio] %s", msg)
+            if is_strict_validation_enabled():
+                raise RuntimeError(msg)
+            # Lax mode: fall through to post-process, which tolerates a
+            # partial list by treating missing tickers as REJECT.
         return _post_process_cio_decisions(decisions_dicts, candidates, floor, cap)
     except Exception as e:
         log.error("[cio] evaluation failed: %s", e)

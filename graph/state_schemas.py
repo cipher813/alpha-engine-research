@@ -488,8 +488,28 @@ class CIORawDecision(BaseModel):
 class CIORawOutput(BaseModel):
     """Wrapper for the CIO agent's structured response. The list-of-
     decisions shape mirrors what ``_parse_cio_response`` consumes today
-    via balanced-brace JSON extraction."""
+    via balanced-brace JSON extraction.
 
-    model_config = ConfigDict(extra="allow")
+    ``min_length=1`` is propagated to the LLM via the structured-output
+    tool schema description AND validated by the SDK parser. Caught
+    2026-05-02: PR B's strip of the CIO prompt's inline JSON example
+    let Sonnet emit ``decisions: []`` because the structural cue that
+    "one entry per candidate" was lost. The prompt fix (config #21,
+    explicit OUTPUT REQUIREMENT block) addresses the LLM-side cue;
+    this constraint is the schema-side defense — empty list now
+    surfaces as a parsing_error at the call boundary rather than as a
+    later "empty decisions" raise inside ``run_cio``.
+    """
 
-    decisions: list[CIORawDecision] = Field(default_factory=list)
+    # ``validate_default=True`` ensures the ``min_length=1`` constraint
+    # fires even when ``decisions`` falls back to ``default_factory=list``.
+    # Pydantic v2 skips default validation by default; without this the
+    # empty-list rejection only triggers when a caller explicitly passes
+    # ``decisions=[]`` — defeating the schema-side defense.
+    model_config = ConfigDict(extra="allow", validate_default=True)
+
+    decisions: list[CIORawDecision] = Field(
+        default_factory=list,
+        min_length=1,
+        description="One entry per input candidate. Never empty — every candidate must receive a decision (ADVANCE / REJECT / NO_ADVANCE_DEADLOCK).",
+    )

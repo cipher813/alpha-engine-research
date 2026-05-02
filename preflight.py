@@ -40,6 +40,44 @@ class ResearchPreflight(BasePreflight):
             raise ValueError(f"ResearchPreflight: unknown mode {mode!r}")
         self.mode = mode
 
+    # Modules that ``lambda/handler.py`` imports lazily inside its hot
+    # path. Without preflight verification they only fail at the WARN-
+    # caught end-of-run path (or worse, silently degrade), AFTER all
+    # LLM tokens have been spent. Eager import here surfaces a missing-
+    # from-Docker-image module at the top of the invocation, before any
+    # real work starts. Caught 2026-05-02 on a post-PR-D validation
+    # invoke: ``scripts.aggregate_costs`` was imported by handler.py
+    # (PR #81 wire-up) but the Dockerfile never copied ``scripts/``,
+    # so every Lambda run logged a non-fatal WARN at the end.
+    _DEFERRED_IMPORTS: tuple[tuple[str, str], ...] = (
+        ("scripts.aggregate_costs", "aggregate_day"),
+    )
+
+    def _check_deferred_imports(self) -> None:
+        """Verify every deferred-import module + symbol is resolvable.
+
+        Failure surfaces at the top of the handler with a clear
+        actionable error pointing at the Docker COPY contract — not as
+        a silent end-of-run WARN. ``ImportError`` (module missing) and
+        ``AttributeError`` (symbol renamed) are both treated as the
+        same class of "deployment-side regression."
+        """
+        for module_path, attr in self._DEFERRED_IMPORTS:
+            try:
+                mod = __import__(module_path, fromlist=[attr])
+                getattr(mod, attr)
+            except (ImportError, AttributeError) as exc:
+                raise RuntimeError(
+                    f"Preflight: deferred import {module_path}.{attr} "
+                    f"unresolvable: {type(exc).__name__}: {exc}. "
+                    f"Check Dockerfile COPY lines + the module's "
+                    f"__init__.py."
+                ) from exc
+        log.info(
+            "preflight: %d deferred imports resolved",
+            len(self._DEFERRED_IMPORTS),
+        )
+
     def _check_arcticdb_universe(self) -> None:
         """Assert ArcticDB is reachable and SPY has fresh data.
 
@@ -100,4 +138,5 @@ class ResearchPreflight(BasePreflight):
             self.check_env_vars("ANTHROPIC_API_KEY")
         self.check_s3_bucket()
         if self.mode == "weekly":
+            self._check_deferred_imports()
             self._check_arcticdb_universe()
