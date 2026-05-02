@@ -438,16 +438,21 @@ class HeldThesisUpdateLLMOutput(BaseModel):
     emits ``final_score: null``. By omitting score fields from the schema
     entirely, the LLM cannot emit them, and the strip-nulls workaround
     becomes unnecessary.
+
+    Field-level ``description`` strings are propagated by
+    ``with_structured_output()`` into the tool-input schema the LLM sees,
+    so the per-field length/count guidance previously inlined in the
+    prompt body lives here now (audit finding F1, PR B 2026-05-02).
     """
 
     model_config = ConfigDict(extra="allow")
 
-    bull_case: str = ""
-    bear_case: str = ""
-    catalysts: list[str] = Field(default_factory=list)
-    risks: list[str] = Field(default_factory=list)
-    conviction: int | None = Field(default=None, ge=0, le=100)
-    conviction_rationale: str = ""
+    bull_case: str = Field(default="", description="Bull case narrative — 1-2 sentences, ~200 chars.")
+    bear_case: str = Field(default="", description="Bear case narrative — 1-2 sentences, ~200 chars.")
+    catalysts: list[str] = Field(default_factory=list, description="Up to 5 catalysts.")
+    risks: list[str] = Field(default_factory=list, description="Up to 5 risks.")
+    conviction: int | None = Field(default=None, ge=0, le=100, description="Strength of view (0-100). ≥70 high, 40-69 moderate, <40 low.")
+    conviction_rationale: str = Field(default="", description="Why this conviction level — ~100 chars.")
     thesis_summary: str = ""
     triggers_response: str = ""
 
@@ -474,10 +479,10 @@ class CIORawDecision(BaseModel):
 
     ticker: str
     decision: CIORawDecisionLiteral
-    rank: int | None = Field(default=None, ge=0)
-    conviction: int | None = Field(default=None, ge=0, le=100)
-    rationale: str = ""
-    entry_thesis: HeldThesisUpdateLLMOutput | None = None
+    rank: int | None = Field(default=None, ge=0, description="1-based rank for ADVANCE picks; null for REJECT / NO_ADVANCE_DEADLOCK.")
+    conviction: int | None = Field(default=None, ge=0, le=100, description="Strength of view (0-100).")
+    rationale: str = Field(default="", description="Why this decision — name R/R reasoning (sub-scores, rr_ratio, catalyst).")
+    entry_thesis: HeldThesisUpdateLLMOutput | None = Field(default=None, description="Required for ADVANCE; null for REJECT / NO_ADVANCE_DEADLOCK.")
 
 
 class CIORawOutput(BaseModel):
