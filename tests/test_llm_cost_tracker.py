@@ -985,3 +985,105 @@ class TestRunBudgetExceededErrorMessage:
         assert "$125.50" in msg
         assert "$100.00" in msg
         assert "ALPHA_ENGINE_RUN_BUDGET_USD" in msg
+
+
+class TestNormalizeModelForPricing:
+    """Locks the snapshot-suffix stripping behavior for price-card lookup.
+
+    2026-05-02 incident: SF Research step halted on
+    ``PriceCardLookupError: No price card for model
+    'claude-haiku-4-5-20251001' active on 2026-05-02``. The pricing yaml
+    keys cards by family ('claude-haiku-4-5'); runtime model pin in
+    config/universe.yaml uses the snapshot ID. Normalize before lookup.
+    """
+
+    def test_strips_anthropic_snapshot_suffix(self):
+        from graph.llm_cost_tracker import _normalize_model_for_pricing
+        assert _normalize_model_for_pricing("claude-haiku-4-5-20251001") == "claude-haiku-4-5"
+        assert _normalize_model_for_pricing("claude-sonnet-4-6-20250101") == "claude-sonnet-4-6"
+        assert _normalize_model_for_pricing("claude-opus-4-7-20260315") == "claude-opus-4-7"
+
+    def test_passes_through_unsuffixed_family_names(self):
+        from graph.llm_cost_tracker import _normalize_model_for_pricing
+        assert _normalize_model_for_pricing("claude-haiku-4-5") == "claude-haiku-4-5"
+        assert _normalize_model_for_pricing("claude-sonnet-4-6") == "claude-sonnet-4-6"
+
+    def test_only_strips_8_digit_date_suffix(self):
+        """Don't strip arbitrary trailing dashes — only the YYYYMMDD shape."""
+        from graph.llm_cost_tracker import _normalize_model_for_pricing
+        assert _normalize_model_for_pricing("claude-haiku-4-5-beta") == "claude-haiku-4-5-beta"
+        assert _normalize_model_for_pricing("claude-haiku-4-5-1234567") == "claude-haiku-4-5-1234567"  # 7 digits
+        assert _normalize_model_for_pricing("model-name") == "model-name"
+
+
+class TestFrameExitToleratesMissingPriceCard:
+    """The track_llm_cost finally-block must NOT raise on PriceCardLookupError.
+
+    The 2026-05-02 SF halt was exactly this: recompute_cost raised the
+    lookup error and propagated through the context-manager exit, killing
+    the SF Research step. Per-row repricing was already tolerant; this
+    test locks the same tolerance for the aggregate frame path.
+    """
+
+    def test_unknown_model_does_not_raise(self, monkeypatch, tmp_path):
+        import yaml
+        from graph import llm_cost_tracker
+        from graph.llm_cost_tracker import track_llm_cost
+
+        # Point the price table at a yaml that has NO card for our model.
+        pricing_yaml = tmp_path / "model_pricing.yaml"
+        pricing_yaml.write_text(yaml.safe_dump({
+            "cards": [{
+                "model_name": "different-model",
+                "effective_from": "2024-01-01",
+                "input_per_1m": 1.0,
+                "output_per_1m": 5.0,
+                "cache_read_per_1m": 0.1,
+                "cache_create_per_1m": 1.25,
+            }]
+        }))
+        monkeypatch.setattr(
+            llm_cost_tracker, "_resolve_pricing_path", lambda: pricing_yaml,
+        )
+        llm_cost_tracker._reset_price_table_for_tests()
+
+        # Must not raise.
+        with track_llm_cost(
+            agent_id="x", run_id="r",
+            model_name_fallback="claude-haiku-4-5-20260101",  # not in yaml
+        ):
+            pass
+
+
+class TestSnapshotSuffixMatchesFamilyCard:
+    """Round-trip: a snapshot-pinned model resolves to the family's card."""
+
+    def test_snapshot_pinned_haiku_matches_family_card(self, monkeypatch, tmp_path):
+        import yaml
+        from graph import llm_cost_tracker
+        from graph.llm_cost_tracker import _load_price_table, _normalize_model_for_pricing
+
+        pricing_yaml = tmp_path / "model_pricing.yaml"
+        pricing_yaml.write_text(yaml.safe_dump({
+            "cards": [{
+                "model_name": "claude-haiku-4-5",
+                "effective_from": "2026-01-01",
+                "input_per_1m": 1.0,
+                "output_per_1m": 5.0,
+                "cache_read_per_1m": 0.1,
+                "cache_create_per_1m": 1.25,
+            }]
+        }))
+        monkeypatch.setattr(
+            llm_cost_tracker, "_resolve_pricing_path", lambda: pricing_yaml,
+        )
+        llm_cost_tracker._reset_price_table_for_tests()
+
+        from datetime import datetime, timezone
+        table = _load_price_table()
+        snapshot_name = "claude-haiku-4-5-20251001"
+        family_name = _normalize_model_for_pricing(snapshot_name)
+        # The family lookup MUST succeed — locks the contract that
+        # normalization yields a string the table actually has a card for.
+        card = table.get(family_name, datetime(2026, 5, 2, tzinfo=timezone.utc))
+        assert card.model_name == "claude-haiku-4-5"
