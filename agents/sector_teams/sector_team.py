@@ -221,6 +221,20 @@ def run_sector_team(team_id: str, ctx: SectorTeamContext) -> dict:
     if team_error:
         team_error = f"[team:{team_id}] {team_error}"
 
+    # Bubble the partial flag up too. A team is partial if either analyst
+    # hit the recursion budget — score_aggregator treats partial teams as
+    # WARN-and-include (zero recommendations contributed) rather than as
+    # an error (which would crash the SF). Distinct from team_error so
+    # genuine failures still hard-fail.
+    team_partial = bool(quant_output.get("partial") or qual_output.get("partial"))
+    partial_reasons = [
+        f"quant:{quant_output.get('partial_reason')}"
+        if quant_output.get("partial") else None,
+        f"qual:{qual_output.get('partial_reason')}"
+        if qual_output.get("partial") else None,
+    ]
+    partial_reasons = [r for r in partial_reasons if r is not None]
+
     return {
         "team_id": team_id,
         "recommendations": peer_output.get("recommendations", []),
@@ -230,6 +244,8 @@ def run_sector_team(team_id: str, ctx: SectorTeamContext) -> dict:
         "peer_review_output": peer_output,
         "tool_calls": all_tool_calls,
         "error": team_error,
+        "partial": team_partial,
+        "partial_reasons": partial_reasons,
     }
 
 
@@ -240,6 +256,13 @@ def _empty_result(team_id: str, quant_output: dict | None = None,
     # looks identical to "no sector tickers in universe".
     if error is None and quant_output is not None:
         error = quant_output.get("error")
+    # Surface partial too so a quant team that hit recursion still flows
+    # as partial-not-error through score_aggregator.
+    partial = bool(quant_output.get("partial")) if quant_output else False
+    partial_reasons = (
+        [f"quant:{quant_output.get('partial_reason')}"]
+        if partial and quant_output and quant_output.get("partial_reason") else []
+    )
     return {
         "team_id": team_id,
         "recommendations": [],
@@ -249,6 +272,8 @@ def _empty_result(team_id: str, quant_output: dict | None = None,
         "peer_review_output": {},
         "tool_calls": [],
         "error": error,
+        "partial": partial,
+        "partial_reasons": partial_reasons,
     }
 
 
