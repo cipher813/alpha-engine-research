@@ -19,12 +19,25 @@ jobs:
       # Tests import config.py, which reads yaml from the private config repo.
       # Sample files in ./config/ are documentation-only and never loaded by
       # runtime — hard-fail enforces this.
-      - name: Checkout alpha-engine-config
-        uses: actions/checkout@v4
-        with:
-          repository: cipher813/alpha-engine-config
-          path: alpha-engine-config
-          token: ${{ secrets.ALPHA_ENGINE_CONFIG_TOKEN }}
+      #
+      # Branch-aware: if a same-named branch exists in alpha-engine-config
+      # (the convention for stacked prompt-versioning PRs), check that out
+      # first. Falls back to the default branch when no matching branch
+      # exists. This lets the prompt-content regression locks in
+      # tests/test_prompts_no_inline_json_schema.py see the PR's prompt
+      # changes instead of stale main-branch prompts.
+      - name: Checkout alpha-engine-config (branch-aware)
+        env:
+          TOKEN: ${{ secrets.ALPHA_ENGINE_CONFIG_TOKEN }}
+          BRANCH: ${{ github.head_ref || github.ref_name }}
+        run: |
+          REPO_URL="https://x-access-token:${TOKEN}@github.com/cipher813/alpha-engine-config.git"
+          if git clone --depth 1 -b "$BRANCH" "$REPO_URL" alpha-engine-config 2>/dev/null; then
+            echo "Checked out alpha-engine-config@$BRANCH (matching PR branch)"
+          else
+            git clone --depth 1 "$REPO_URL" alpha-engine-config
+            echo "No matching branch '$BRANCH' in alpha-engine-config — using default branch"
+          fi
 
       - uses: actions/setup-python@v5
         with:
