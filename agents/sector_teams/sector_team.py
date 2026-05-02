@@ -340,7 +340,8 @@ def _update_thesis_for_held_stock(
             f"Upside: {analyst_data.get('upside_pct', 'N/A')}%"
         )
 
-    prompt = load_prompt("sector_team_thesis_update").format(
+    loaded_prompt = load_prompt("sector_team_thesis_update")
+    prompt = loaded_prompt.format(
         team_title=team_id.title(),
         ticker=ticker,
         triggers_csv=", ".join(triggers),
@@ -361,7 +362,8 @@ def _update_thesis_for_held_stock(
     structured_llm = llm.with_structured_output(HeldThesisUpdateLLMOutput)
     try:
         update: HeldThesisUpdateLLMOutput = structured_llm.invoke(
-            [HumanMessage(content=prompt)]
+            [HumanMessage(content=prompt)],
+            config={"metadata": loaded_prompt.langsmith_metadata()},
         )
         # Convert to dict + drop default-empty fields so they don't overwrite
         # a populated prior_thesis value with the default (e.g. an empty

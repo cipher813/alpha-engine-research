@@ -103,13 +103,23 @@ def run_quant_analyst(
 
     # Build input message
     ticker_list = ", ".join(sector_tickers[:MAX_TICKERS_IN_PROMPT])
-    user_message = load_prompt("quant_analyst_user").format(
+    user_prompt = load_prompt("quant_analyst_user")
+    user_message = user_prompt.format(
         run_date=run_date,
         market_regime=market_regime,
         universe_size=len(sector_tickers),
         ticker_list=ticker_list,
         quant_top_n=QUANT_TOP_N,
     )
+    # System prompt's metadata anchors LangSmith trace attribution; the
+    # user prompt's version + hash piggyback so a future drift in either
+    # half of the prompt-pair is independently grep-able.
+    system_prompt_loaded = load_prompt("quant_analyst_system")
+    _ls_metadata = {
+        **system_prompt_loaded.langsmith_metadata(),
+        "user_prompt_version": user_prompt.version,
+        "user_prompt_hash": user_prompt.hash[:12],
+    }
 
     log.info("[quant:%s] starting ReAct agent with %d tickers", team_id, len(sector_tickers))
 
@@ -119,7 +129,10 @@ def run_quant_analyst(
         # by the outer ``sector_team_node`` in research_graph.py.
         result = agent.invoke(
             {"messages": [{"role": "user", "content": user_message}]},
-            config={"recursion_limit": _QUANT_RECURSION_LIMIT},
+            config={
+                "recursion_limit": _QUANT_RECURSION_LIMIT,
+                "metadata": _ls_metadata,
+            },
         )
 
         messages = result.get("messages", [])
@@ -147,7 +160,10 @@ def run_quant_analyst(
             "return an empty list.\n\n"
             f"--- ANALYST ANSWER ---\n{final_text}"
         ))
-        extract_resp = structured_llm.invoke([extract_msg])
+        extract_resp = structured_llm.invoke(
+            [extract_msg],
+            config={"metadata": _ls_metadata},
+        )
         parsed: QuantAnalystOutput | None = extract_resp.get("parsed")
         parsing_error = extract_resp.get("parsing_error")
         if parsing_error is not None:

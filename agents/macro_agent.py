@@ -185,7 +185,10 @@ def run_macro_agent(
     structured_llm = llm.with_structured_output(
         MacroEconomistRawOutput, include_raw=True
     )
-    response = structured_llm.invoke([HumanMessage(content=prompt)])
+    response = structured_llm.invoke(
+        [HumanMessage(content=prompt)],
+        config={"metadata": _PROMPT_TEMPLATE.langsmith_metadata()},
+    )
 
     raw_message = response.get("raw")
     parsed: MacroEconomistRawOutput | None = response.get("parsed")
@@ -394,7 +397,8 @@ def run_macro_critic(
     structured_llm = llm.with_structured_output(MacroCriticOutput)
     try:
         verdict: MacroCriticOutput = structured_llm.invoke(
-            [HumanMessage(content=prompt)]
+            [HumanMessage(content=prompt)],
+            config={"metadata": _CRITIC_PROMPT.langsmith_metadata()},
         )
         result = {
             "action": verdict.action,

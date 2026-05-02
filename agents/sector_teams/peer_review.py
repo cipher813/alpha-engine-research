@@ -99,7 +99,8 @@ def _quant_reviews_addition(
     ticker = candidate.get("ticker", "")
     ts = technical_scores.get(ticker, {})
 
-    prompt = load_prompt("peer_review_quant_addition").format(
+    loaded_prompt = load_prompt("peer_review_quant_addition")
+    prompt = loaded_prompt.format(
         team_title=team_id.title(),
         ticker=ticker,
         qual_rationale=candidate.get("rationale", "No rationale provided"),
@@ -123,7 +124,8 @@ def _quant_reviews_addition(
     structured_llm = llm.with_structured_output(QuantAcceptanceVerdict)
     try:
         verdict: QuantAcceptanceVerdict = structured_llm.invoke(
-            [HumanMessage(content=prompt)]
+            [HumanMessage(content=prompt)],
+            config={"metadata": loaded_prompt.langsmith_metadata()},
         )
         log.info(
             "[peer_review:%s] quant %s qual's addition %s: %s",
@@ -208,7 +210,8 @@ def _joint_finalization(
         for c in candidates
     )
 
-    prompt = load_prompt("peer_review_joint_finalization").format(
+    loaded_prompt = load_prompt("peer_review_joint_finalization")
+    prompt = loaded_prompt.format(
         team_title=team_id.title(),
         market_regime=market_regime,
         candidates_text=candidates_text,
@@ -228,7 +231,8 @@ def _joint_finalization(
     structured_llm = llm.with_structured_output(JointFinalizationOutput)
     try:
         result: JointFinalizationOutput = structured_llm.invoke(
-            [HumanMessage(content=prompt)]
+            [HumanMessage(content=prompt)],
+            config={"metadata": loaded_prompt.langsmith_metadata()},
         )
         selected = set(result.selected_tickers)
         picks = [c for c in candidates if c["ticker"] in selected]

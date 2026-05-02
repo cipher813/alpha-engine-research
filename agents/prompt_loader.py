@@ -62,6 +62,25 @@ class LoadedPrompt:
         """Drop-in for ``str.format`` — render the template with kwargs."""
         return self.text.format(**kwargs)
 
+    def langsmith_metadata(self) -> dict[str, str]:
+        """Return the prompt-provenance metadata dict for LangSmith stamping.
+
+        Pass into ``llm.invoke(messages, config={"metadata": prompt.langsmith_metadata()})``
+        at every LLM call site so the LangSmith trace UI exposes which prompt
+        revision produced an output. Closes audit finding F8 — the version +
+        hash are computed at load time and propagated via this helper rather
+        than being looked up ad-hoc at each call site.
+
+        ``hash`` is truncated to its first 12 hex chars so the LangSmith UI
+        stays readable; full sha256 lives in ``LoadedPrompt.hash`` for any
+        consumer that needs the full digest.
+        """
+        return {
+            "prompt_name": self.name,
+            "prompt_version": self.version,
+            "prompt_hash": self.hash[:12],
+        }
+
 
 _cache: dict[str, LoadedPrompt] = {}
 
