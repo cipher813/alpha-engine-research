@@ -12,6 +12,7 @@ import logging
 from typing import Optional
 
 from langchain_anthropic import ChatAnthropic
+from langgraph.errors import GraphRecursionError
 from langgraph.prebuilt import create_react_agent
 
 from config import PER_STOCK_MODEL, ANTHROPIC_API_KEY, QUANT_MAX_ITERATIONS
@@ -21,6 +22,17 @@ from agents.sector_teams.team_config import TEAM_SCREENING_PARAMS, QUANT_TOP_N, 
 from graph.llm_cost_tracker import get_cost_telemetry_callback
 
 log = logging.getLogger(__name__)
+
+# LangGraph state-transition budget. Each ReAct round = 1 LLM message + 1 tool
+# response = 2 transitions, so QUANT_MAX_ITERATIONS rounds need 2× that. The
+# extra +2 accounts for the post-loop ``response_format`` extraction call
+# that ``create_react_agent(..., response_format=QuantAnalystOutput)`` adds
+# (PR 2.3 / commit 84a1ce3, 2026-04-30) — that call sits inside the same
+# subgraph and counts against ``recursion_limit``. Without it, an agent that
+# legitimately uses all 8 rounds blows the budget on the structured-extraction
+# pass. 2026-05-02 SF Research step halted on exactly this for 5 of 6 sector
+# teams.
+_QUANT_RECURSION_LIMIT = QUANT_MAX_ITERATIONS * 2 + 2
 
 
 def run_quant_analyst(
@@ -94,7 +106,7 @@ def run_quant_analyst(
         # by the outer ``sector_team_node`` in research_graph.py.
         result = agent.invoke(
             {"messages": [{"role": "user", "content": user_message}]},
-            config={"recursion_limit": QUANT_MAX_ITERATIONS * 2},
+            config={"recursion_limit": _QUANT_RECURSION_LIMIT},
         )
 
         # Extract the final response and tool calls from message history.
@@ -148,12 +160,40 @@ def run_quant_analyst(
             "tool_calls": tool_calls,
             "iterations": len(tool_calls),
             "error": None,
+            "partial": False,
+        }
+
+    except GraphRecursionError as e:
+        # Budget exhausted before the agent reached a stop condition.
+        # Treat as a degraded-but-non-fatal outcome: this team contributes
+        # zero picks but doesn't crash the SF — score_aggregator will see
+        # ``partial=True`` and accept the empty contribution with a WARN.
+        # The +2 budget bump should already prevent the ``response_format``
+        # extraction call from blowing the budget on its own; if we still
+        # hit this, the agent legitimately needs more than 8 ReAct rounds
+        # for this sector + run, which is a tunable observation, not a
+        # crash-the-pipeline emergency.
+        log.warning(
+            "[quant:%s] recursion budget (%d transitions) exhausted before "
+            "stop condition — accepting partial result (0 picks). "
+            "score_aggregator will proceed with this team excluded.",
+            team_id, _QUANT_RECURSION_LIMIT,
+        )
+        return {
+            "team_id": team_id,
+            "ranked_picks": [],
+            "tool_calls": [],
+            "iterations": _QUANT_RECURSION_LIMIT,
+            "error": None,
+            "partial": True,
+            "partial_reason": "recursion_limit_exhausted",
         }
 
     except Exception as e:
         # Record the error so downstream (score_aggregator) can hard-fail
         # loudly instead of treating an exception as equivalent to the LLM
-        # legitimately producing zero picks.
+        # legitimately producing zero picks. Recursion budget exhaustion
+        # is handled separately above as a partial outcome, not an error.
         log.error("[quant:%s] ReAct agent failed: %s", team_id, e)
         return {
             "team_id": team_id,
@@ -161,6 +201,7 @@ def run_quant_analyst(
             "tool_calls": [],
             "iterations": 0,
             "error": f"{type(e).__name__}: {e}",
+            "partial": False,
         }
 
 

@@ -795,6 +795,31 @@ def score_aggregator(state: ResearchState) -> dict:
         logger.error("[score_aggregator] %s", msg)
         raise RuntimeError(msg)
 
+    # Partial teams (recursion budget exhausted, etc.) contribute zero
+    # recommendations but don't crash the SF — degraded-but-non-fatal.
+    # Logged loud + counted so operators see the drift without the SF
+    # halting on a single team's bad day. If ALL teams are partial we
+    # surface that as an error since CIO would have nothing to rank.
+    partial_teams = {
+        tid: out.get("partial_reasons", [])
+        for tid, out in team_outputs.items()
+        if out.get("partial")
+    }
+    if partial_teams:
+        if len(partial_teams) == len(team_outputs):
+            msg = (
+                f"all {len(team_outputs)} sector teams returned partial — CIO "
+                f"has nothing to rank. Reasons: {partial_teams}"
+            )
+            logger.error("[score_aggregator] %s", msg)
+            raise RuntimeError(msg)
+        logger.warning(
+            "[score_aggregator] %d of %d sector teams returned partial "
+            "(0 recommendations contributed). Reasons: %s. SF advances; "
+            "investigate per-team observability.",
+            len(partial_teams), len(team_outputs), partial_teams,
+        )
+
     investment_theses = {}
 
     for team_id, output in team_outputs.items():

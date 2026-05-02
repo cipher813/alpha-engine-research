@@ -13,6 +13,7 @@ import logging
 from typing import Optional
 
 from langchain_anthropic import ChatAnthropic
+from langgraph.errors import GraphRecursionError
 from langgraph.prebuilt import create_react_agent
 
 from config import PER_STOCK_MODEL, ANTHROPIC_API_KEY, QUAL_MAX_ITERATIONS
@@ -21,6 +22,11 @@ from agents.sector_teams.qual_tools import create_qual_tools
 from graph.llm_cost_tracker import get_cost_telemetry_callback
 
 log = logging.getLogger(__name__)
+
+# +2 over (max_iter × 2) accounts for the post-loop ``response_format``
+# extraction call inside ``create_react_agent``. See quant_analyst.py for
+# the full rationale (PR 2.3 / commit 84a1ce3, 2026-04-30).
+_QUAL_RECURSION_LIMIT = QUAL_MAX_ITERATIONS * 2 + 2
 
 
 def run_qual_analyst(
@@ -93,7 +99,7 @@ def run_qual_analyst(
         # by the outer ``sector_team_node`` in research_graph.py.
         result = agent.invoke(
             {"messages": [{"role": "user", "content": user_message}]},
-            config={"recursion_limit": QUAL_MAX_ITERATIONS * 2},
+            config={"recursion_limit": _QUAL_RECURSION_LIMIT},
         )
 
         messages = result.get("messages", [])
@@ -123,12 +129,35 @@ def run_qual_analyst(
             "tool_calls": tool_calls,
             "iterations": len(tool_calls),
             "error": None,
+            "partial": False,
+        }
+
+    except GraphRecursionError as e:
+        # Budget exhausted before the agent reached a stop condition.
+        # Mirrors quant_analyst's policy: degraded-but-non-fatal — this
+        # team contributes zero assessments but doesn't crash the SF.
+        log.warning(
+            "[qual:%s] recursion budget (%d transitions) exhausted before "
+            "stop condition — accepting partial result (0 assessments). "
+            "score_aggregator will proceed with this team excluded.",
+            team_id, _QUAL_RECURSION_LIMIT,
+        )
+        return {
+            "team_id": team_id,
+            "assessments": [],
+            "additional_candidate": None,
+            "tool_calls": [],
+            "iterations": _QUAL_RECURSION_LIMIT,
+            "error": None,
+            "partial": True,
+            "partial_reason": "recursion_limit_exhausted",
         }
 
     except Exception as e:
         # Record the error so downstream (score_aggregator) can hard-fail
         # instead of silently treating an exception the same as an LLM
-        # legitimately producing zero assessments.
+        # legitimately producing zero assessments. Recursion budget
+        # exhaustion is handled separately above as partial.
         log.error("[qual:%s] ReAct agent failed: %s", team_id, e)
         return {
             "team_id": team_id,
@@ -137,6 +166,7 @@ def run_qual_analyst(
             "tool_calls": [],
             "iterations": 0,
             "error": f"{type(e).__name__}: {e}",
+            "partial": False,
         }
 
 
