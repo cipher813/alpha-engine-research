@@ -594,10 +594,28 @@ class TestHeldThesisUpdateLLMOutput:
 
 
 class TestCIORawOutput:
-    def test_minimal(self):
+    def test_empty_decisions_rejected(self):
+        """``min_length=1`` on ``decisions`` (added 2026-05-02 after the
+        post-PR-D validation invoke caught Sonnet emitting ``[]``)
+        rejects an empty list at the schema layer. The constraint is
+        propagated to the LLM via the structured-output tool schema
+        description AND validated by the SDK parser. Previously the
+        empty-list case only surfaced as a downstream
+        ``CIO structured response had empty decisions list`` raise
+        inside ``run_cio``; the schema-level rejection moves the
+        failure to the call boundary with a clearer Pydantic error."""
         from graph.state_schemas import CIORawOutput
-        c = CIORawOutput()
-        assert c.decisions == []
+        with pytest.raises(ValueError) as exc_info:
+            CIORawOutput()
+        # Pydantic surfaces the constraint by name in the error.
+        assert "decisions" in str(exc_info.value).lower()
+
+    def test_single_decision_accepted(self):
+        from graph.state_schemas import CIORawDecision, CIORawOutput
+        c = CIORawOutput(decisions=[
+            CIORawDecision(ticker="NVDA", decision="ADVANCE"),
+        ])
+        assert len(c.decisions) == 1
 
     def test_decision_literal_includes_no_advance_deadlock(self):
         from graph.state_schemas import CIORawDecision
