@@ -271,15 +271,28 @@ class TestCaptureHardFailsOnS3Error:
         """When the flag is on AND S3 unreachable, ``_capture_if_enabled``
         re-raises ``DecisionCaptureWriteError`` per ``feedback_no_silent_fails``.
 
-        Use moto with a NON-existent bucket. boto3 picks up the mocked
-        endpoint via moto, but ``alpha-engine-research`` doesn't exist
-        (we never created it), so ``put_object`` raises
-        ``NoSuchBucket`` which is wrapped into ``DecisionCaptureWriteError``.
+        Mocks ``boto3.client`` to return a stub whose ``put_object`` raises
+        a ``ClientError`` shaped like NoSuchBucket. Avoids moto-vs-botocore
+        version brittleness — moto 5.x's S3 response serialization fails
+        on newer botocore versions (``Unsupported protocol [rest-json] for
+        service s3``), which surfaced when this test ran in CI on
+        botocore 1.43+.
         """
+        from unittest.mock import patch
+        from botocore.exceptions import ClientError
+
         monkeypatch.setenv("ALPHA_ENGINE_DECISION_CAPTURE_ENABLED", "true")
 
-        with mock_aws():
-            # Deliberately do NOT create the bucket
+        fake_s3 = MagicMock()
+        fake_s3.put_object.side_effect = ClientError(
+            {"Error": {"Code": "NoSuchBucket", "Message": "The specified bucket does not exist"}},
+            "PutObject",
+        )
+
+        # capture_decision (in alpha_engine_lib.decision_capture) calls
+        # boto3.client("s3") at write time. Patch the lib-side import so
+        # the stub takes effect across this whole call.
+        with patch("alpha_engine_lib.decision_capture.boto3.client", return_value=fake_s3):
             from graph.research_graph import _capture_if_enabled
 
             with pytest.raises(DecisionCaptureWriteError):

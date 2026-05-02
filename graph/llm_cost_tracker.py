@@ -257,6 +257,35 @@ def _build_cost_raw_s3_key(*, capture_dt: datetime, run_id: str, agent_id: str) 
 
 _PRICING_FILENAME = "model_pricing.yaml"
 _PRICING_SUBDIR = "cost"
+
+# Anthropic snapshot suffix: -YYYYMMDD appended to the family name
+# (e.g. "claude-haiku-4-5-20251001"). Pricing yaml keys cards by family
+# only ("claude-haiku-4-5") because Anthropic publishes prices per family,
+# not per snapshot. Strip the suffix before lookup so a runtime model
+# pinned to a snapshot still matches its family card.
+import re as _re
+
+_SNAPSHOT_SUFFIX_RE = _re.compile(r"-\d{8}$")
+
+
+def _normalize_model_for_pricing(model_name: str) -> str:
+    """Drop Anthropic ``-YYYYMMDD`` snapshot suffix for price-card lookup.
+
+    ``claude-haiku-4-5-20251001`` → ``claude-haiku-4-5``
+    ``claude-sonnet-4-6``         → ``claude-sonnet-4-6`` (no-op)
+
+    Origin: 2026-05-02 Saturday SF Research step halted with
+    ``PriceCardLookupError: No price card for model
+    'claude-haiku-4-5-20251001' active on 2026-05-02`` after the
+    cost-telemetry primitive (alpha-engine-lib v0.2.4) shipped earlier
+    today and ``recompute_cost`` started enforcing exact-match lookups.
+    The runtime pin in ``config/universe.yaml`` (``per_stock_model:
+    claude-haiku-4-5-20251001``) is a snapshot ID; the pricing yaml
+    cards are keyed per family. Normalizing here is more robust than
+    duplicating yaml entries because every future Anthropic snapshot
+    inherits the family card without config maintenance.
+    """
+    return _SNAPSHOT_SUFFIX_RE.sub("", model_name)
 _price_table: Optional[PriceTable] = None
 
 
@@ -535,7 +564,7 @@ def _enrich_row_with_frame_dimensions(
         try:
             row_dt = datetime.fromisoformat(enriched["timestamp"].replace("Z", "+00:00")) \
                 if isinstance(enriched.get("timestamp"), str) else frame.enter_time
-            card = table.get(model_name, row_dt)
+            card = table.get(_normalize_model_for_pricing(model_name), row_dt)
             cost = compute_cost(
                 input_tokens=enriched["input_tokens"],
                 output_tokens=enriched["output_tokens"],
@@ -753,7 +782,30 @@ def track_llm_cost(
     if model_name != "unknown":
         try:
             table_for_flush = _load_price_table()
-            recompute_cost(metadata, table_for_flush, at=frame.enter_time)
+            # Normalize the snapshot suffix (e.g. -20251001) before lookup —
+            # see _normalize_model_for_pricing docstring for the 2026-05-02
+            # incident this fixes. We pass a copy with the family-only name
+            # so the captured ModelMetadata keeps the snapshot ID
+            # (analytics may want it) while pricing is keyed by family.
+            metadata_for_pricing = metadata.model_copy(update={
+                "model_name": _normalize_model_for_pricing(metadata.model_name),
+            })
+            recompute_cost(metadata_for_pricing, table_for_flush, at=frame.enter_time)
+            metadata.cost_usd = metadata_for_pricing.cost_usd
+        except PriceCardLookupError as exc:
+            # No card for the (normalized) family at this date. Mirror the
+            # per-row path's tolerance: log loudly, leave cost_usd at 0.
+            # Token counts are still captured; the aggregator can re-derive
+            # later if a card is added retroactively. Hard-failing here
+            # would halt the SF on cost-telemetry — disproportionate to a
+            # missing yaml entry.
+            logger.warning(
+                "[cost_tracker] no price card for model=%s (normalized=%s) at %s "
+                "— frame cost_usd left at 0: %s",
+                model_name,
+                _normalize_model_for_pricing(model_name),
+                frame.enter_time, exc,
+            )
         except (PriceTableLoadError, FileNotFoundError) as exc:
             # Pricing yaml absent or malformed — record tokens, leave
             # cost_usd at 0, log loudly. Cost recompute is a downstream
