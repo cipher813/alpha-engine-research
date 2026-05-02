@@ -173,7 +173,13 @@ def _build_summary(df: pd.DataFrame, *, output_key: str, files_read: int) -> dic
     def _group_sum(col: str) -> dict:
         if col not in df.columns or "cost_usd" not in df.columns:
             return {}
-        grouped = df.groupby(col, dropna=False)["cost_usd"].sum().fillna(0)
+        # Replace NaN keys with a meaningful label before grouping. Cross-
+        # sector agents (macro_economist, ic_cio) have no sector_team_id by
+        # design; without this they group under the literal string "nan"
+        # and mask in the by-sector breakdown. Same applies to any rows
+        # missing model_name / run_type / agent_id.
+        col_filled = df[col].fillna("(none)")
+        grouped = df.assign(**{col: col_filled}).groupby(col)["cost_usd"].sum().fillna(0)
         return {str(k): float(v) for k, v in grouped.items()}
 
     return {

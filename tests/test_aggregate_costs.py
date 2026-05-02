@@ -144,14 +144,13 @@ class TestAggregateDayHappyPath:
 
         summary = aggregate_day(s3, _BUCKET, date(2026, 5, 2))
 
+        # NaN sector_team_id (cross-sector agents like macro_economist + ic_cio)
+        # gets mapped to "(none)" so the dashboard groups it cleanly instead
+        # of displaying "nan" / "None".
         assert summary["by_sector_team"] == {
             "tech": pytest.approx(0.0035),
             "financials": pytest.approx(0.006),
-            "nan": pytest.approx(0.060),  # None group renders as 'nan'
-        } or summary["by_sector_team"] == {
-            "tech": pytest.approx(0.0035),
-            "financials": pytest.approx(0.006),
-            "None": pytest.approx(0.060),  # depending on pandas version
+            "(none)": pytest.approx(0.060),
         }
         assert summary["by_model"] == {
             "claude-haiku-4-5": pytest.approx(0.0095),
