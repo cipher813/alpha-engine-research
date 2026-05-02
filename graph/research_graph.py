@@ -49,6 +49,7 @@ from agents.sector_teams.team_config import (
 from agents.sector_teams.sector_team import run_sector_team, SectorTeamContext
 from agents.macro_agent import run_macro_agent_with_reflection
 from agents.investment_committee.ic_cio import run_cio
+from agents.prompt_loader import load_prompt
 from data.population_selector import (
     compute_exits_and_open_slots,
     apply_ic_entries,
@@ -680,12 +681,16 @@ def macro_economist_node(state: ResearchState) -> dict:
         logger.info("[macro] no prior report — generating fresh")
 
     # Cost-telemetry scope wraps the macro-economist primary call + the
-    # macro-critic reflection call as one logical decision.
+    # macro-critic reflection call as one logical decision. The PRIMARY
+    # prompt (macro_agent) stamps prompt_id + prompt_version on
+    # ModelMetadata; the critic prompt is a refinement and not the
+    # canonical prompt for this decision.
     with track_llm_cost(
         agent_id="macro_economist",
         node_name="macro_economist_node",
         run_type="weekly_research",
         run_id=derive_run_id(state),
+        prompt=load_prompt("macro_agent"),
     ):
         result = run_macro_agent_with_reflection(
             prior_report=prior_report,
@@ -993,6 +998,7 @@ def cio_node(state: ResearchState) -> dict:
         node_name="cio_node",
         run_type="weekly_research",
         run_id=derive_run_id(state),
+        prompt=load_prompt("ic_cio_evaluation"),
     ):
         cio_result = run_cio(
             candidates=candidates,
