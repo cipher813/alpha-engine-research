@@ -12,6 +12,7 @@ import logging
 from typing import Optional
 
 from langchain_anthropic import ChatAnthropic
+from langchain_core.messages import HumanMessage
 from langgraph.errors import GraphRecursionError
 from langgraph.prebuilt import create_react_agent
 
@@ -20,18 +21,18 @@ from agents.prompt_loader import load_prompt
 from agents.sector_teams.quant_tools import create_quant_tools
 from agents.sector_teams.team_config import TEAM_SCREENING_PARAMS, QUANT_TOP_N, MAX_TICKERS_IN_PROMPT
 from graph.llm_cost_tracker import get_cost_telemetry_callback
+from strict_mode import is_strict_validation_enabled
 
 log = logging.getLogger(__name__)
 
 # LangGraph state-transition budget. Each ReAct round = 1 LLM message + 1 tool
-# response = 2 transitions, so QUANT_MAX_ITERATIONS rounds need 2× that. The
-# extra +2 accounts for the post-loop ``response_format`` extraction call
-# that ``create_react_agent(..., response_format=QuantAnalystOutput)`` adds
-# (PR 2.3 / commit 84a1ce3, 2026-04-30) — that call sits inside the same
-# subgraph and counts against ``recursion_limit``. Without it, an agent that
-# legitimately uses all 8 rounds blows the budget on the structured-extraction
-# pass. 2026-05-02 SF Research step halted on exactly this for 5 of 6 sector
-# teams.
+# response = 2 transitions, so QUANT_MAX_ITERATIONS rounds need 2× that.
+# The +2 buffer is RETAINED defensively (was added 2026-05-02 to cover
+# response_format's extra extraction call inside the subgraph). After the
+# 2026-05-02 refactor that decouples the structured-output extraction from
+# the ReAct loop, the +2 is no longer load-bearing — but the cost is one
+# transition slot of headroom and removing it offers no benefit. Keep as
+# defensive margin.
 _QUANT_RECURSION_LIMIT = QUANT_MAX_ITERATIONS * 2 + 2
 
 
@@ -76,16 +77,28 @@ def run_quant_analyst(
     # Build system prompt
     system_prompt = _build_system_prompt(team_id, team_params, market_regime, len(sector_tickers))
 
-    # Create ReAct agent via LangGraph. PR 2.3 Step D adds response_format
-    # so the ReAct loop ends with one extra Anthropic call that returns the
-    # parsed Pydantic model directly (available as result['structured_response']).
-    # This retires the _parse_picks_from_response regex parser.
+    # Create ReAct agent via LangGraph. The ReAct loop runs until the model
+    # produces a final-text answer (no more tool calls). The structured-
+    # output extraction is decoupled and runs as a separate
+    # ``with_structured_output`` call after the loop — see "structured
+    # extraction" block below. Mirrors the convention in macro_agent.py /
+    # peer_review.py / ic_cio.py.
+    #
+    # 2026-05-02 refactor rationale: the prior ``response_format=
+    # QuantAnalystOutput`` mechanism inside ``create_react_agent`` adds a
+    # post-loop extraction call to the LangGraph subgraph. That call is
+    # not constrained — Haiku occasionally returns markdown-fenced JSON
+    # text instead of using the structured-output tool, which crashes the
+    # SF with a Pydantic ``ValidationError`` (input_value is the entire
+    # string-with-fences assigned to ``ranked_picks``). Decoupling lets us
+    # drive ``with_structured_output`` directly with ``include_raw=True``
+    # and the strict-mode parsing-error contract, which is the established
+    # pattern across every other LLM-output site in this codebase.
     from graph.state_schemas import QuantAnalystOutput
     agent = create_react_agent(
         model=llm,
         tools=tools,
         prompt=system_prompt,
-        response_format=QuantAnalystOutput,
     )
 
     # Build input message
@@ -109,24 +122,47 @@ def run_quant_analyst(
             config={"recursion_limit": _QUANT_RECURSION_LIMIT},
         )
 
-        # Extract the final response and tool calls from message history.
-        # picks now come from response_format's structured_response Pydantic
-        # model (PR 2.3 Step D); final_text is kept only for the diagnostic
-        # logging path below when picks are empty.
         messages = result.get("messages", [])
         tool_calls = _extract_tool_calls(messages)
         final_text = _get_final_text(messages)
-        structured = result.get("structured_response")
-        if structured is None:
-            # response_format failed to populate — treat as agent failure
-            # so the team's `error` field surfaces to score_aggregator.
+
+        # ── Decoupled structured-output extraction ──────────────────────
+        # Drives ``with_structured_output(include_raw=True)`` directly so
+        # the strict-mode parsing-error contract is honored — no markdown-
+        # fence-text confusion possible because the extraction call is
+        # constrained at the API boundary (Anthropic tool-use). Mirrors
+        # macro_agent.py:184 / peer_review.py / ic_cio.py.
+        if not final_text or not final_text.strip():
             raise RuntimeError(
-                "create_react_agent did not populate structured_response — "
-                "the response_format extraction call failed (no QuantAnalystOutput)"
+                f"[quant:{team_id}] ReAct loop produced empty final_text — "
+                f"nothing to extract structured picks from. tool_calls={len(tool_calls)}"
             )
+        structured_llm = llm.with_structured_output(
+            QuantAnalystOutput, include_raw=True,
+        )
+        extract_msg = HumanMessage(content=(
+            "Extract the final ranked picks from this analyst's answer "
+            "into the structured schema. Use only what's in the text — "
+            "do not invent picks. If the analyst produced no picks, "
+            "return an empty list.\n\n"
+            f"--- ANALYST ANSWER ---\n{final_text}"
+        ))
+        extract_resp = structured_llm.invoke([extract_msg])
+        parsed: QuantAnalystOutput | None = extract_resp.get("parsed")
+        parsing_error = extract_resp.get("parsing_error")
+        if parsing_error is not None:
+            msg = (
+                f"[quant:{team_id}] structured-output parse failed: "
+                f"{type(parsing_error).__name__}: {parsing_error}"
+            )
+            if is_strict_validation_enabled():
+                raise RuntimeError(msg)
+            log.warning("%s — falling back to empty picks (lax mode)", msg)
+            parsed = QuantAnalystOutput()
+        assert parsed is not None
         # Convert QuantPick Pydantic models to dicts for downstream
         # consumers (peer_review, score_aggregator) that use dict-access.
-        picks = [p.model_dump() for p in structured.ranked_picks]
+        picks = [p.model_dump() for p in parsed.ranked_picks]
 
         log.info("[quant:%s] completed — %d picks, %d tool calls",
                  team_id, len(picks), len(tool_calls))
