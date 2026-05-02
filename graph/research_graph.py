@@ -68,7 +68,8 @@ from graph.reducers import take_last, merge_typed_dicts, reject_on_conflict
 from graph.decision_capture_helpers import (
     build_cio_capture_payload,
     build_macro_economist_capture_payload,
-    build_sector_team_capture_payload,
+    build_sector_qual_capture_payload,
+    build_sector_quant_capture_payload,
     derive_run_id,
     is_decision_capture_enabled,
 )
@@ -643,17 +644,47 @@ def sector_team_node(state: ResearchState) -> dict:
     _validate(SectorTeamOutput, result, context=f"sector_team:{team_id}")
 
     # Decision-artifact capture (gated on ALPHA_ENGINE_DECISION_CAPTURE_ENABLED).
+    # Per-sub-agent captures so LLM-as-judge eval can score quant + qual
+    # independently. Cost telemetry stays aggregated under the outer
+    # sector_team:{team_id} track_llm_cost scope above — pop_metadata_for
+    # lookups for sector_quant / sector_qual hit the fallback stub today
+    # (token counts at 0). A future PR can split the cost-tracker scopes
+    # if per-sub-agent cost attribution becomes necessary.
     team_tickers = get_team_tickers(team_id, ctx.scanner_universe, ctx.sector_map)
-    snapshot, summary = build_sector_team_capture_payload(
+    quant_output = result.get("quant_output", {}) or {}
+    qual_output = result.get("qual_output", {}) or {}
+
+    q_snapshot, q_summary = build_sector_quant_capture_payload(
         team_id, ctx, team_tickers=team_tickers,
     )
     _capture_if_enabled(
         state=state,
-        agent_id=f"sector_team:{team_id}",
+        agent_id=f"sector_quant:{team_id}",
         model_name_key="sector_team",
-        input_data_snapshot=snapshot,
-        input_data_summary=summary,
-        agent_output=result,
+        input_data_snapshot=q_snapshot,
+        input_data_summary=q_summary,
+        agent_output=quant_output,
+    )
+
+    # Reproduce the same top5 slice run_sector_team handed to the qual
+    # analyst (sector_team.py:96-109): drop picks without 'ticker', take
+    # first 5. Capturing the actual hand-off avoids over-stating qual's
+    # input.
+    quant_picks = quant_output.get("ranked_picks", []) or []
+    valid_picks = [
+        p for p in quant_picks if isinstance(p, dict) and "ticker" in p
+    ]
+    quant_top5 = valid_picks[:5]
+    ql_snapshot, ql_summary = build_sector_qual_capture_payload(
+        team_id, ctx, quant_top5=quant_top5,
+    )
+    _capture_if_enabled(
+        state=state,
+        agent_id=f"sector_qual:{team_id}",
+        model_name_key="sector_team",
+        input_data_snapshot=ql_snapshot,
+        input_data_summary=ql_summary,
+        agent_output=qual_output,
     )
 
     # Return partial state update — reject_on_conflict reducer merges team

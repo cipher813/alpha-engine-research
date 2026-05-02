@@ -63,43 +63,83 @@ def is_decision_capture_enabled() -> bool:
 # ── Per-node snapshot builders ────────────────────────────────────────────
 
 
-def build_sector_team_capture_payload(
+def build_sector_quant_capture_payload(
     team_id: str,
     ctx: "SectorTeamContext",
     *,
     team_tickers: list[str],
 ) -> tuple[dict[str, Any], str]:
-    """Build (input_data_snapshot, summary) for a sector_team agent invocation.
+    """Build (input_data_snapshot, summary) for the sector quant analyst.
 
-    Captures everything the sector team's quant + qual + peer-review chain
-    semantically depended on EXCEPT the raw OHLCV ``price_data`` (which is
-    digested into ``technical_scores`` before any LLM call sees it).
+    Quant screens the full sector population (~50-200 tickers) by technical
+    score + regime context. Captures only what the quant LLM call actually
+    saw: sector tickers, regime, and the technical_scores slice for that
+    team. News/analyst/insider data is qual-tier — not in this snapshot.
     """
-    held_in_team = [t for t in ctx.held_tickers if t in set(team_tickers)]
-    prior_theses_in_team = {
-        t: dict(ctx.prior_theses[t]) for t in team_tickers if t in ctx.prior_theses
-    }
     snapshot: dict[str, Any] = {
         "team_id": team_id,
         "run_date": ctx.run_date,
         "market_regime": ctx.market_regime,
         "scanner_universe_size": len(ctx.scanner_universe),
-        "team_tickers": list(team_tickers),
-        "held_tickers_in_team": held_in_team,
-        # Full per-ticker payloads — the agent had access to all of these
-        # at decision time. These are bounded in steady state (S&P 500+400
-        # × small per-ticker dicts).
-        "news_data_by_ticker": dict(ctx.news_data_by_ticker),
-        "analyst_data_by_ticker": dict(ctx.analyst_data_by_ticker),
-        "insider_data_by_ticker": dict(ctx.insider_data_by_ticker),
-        "prior_theses_in_team": prior_theses_in_team,
-        "prior_sector_ratings": dict(ctx.prior_sector_ratings),
-        "current_sector_ratings": dict(ctx.current_sector_ratings),
+        "sector_tickers": list(team_tickers),
+        "sector_tickers_count": len(team_tickers),
         # technical_scores filtered to team tickers — full dict is ~900
         # entries, the team only sees ~50-200.
         "technical_scores_team": {
             t: dict(ctx.technical_scores.get(t, {})) for t in team_tickers
         },
+    }
+    summary = (
+        f"team_id={team_id}, run_date={ctx.run_date}, regime={ctx.market_regime}, "
+        f"sector_tickers={len(team_tickers)}, "
+        f"technical_scored={sum(1 for t in team_tickers if t in ctx.technical_scores)}"
+    )
+    return snapshot, summary
+
+
+def build_sector_qual_capture_payload(
+    team_id: str,
+    ctx: "SectorTeamContext",
+    *,
+    quant_top5: list[dict],
+) -> tuple[dict[str, Any], str]:
+    """Build (input_data_snapshot, summary) for the sector qual analyst.
+
+    Qual reviews quant's top 5 picks. Captures only what the qual LLM call
+    actually saw: the top5 hand-off, prior theses for those tickers, and
+    news/analyst/insider data scoped to those tickers (qual's tools fetch
+    by ticker — capturing the full universe would over-state inputs).
+    """
+    top5_tickers = [
+        p["ticker"] for p in quant_top5
+        if isinstance(p, dict) and "ticker" in p
+    ]
+    held_in_top5 = [t for t in ctx.held_tickers if t in set(top5_tickers)]
+    prior_theses_for_top5 = {
+        t: dict(ctx.prior_theses[t]) for t in top5_tickers if t in ctx.prior_theses
+    }
+    snapshot: dict[str, Any] = {
+        "team_id": team_id,
+        "run_date": ctx.run_date,
+        "market_regime": ctx.market_regime,
+        "quant_top5": list(quant_top5),
+        "quant_top5_tickers": top5_tickers,
+        "held_in_top5": held_in_top5,
+        "prior_theses_for_top5": prior_theses_for_top5,
+        "news_data_for_top5": {
+            t: dict(ctx.news_data_by_ticker[t]) for t in top5_tickers
+            if t in ctx.news_data_by_ticker
+        },
+        "analyst_data_for_top5": {
+            t: dict(ctx.analyst_data_by_ticker[t]) for t in top5_tickers
+            if t in ctx.analyst_data_by_ticker
+        },
+        "insider_data_for_top5": {
+            t: dict(ctx.insider_data_by_ticker[t]) for t in top5_tickers
+            if t in ctx.insider_data_by_ticker
+        },
+        "prior_sector_ratings": dict(ctx.prior_sector_ratings),
+        "current_sector_ratings": dict(ctx.current_sector_ratings),
         "memories_summary": {
             "episodic_count": len(ctx.episodic_memories),
             "semantic_count": len(ctx.semantic_memories),
@@ -107,9 +147,8 @@ def build_sector_team_capture_payload(
     }
     summary = (
         f"team_id={team_id}, run_date={ctx.run_date}, regime={ctx.market_regime}, "
-        f"team_tickers={len(team_tickers)}, held_in_team={len(held_in_team)}, "
-        f"news_tickers={len(ctx.news_data_by_ticker)}, "
-        f"prior_theses_in_team={len(prior_theses_in_team)}"
+        f"top5={len(top5_tickers)}, held_in_top5={len(held_in_top5)}, "
+        f"prior_theses_for_top5={len(prior_theses_for_top5)}"
     )
     return snapshot, summary
 
