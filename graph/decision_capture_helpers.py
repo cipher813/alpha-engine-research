@@ -153,6 +153,91 @@ def build_sector_qual_capture_payload(
     return snapshot, summary
 
 
+def build_sector_peer_review_capture_payload(
+    team_id: str,
+    ctx: "SectorTeamContext",
+    *,
+    quant_top5: list[dict],
+    qual_assessments: list[dict],
+    qual_additional_candidate: dict | None,
+) -> tuple[dict[str, Any], str]:
+    """Build (input_data_snapshot, summary) for the sector peer-review call.
+
+    Peer review is the synthesis layer between quant + qual that produces
+    the 2-3 recommendations CIO sees. Captures only what the peer-review
+    LLM saw: quant's top 5, qual's per-ticker assessments, qual's optional
+    additional candidate, the technical_scores slice for those tickers
+    (used when reviewing the addition), and regime.
+    """
+    top5_tickers = [
+        p["ticker"] for p in quant_top5
+        if isinstance(p, dict) and "ticker" in p
+    ]
+    addition_ticker = (
+        qual_additional_candidate.get("ticker")
+        if isinstance(qual_additional_candidate, dict) else None
+    )
+    review_tickers = list(top5_tickers)
+    if addition_ticker and addition_ticker not in review_tickers:
+        review_tickers.append(addition_ticker)
+    snapshot: dict[str, Any] = {
+        "team_id": team_id,
+        "run_date": ctx.run_date,
+        "market_regime": ctx.market_regime,
+        "quant_top5": list(quant_top5),
+        "qual_assessments": list(qual_assessments),
+        "qual_additional_candidate": (
+            dict(qual_additional_candidate)
+            if isinstance(qual_additional_candidate, dict) else None
+        ),
+        "technical_scores_review_set": {
+            t: dict(ctx.technical_scores.get(t, {})) for t in review_tickers
+        },
+    }
+    summary = (
+        f"team_id={team_id}, run_date={ctx.run_date}, regime={ctx.market_regime}, "
+        f"quant_top5={len(top5_tickers)}, qual_assessments={len(qual_assessments)}, "
+        f"addition={'yes' if addition_ticker else 'no'}"
+    )
+    return snapshot, summary
+
+
+def build_thesis_update_capture_payload(
+    team_id: str,
+    ticker: str,
+    ctx: "SectorTeamContext",
+    *,
+    triggers: list[str],
+) -> tuple[dict[str, Any], str]:
+    """Build (input_data_snapshot, summary) for a held-stock thesis update.
+
+    Thesis updates fire conditionally (one Haiku call per held ticker
+    when ``check_material_triggers`` returns non-empty). Captures the
+    inputs to ``_update_thesis_for_held_stock`` (sector_team.py:301):
+    ticker, triggers list, prior thesis, and the news + analyst data
+    surfaced in the prompt.
+    """
+    prior = ctx.prior_theses.get(ticker)
+    news = ctx.news_data_by_ticker.get(ticker)
+    analyst = ctx.analyst_data_by_ticker.get(ticker)
+    snapshot: dict[str, Any] = {
+        "team_id": team_id,
+        "ticker": ticker,
+        "run_date": ctx.run_date,
+        "triggers": list(triggers),
+        "prior_thesis": dict(prior) if isinstance(prior, dict) else None,
+        "news_data": dict(news) if isinstance(news, dict) else None,
+        "analyst_data": dict(analyst) if isinstance(analyst, dict) else None,
+    }
+    summary = (
+        f"team_id={team_id}, ticker={ticker}, run_date={ctx.run_date}, "
+        f"triggers={len(triggers)}, "
+        f"prior_thesis={'yes' if prior else 'no'}, "
+        f"news_articles={len((news or {}).get('articles', []))}"
+    )
+    return snapshot, summary
+
+
 def build_macro_economist_capture_payload(state: dict) -> tuple[dict[str, Any], str]:
     """Build (input_data_snapshot, summary) for the macro_economist node."""
     macro_data = state.get("macro_data", {})

@@ -198,6 +198,102 @@ class TestSectorQualPayloadBuilder:
         assert snapshot["quant_top5_tickers"] == ["AAPL", "MSFT"]
 
 
+class TestSectorPeerReviewPayloadBuilder:
+    def test_payload_is_json_serializable(self, fake_ctx):
+        from graph.decision_capture_helpers import build_sector_peer_review_capture_payload
+        snapshot, summary = build_sector_peer_review_capture_payload(
+            "technology", fake_ctx,
+            quant_top5=[{"ticker": "AAPL", "score": 70}, {"ticker": "MSFT", "score": 65}],
+            qual_assessments=[{"ticker": "AAPL", "qual_score": 72}],
+            qual_additional_candidate={"ticker": "NVDA", "score": 68},
+        )
+        json.dumps(snapshot)
+        assert isinstance(summary, str)
+        assert "team_id=technology" in summary
+        assert "addition=yes" in summary
+
+    def test_no_addition_summary(self, fake_ctx):
+        from graph.decision_capture_helpers import build_sector_peer_review_capture_payload
+        snapshot, summary = build_sector_peer_review_capture_payload(
+            "technology", fake_ctx,
+            quant_top5=[{"ticker": "AAPL", "score": 70}],
+            qual_assessments=[{"ticker": "AAPL", "qual_score": 72}],
+            qual_additional_candidate=None,
+        )
+        assert snapshot["qual_additional_candidate"] is None
+        assert "addition=no" in summary
+
+    def test_review_set_includes_addition(self, fake_ctx):
+        # When qual adds a candidate, technical_scores_review_set must
+        # include the addition's ticker (peer review reviews the
+        # addition's quant case).
+        from graph.decision_capture_helpers import build_sector_peer_review_capture_payload
+        # Add MSFT to technical_scores; AAPL already there from fixture
+        fake_ctx.technical_scores["NVDA"] = {"technical_score": 75}
+        snapshot, _ = build_sector_peer_review_capture_payload(
+            "technology", fake_ctx,
+            quant_top5=[{"ticker": "AAPL"}],
+            qual_assessments=[],
+            qual_additional_candidate={"ticker": "NVDA"},
+        )
+        assert "AAPL" in snapshot["technical_scores_review_set"]
+        assert "NVDA" in snapshot["technical_scores_review_set"]
+
+    def test_payload_includes_required_fields(self, fake_ctx):
+        from graph.decision_capture_helpers import build_sector_peer_review_capture_payload
+        snapshot, _ = build_sector_peer_review_capture_payload(
+            "technology", fake_ctx,
+            quant_top5=[{"ticker": "AAPL"}],
+            qual_assessments=[],
+            qual_additional_candidate=None,
+        )
+        for key in (
+            "team_id", "run_date", "market_regime",
+            "quant_top5", "qual_assessments", "qual_additional_candidate",
+            "technical_scores_review_set",
+        ):
+            assert key in snapshot, f"missing field: {key}"
+
+
+class TestThesisUpdatePayloadBuilder:
+    def test_payload_is_json_serializable(self, fake_ctx):
+        from graph.decision_capture_helpers import build_thesis_update_capture_payload
+        snapshot, summary = build_thesis_update_capture_payload(
+            "technology", "AAPL", fake_ctx,
+            triggers=["earnings_beat", "analyst_upgrade"],
+        )
+        json.dumps(snapshot)
+        assert isinstance(summary, str)
+        assert "ticker=AAPL" in summary
+        assert "triggers=2" in summary
+
+    def test_pulls_per_ticker_inputs(self, fake_ctx):
+        # Thesis-update prompt sees prior_thesis + news + analyst data
+        # for the held ticker; verify the snapshot mirrors that.
+        from graph.decision_capture_helpers import build_thesis_update_capture_payload
+        snapshot, _ = build_thesis_update_capture_payload(
+            "technology", "AAPL", fake_ctx,
+            triggers=["news_event"],
+        )
+        assert snapshot["ticker"] == "AAPL"
+        assert snapshot["prior_thesis"] == {"final_score": 65, "rating": "BUY"}
+        assert snapshot["news_data"] == {"articles": [{"headline": "x"}]}
+        assert snapshot["analyst_data"] == {"consensus_rating": "Buy"}
+
+    def test_missing_per_ticker_inputs(self, fake_ctx):
+        # Held ticker may have no news/analyst data — capture should
+        # carry None rather than crashing.
+        from graph.decision_capture_helpers import build_thesis_update_capture_payload
+        snapshot, summary = build_thesis_update_capture_payload(
+            "technology", "ZZZZ", fake_ctx,
+            triggers=["sector_regime_change"],
+        )
+        assert snapshot["prior_thesis"] is None
+        assert snapshot["news_data"] is None
+        assert snapshot["analyst_data"] is None
+        assert "news_articles=0" in summary
+
+
 class TestMacroEconomistPayloadBuilder:
     def test_minimal_state(self):
         from graph.decision_capture_helpers import build_macro_economist_capture_payload

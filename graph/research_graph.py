@@ -68,8 +68,10 @@ from graph.reducers import take_last, merge_typed_dicts, reject_on_conflict
 from graph.decision_capture_helpers import (
     build_cio_capture_payload,
     build_macro_economist_capture_payload,
+    build_sector_peer_review_capture_payload,
     build_sector_qual_capture_payload,
     build_sector_quant_capture_payload,
+    build_thesis_update_capture_payload,
     derive_run_id,
     is_decision_capture_enabled,
 )
@@ -686,6 +688,51 @@ def sector_team_node(state: ResearchState) -> dict:
         input_data_summary=ql_summary,
         agent_output=qual_output,
     )
+
+    # sector_peer_review capture — the synthesis call that produces the
+    # 2-3 recommendations CIO sees. Reconstruct inputs from quant + qual
+    # outputs to mirror what run_peer_review actually received.
+    peer_output = result.get("peer_review_output", {}) or {}
+    qual_assessments = qual_output.get("assessments", []) or []
+    qual_additional = qual_output.get("additional_candidate")
+    pr_snapshot, pr_summary = build_sector_peer_review_capture_payload(
+        team_id, ctx,
+        quant_top5=quant_top5,
+        qual_assessments=qual_assessments,
+        qual_additional_candidate=qual_additional,
+    )
+    _capture_if_enabled(
+        state=state,
+        agent_id=f"sector_peer_review:{team_id}",
+        model_name_key="sector_team",
+        input_data_snapshot=pr_snapshot,
+        input_data_summary=pr_summary,
+        agent_output=peer_output,
+    )
+
+    # held-stock thesis updates — one capture per ticker that actually
+    # had triggers fire (i.e. an LLM call was made). The no-trigger path
+    # in run_sector_team preserves the prior thesis without calling the
+    # LLM, so we skip those — capturing them would pollute the eval
+    # corpus with non-LLM artifacts.
+    thesis_updates = result.get("thesis_updates", {}) or {}
+    for ticker, updated in thesis_updates.items():
+        if not isinstance(updated, dict):
+            continue
+        triggers = updated.get("triggers") or []
+        if not triggers:
+            continue
+        tu_snapshot, tu_summary = build_thesis_update_capture_payload(
+            team_id, ticker, ctx, triggers=list(triggers),
+        )
+        _capture_if_enabled(
+            state=state,
+            agent_id=f"thesis_update:{team_id}:{ticker}",
+            model_name_key="sector_team",
+            input_data_snapshot=tu_snapshot,
+            input_data_summary=tu_summary,
+            agent_output=updated,
+        )
 
     # Return partial state update — reject_on_conflict reducer merges team
     # outputs (each team_id is disjoint).
