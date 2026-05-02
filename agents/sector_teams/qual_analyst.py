@@ -13,6 +13,7 @@ import logging
 from typing import Optional
 
 from langchain_anthropic import ChatAnthropic
+from langchain_core.messages import HumanMessage
 from langgraph.errors import GraphRecursionError
 from langgraph.prebuilt import create_react_agent
 
@@ -20,12 +21,13 @@ from config import PER_STOCK_MODEL, ANTHROPIC_API_KEY, QUAL_MAX_ITERATIONS
 from agents.prompt_loader import load_prompt
 from agents.sector_teams.qual_tools import create_qual_tools
 from graph.llm_cost_tracker import get_cost_telemetry_callback
+from strict_mode import is_strict_validation_enabled
 
 log = logging.getLogger(__name__)
 
-# +2 over (max_iter × 2) accounts for the post-loop ``response_format``
-# extraction call inside ``create_react_agent``. See quant_analyst.py for
-# the full rationale (PR 2.3 / commit 84a1ce3, 2026-04-30).
+# +2 retained as defensive margin (was load-bearing for response_format's
+# extra call inside the LangGraph subgraph; after the 2026-05-02 refactor
+# the extraction is decoupled and the +2 is unused). See quant_analyst.py.
 _QUAL_RECURSION_LIMIT = QUAL_MAX_ITERATIONS * 2 + 2
 
 
@@ -68,15 +70,21 @@ def run_qual_analyst(
 
     system_prompt = _build_system_prompt(team_id, market_regime, len(quant_top5))
 
-    # PR 2.3 Step D: response_format ends the ReAct loop with a typed
-    # Pydantic model in result['structured_response'], retiring the
-    # _parse_assessments regex parser.
+    # ReAct loop only (no response_format). Structured-output extraction
+    # is decoupled and runs as ``with_structured_output(include_raw=True)``
+    # after the loop ends — same convention as macro_agent.py /
+    # peer_review.py / ic_cio.py. 2026-05-02 refactor rationale: a Haiku
+    # `response_format=...` extraction inside ``create_react_agent``
+    # occasionally returns markdown-fenced JSON text instead of using the
+    # structured-output tool, crashing the SF with a ValidationError. The
+    # decoupled call is constrained at the API boundary and honors the
+    # strict-mode parsing-error contract (lax-mode falls back to empty
+    # assessments; strict-mode raises).
     from graph.state_schemas import QualAnalystOutput
     agent = create_react_agent(
         model=llm,
         tools=tools,
         prompt=system_prompt,
-        response_format=QualAnalystOutput,
     )
 
     picks_text = "\n".join(
@@ -104,18 +112,47 @@ def run_qual_analyst(
 
         messages = result.get("messages", [])
         tool_calls = _extract_tool_calls(messages)
-        structured = result.get("structured_response")
-        if structured is None:
+        final_text = _get_final_text(messages)
+
+        # ── Decoupled structured-output extraction ──────────────────────
+        # Mirrors quant_analyst + macro_agent / peer_review / ic_cio. The
+        # extraction call is constrained at the API boundary so a Haiku
+        # response with markdown-fenced text can no longer end up in a
+        # Pydantic field as a raw string.
+        if not final_text or not final_text.strip():
             raise RuntimeError(
-                "create_react_agent did not populate structured_response — "
-                "the response_format extraction call failed (no QualAnalystOutput)"
+                f"[qual:{team_id}] ReAct loop produced empty final_text — "
+                f"nothing to extract assessments from. tool_calls={len(tool_calls)}"
             )
+        structured_llm = llm.with_structured_output(
+            QualAnalystOutput, include_raw=True,
+        )
+        extract_msg = HumanMessage(content=(
+            "Extract the per-ticker assessments and any additional "
+            "candidate from this analyst's answer into the structured "
+            "schema. Use only what's in the text — do not invent picks. "
+            "If the analyst produced no assessments, return an empty list.\n\n"
+            f"--- ANALYST ANSWER ---\n{final_text}"
+        ))
+        extract_resp = structured_llm.invoke([extract_msg])
+        parsed: QualAnalystOutput | None = extract_resp.get("parsed")
+        parsing_error = extract_resp.get("parsing_error")
+        if parsing_error is not None:
+            msg = (
+                f"[qual:{team_id}] structured-output parse failed: "
+                f"{type(parsing_error).__name__}: {parsing_error}"
+            )
+            if is_strict_validation_enabled():
+                raise RuntimeError(msg)
+            log.warning("%s — falling back to empty assessments (lax mode)", msg)
+            parsed = QualAnalystOutput()
+        assert parsed is not None
         # Convert QualAssessment Pydantic models to dicts for downstream
         # peer_review consumption (which uses dict-access patterns).
-        assessments = [a.model_dump() for a in structured.assessments]
+        assessments = [a.model_dump() for a in parsed.assessments]
         additional_candidate = (
-            structured.additional_candidate.model_dump()
-            if structured.additional_candidate is not None
+            parsed.additional_candidate.model_dump()
+            if parsed.additional_candidate is not None
             else None
         )
 
@@ -178,4 +215,7 @@ def _build_system_prompt(team_id: str, market_regime: str, n_picks: int) -> str:
     )
 
 
-from agents.langchain_utils import extract_tool_calls as _extract_tool_calls
+from agents.langchain_utils import (
+    extract_tool_calls as _extract_tool_calls,
+    get_final_text as _get_final_text,
+)
