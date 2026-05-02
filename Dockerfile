@@ -35,6 +35,12 @@ COPY archive/ ${LAMBDA_TASK_ROOT}/archive/
 COPY evals/ ${LAMBDA_TASK_ROOT}/evals/
 COPY memory/ ${LAMBDA_TASK_ROOT}/memory/
 COPY rag/ ${LAMBDA_TASK_ROOT}/rag/
+# scripts/ holds aggregate_costs.py — imported by lambda/handler.py at the
+# end of every successful run to write the daily cost parquet (PR #81 SF-
+# wire-up). Without this COPY the import raises ModuleNotFoundError at
+# runtime; the handler's try/except catches it (non-fatal — Backtester
+# renders an empty cost section), but the parquet never gets written.
+COPY scripts/ ${LAMBDA_TASK_ROOT}/scripts/
 COPY flow-doctor.yaml ${LAMBDA_TASK_ROOT}/
 COPY preflight.py ${LAMBDA_TASK_ROOT}/
 COPY retry.py ${LAMBDA_TASK_ROOT}/

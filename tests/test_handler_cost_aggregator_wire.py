@@ -82,3 +82,34 @@ def test_aggregator_failure_is_non_fatal():
         "``[cost_aggregator] aggregation failed`` prefix so a recurring "
         "failure is greppable in CloudWatch."
     )
+
+
+def test_scripts_package_is_importable():
+    """Locks ``scripts/__init__.py`` existing — without it, ``from
+    scripts.aggregate_costs import aggregate_day`` raises
+    ``ModuleNotFoundError`` inside the Lambda image (caught 2026-05-02
+    on the post-PR-D validation invoke against v92).
+
+    Implicit namespace packages would work in some environments but the
+    explicit marker keeps the import contract visible AND survives any
+    aggressive Docker COPY filter that strips empty directories."""
+    pkg_init = _HANDLER_PATH.parent.parent / "scripts" / "__init__.py"
+    assert pkg_init.exists(), (
+        f"scripts/__init__.py must exist as the explicit package marker. "
+        f"Without it the Lambda runtime can hit ModuleNotFoundError on "
+        f"``from scripts.aggregate_costs import aggregate_day``."
+    )
+
+
+def test_dockerfile_copies_scripts_directory():
+    """Locks the Dockerfile ``COPY scripts/`` line. Without it the Lambda
+    image is missing the aggregate_costs module entirely and every run
+    logs ``[cost_aggregator] aggregation failed: No module named 'scripts'``
+    (caught 2026-05-02 on the post-PR-D validation invoke)."""
+    dockerfile = _HANDLER_PATH.parent.parent / "Dockerfile"
+    src = dockerfile.read_text()
+    assert "COPY scripts/" in src, (
+        "Dockerfile must include ``COPY scripts/ ${LAMBDA_TASK_ROOT}/scripts/`` "
+        "so the cost-aggregator wire-up at lambda/handler.py can resolve "
+        "``from scripts.aggregate_costs import aggregate_day`` at runtime."
+    )
