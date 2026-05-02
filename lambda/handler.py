@@ -446,6 +446,47 @@ def handler(event, context):
         except Exception as _me:
             logger.warning("data manifest write failed: %s", _me)
 
+        # ── Cost-telemetry aggregation ────────────────────────────────
+        # Aggregate today's per-call JSONLs into a single parquet that
+        # the Backtester evaluator email reads to render the
+        # ``## LLM cost report`` section. Previously a manual CLI step
+        # (``scripts/aggregate_costs.py``); now invoked inline at the
+        # end of every Research Lambda run so no manual action is
+        # required between Research and Backtester.
+        #
+        # Failure is non-fatal — Research already succeeded by this
+        # point and the Backtester gracefully renders an empty cost
+        # section if the parquet is absent. Logged WARN so a recurring
+        # failure surfaces without blocking trading.
+        if final_state.get("email_sent"):
+            try:
+                import boto3 as _boto3_agg
+                import datetime as _dt
+                from scripts.aggregate_costs import aggregate_day
+                _agg_summary = aggregate_day(
+                    s3_client=_boto3_agg.client("s3"),
+                    bucket=os.environ.get("RESEARCH_BUCKET", "alpha-engine-research"),
+                    target_date=_dt.date.today(),
+                )
+                if _agg_summary is not None:
+                    logger.info(
+                        "[cost_aggregator] wrote parquet: rows=%d cost=$%.4f → %s",
+                        _agg_summary.get("rows_in", 0),
+                        _agg_summary.get("total_cost_usd", 0.0),
+                        _agg_summary.get("output_key", "<unknown>"),
+                    )
+                else:
+                    logger.warning(
+                        "[cost_aggregator] no JSONL files found for today — "
+                        "Backtester email will render empty cost section"
+                    )
+            except Exception as _agg_exc:
+                logger.warning(
+                    "[cost_aggregator] aggregation failed (non-fatal — "
+                    "Backtester gracefully renders empty cost section): %s",
+                    _agg_exc,
+                )
+
         logger.info("Run complete. Email sent: %s", final_state.get("email_sent", False))
         return {
             "status": "OK",
