@@ -143,7 +143,8 @@ def run_cio(
     structured_llm = llm.with_structured_output(CIORawOutput)
     try:
         raw_output: CIORawOutput = structured_llm.invoke(
-            [HumanMessage(content=prompt)]
+            [HumanMessage(content=prompt)],
+            config={"metadata": load_prompt("ic_cio_evaluation").langsmith_metadata()},
         )
         decisions_dicts = [d.model_dump() for d in raw_output.decisions]
         if not decisions_dicts:
