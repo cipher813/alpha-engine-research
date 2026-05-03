@@ -24,7 +24,7 @@ Multi-agent investment-research pipeline. Six sector teams, a CIO, and a macro e
 
 ## Phase 2 measurement contribution
 
-Research is the system's narrow waist between data and decisions. Phase 2 contribution: **every agent decision is captured as a structured artifact** — prompt id + version + hash, full prompt context, input snapshot, agent output, and cost — so any decision is replayable, auditable, and attributable to a specific prompt revision. The LLM-as-judge layer scores agent quality at key stages with rubric-based grading. Together these produce the substrate that lets Phase 3 measure whether prompt or model changes actually improve the agent layer, not just whether the system happens to make money in a given week.
+This is where every agent decision in the system happens. Each one is captured as a structured artifact — prompt id + version + hash, full prompt context, input snapshot, agent output, and cost — replayable, auditable, and attributable to a specific prompt revision. The LLM-as-judge layer scores agent quality at key stages against rubric prompts. Together these are the substrate that lets Phase 3 measure whether prompt or model changes actually improve agent quality.
 
 ## Architecture
 
