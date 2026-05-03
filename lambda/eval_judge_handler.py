@@ -11,7 +11,18 @@ Event shape (all fields optional):
       "force_sonnet_pass": false,    # SF passes True every 4th run
       "haiku_model": "claude-haiku-4-5",
       "sonnet_model": "claude-sonnet-4-6",
-      "haiku_escalate_threshold": 3
+      "haiku_escalate_threshold": 3,
+
+      # PR 4e test-track flags — both default false:
+      "dry_run": false,              # list + render only, no LLM calls,
+                                     # no persists, no metrics. $0.
+      "judge_only": false            # real LLM calls but isolated outputs:
+                                     # writes under decision_artifacts/
+                                     #   _eval_judge_only/ and CW namespace
+                                     # AlphaEngine/EvalJudgeOnly. Lets us
+                                     # validate against captured production
+                                     # artifacts without polluting the
+                                     # rolling-mean window or dashboard.
     }
 
 Returns:
@@ -116,12 +127,15 @@ def handler(event, context):
     haiku_escalate_threshold = int(
         event.get("haiku_escalate_threshold", DEFAULT_HAIKU_ESCALATE_THRESHOLD)
     )
+    dry_run = bool(event.get("dry_run", False))
+    judge_only = bool(event.get("judge_only", False))
 
     logger.info(
         "[eval_judge_handler] start date=%s force_sonnet_pass=%s "
-        "haiku_model=%s sonnet_model=%s threshold=%d",
+        "haiku_model=%s sonnet_model=%s threshold=%d "
+        "dry_run=%s judge_only=%s",
         date, force_sonnet_pass, haiku_model, sonnet_model,
-        haiku_escalate_threshold,
+        haiku_escalate_threshold, dry_run, judge_only,
     )
 
     try:
@@ -132,6 +146,8 @@ def handler(event, context):
             sonnet_model=sonnet_model,
             force_sonnet_pass=force_sonnet_pass,
             haiku_escalate_threshold=haiku_escalate_threshold,
+            dry_run=dry_run,
+            judge_only=judge_only,
         )
     except Exception as exc:  # noqa: BLE001
         logger.exception("[eval_judge_handler] orchestrator failed hard")

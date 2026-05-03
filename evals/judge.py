@@ -186,17 +186,24 @@ def evaluate_artifact(
 # ── Persistence ───────────────────────────────────────────────────────────
 
 
+DEFAULT_EVAL_PREFIX = "decision_artifacts/_eval/"
+"""Production eval-artifact prefix. PR 4e ``judge_only`` mode swaps in
+``decision_artifacts/_eval_judge_only/`` so isolated test runs don't
+pollute the prod corpus the rolling-mean Lambda + dashboard read."""
+
+
 def build_eval_s3_key(
     *,
     judged_agent_id: str,
     run_id: str,
     judge_model: str,
     timestamp: Optional[datetime] = None,
+    prefix: str = DEFAULT_EVAL_PREFIX,
 ) -> str:
     """Build the canonical S3 key for an eval artifact.
 
     Path shape (extends ROADMAP §1630 to disambiguate two-tier judges):
-      ``decision_artifacts/_eval/{YYYY-MM-DD}/{judged_agent_id}/{run_id}.{judge_model}.json``
+      ``{prefix}{YYYY-MM-DD}/{judged_agent_id}/{run_id}.{judge_model}.json``
 
     The ``judge_model`` segment lets Haiku-tier and Sonnet-tier evals
     of the same artifact coexist without clobbering each other (PR 3b
@@ -208,11 +215,15 @@ def build_eval_s3_key(
     now-UTC) so multiple runs on the same calendar day cluster under
     one prefix. ``run_id`` is the filename stem so retries with the
     same run_id + judge_model idempotently overwrite.
+
+    ``prefix`` (PR 4e) lets ``judge_only`` mode redirect outputs to
+    an isolated path so test runs don't pollute prod observability.
+    Must end in ``/``.
     """
     ts = timestamp or datetime.now(timezone.utc)
     date_partition = ts.strftime("%Y-%m-%d")
     return (
-        f"decision_artifacts/_eval/{date_partition}/"
+        f"{prefix}{date_partition}/"
         f"{judged_agent_id}/{run_id}.{judge_model}.json"
     )
 
@@ -222,12 +233,17 @@ def persist_eval_artifact(
     *,
     s3_client: Any = None,
     bucket: str = S3_BUCKET,
+    prefix: str = DEFAULT_EVAL_PREFIX,
 ) -> str:
     """Write an eval artifact to S3 and return the S3 key.
 
-    Uses the canonical ``decision_artifacts/_eval/...`` path. Hard-fails
-    on S3 errors (per ``feedback_no_silent_fails``) — callers should
-    handle the exception explicitly if running in best-effort mode.
+    Uses the canonical ``decision_artifacts/_eval/...`` path by default.
+    Hard-fails on S3 errors (per ``feedback_no_silent_fails``) — callers
+    should handle the exception explicitly if running in best-effort
+    mode.
+
+    ``prefix`` (PR 4e) lets ``judge_only`` mode persist to an isolated
+    path. Must end in ``/`` and is forwarded to ``build_eval_s3_key``.
 
     The ``s3_client`` parameter accepts an injected client for tests;
     production passes None and the helper builds the default client.
@@ -242,6 +258,7 @@ def persist_eval_artifact(
         run_id=artifact.run_id,
         judge_model=artifact.judge_model,
         timestamp=artifact_ts,
+        prefix=prefix,
     )
     body = artifact.model_dump_json(indent=2).encode("utf-8")
     s3.put_object(Bucket=bucket, Key=key, Body=body)

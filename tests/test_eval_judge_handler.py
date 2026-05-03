@@ -30,6 +30,11 @@ def _ok_summary() -> dict:
         "haiku_model": "claude-haiku-4-5",
         "sonnet_model": "claude-sonnet-4-6",
         "force_sonnet_pass": False,
+        "dry_run": False,
+        "judge_only": False,
+        "eval_prefix": "decision_artifacts/_eval/",
+        "cw_namespace": "AlphaEngine/Eval",
+        "would_evaluate": [],
     }
 
 
@@ -149,3 +154,38 @@ class TestHandler:
         assert captured["haiku_model"] == "claude-haiku-4-5-test"
         assert captured["sonnet_model"] == "claude-sonnet-4-6-test"
         assert captured["haiku_escalate_threshold"] == 4
+
+    def test_dry_run_and_judge_only_flags_default_false(self, handler_mod):
+        """Production Saturday SF invocations don't pass dry_run /
+        judge_only — both must default to False so the SF path stays
+        on the prod track."""
+        captured = {}
+
+        def fake_corpus(**kwargs):
+            captured.update(kwargs)
+            return _ok_summary()
+
+        with patch.object(handler_mod, "_ensure_init"), \
+             patch("evals.orchestrator.evaluate_corpus", side_effect=fake_corpus):
+            handler_mod.handler({"date": "2026-05-09"}, context=None)
+
+        assert captured["dry_run"] is False
+        assert captured["judge_only"] is False
+
+    def test_dry_run_and_judge_only_flags_pass_through(self, handler_mod):
+        captured = {}
+
+        def fake_corpus(**kwargs):
+            captured.update(kwargs)
+            return _ok_summary()
+
+        with patch.object(handler_mod, "_ensure_init"), \
+             patch("evals.orchestrator.evaluate_corpus", side_effect=fake_corpus):
+            handler_mod.handler({
+                "date": "2026-05-09",
+                "dry_run": True,
+                "judge_only": True,
+            }, context=None)
+
+        assert captured["dry_run"] is True
+        assert captured["judge_only"] is True

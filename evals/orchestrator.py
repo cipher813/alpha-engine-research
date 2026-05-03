@@ -44,11 +44,12 @@ import boto3
 from alpha_engine_lib.decision_capture import DecisionArtifact
 
 from evals.judge import (
+    DEFAULT_EVAL_PREFIX,
     evaluate_artifact,
     persist_eval_artifact,
     resolve_rubric_for_agent,
 )
-from evals.metrics import emit_eval_metric
+from evals.metrics import DEFAULT_NAMESPACE, emit_eval_metric
 from graph.state_schemas import RubricEvalArtifact
 
 logger = logging.getLogger(__name__)
@@ -68,6 +69,16 @@ DEFAULT_HAIKU_ESCALATE_THRESHOLD = 3
 """Any Haiku dimension score strictly below this value escalates the
 artifact to a Sonnet pass. 3 is the rubric midpoint — below 3 means
 Haiku flagged a real problem, not just an average dimension."""
+
+JUDGE_ONLY_EVAL_PREFIX = "decision_artifacts/_eval_judge_only/"
+"""S3 path prefix for ``judge_only`` test-track outputs (PR 4e).
+Isolated from the prod prefix so test runs don't pollute the
+rolling-mean window or the dashboard's quality-trend page."""
+
+JUDGE_ONLY_CW_NAMESPACE = "AlphaEngine/EvalJudgeOnly"
+"""CloudWatch metric namespace for ``judge_only`` test-track emissions
+(PR 4e). Distinct namespace keeps test datapoints out of the prod
+``AlphaEngine/Eval`` stream the alarm + rolling-mean Lambda read."""
 
 _BUCKET_DEFAULT = "alpha-engine-research"
 
@@ -134,6 +145,8 @@ def evaluate_corpus(
     sonnet_model: str = DEFAULT_SONNET_MODEL,
     force_sonnet_pass: bool = False,
     haiku_escalate_threshold: int = DEFAULT_HAIKU_ESCALATE_THRESHOLD,
+    dry_run: bool = False,
+    judge_only: bool = False,
     s3_client: Optional[Any] = None,
     cloudwatch_client: Optional[Any] = None,
     emit_metrics: bool = True,
@@ -153,9 +166,33 @@ def evaluate_corpus(
     observability OF observability — they're caught + counted in
     ``summary['metric_emission_failures']`` but never halt the run.
     Set ``emit_metrics=False`` to disable in tests / local replay.
+
+    PR 4e test-track flags:
+
+    * ``dry_run=True`` — list artifacts + resolve rubrics + render
+      rubric prompts, but do NOT call Anthropic, do NOT persist eval
+      artifacts, do NOT emit metrics. Returns ``would_evaluate`` in
+      the summary so operators can confirm what WOULD have run.
+      Cost: $0.
+
+    * ``judge_only=True`` — real LLM calls and full pipeline, but
+      writes eval artifacts under ``decision_artifacts/_eval_judge_only/``
+      and emits CloudWatch metrics under ``AlphaEngine/EvalJudgeOnly``
+      so test runs don't pollute prod observability. Cost: real
+      judge-LLM calls (~$0.005-$0.05 per run vs ~$2-5 for a full
+      Research re-run that this avoids).
+
+    The two flags compose: ``dry_run=True, judge_only=True`` is the
+    cheapest end-to-end smoke (lists + renders prompts against prod
+    captures, no LLM, no writes anywhere).
     """
     s3 = s3_client or boto3.client("s3")
-    cw = cloudwatch_client or (boto3.client("cloudwatch") if emit_metrics else None)
+    cw = cloudwatch_client or (
+        boto3.client("cloudwatch") if (emit_metrics and not dry_run) else None
+    )
+    eval_prefix = JUDGE_ONLY_EVAL_PREFIX if judge_only else DEFAULT_EVAL_PREFIX
+    cw_namespace = JUDGE_ONLY_CW_NAMESPACE if judge_only else DEFAULT_NAMESPACE
+
     capture_keys = list_capture_keys(s3, date=date, bucket=bucket)
 
     haiku_evaluated = 0
@@ -164,13 +201,18 @@ def evaluate_corpus(
     metric_emission_failures = 0
     failed: list[dict[str, str]] = []
     persisted_keys: list[str] = []
+    would_evaluate: list[dict[str, str]] = []
 
     def _try_emit(eval_artifact: RubricEvalArtifact) -> None:
         nonlocal metric_emission_failures
-        if not emit_metrics:
+        if not emit_metrics or dry_run:
             return
         try:
-            emit_eval_metric(eval_artifact, cloudwatch_client=cw)
+            emit_eval_metric(
+                eval_artifact,
+                namespace=cw_namespace,
+                cloudwatch_client=cw,
+            )
         except Exception:  # noqa: BLE001
             logger.exception(
                 "[eval_orchestrator] cloudwatch emit failed for "
@@ -199,13 +241,25 @@ def evaluate_corpus(
             skipped_unmapped += 1
             continue
 
+        # dry_run short-circuits all LLM calls, persists, and metric
+        # writes — operator inspects ``would_evaluate`` to confirm
+        # the Lambda would touch the right corpus before paying for
+        # real Haiku/Sonnet calls.
+        if dry_run:
+            would_evaluate.append({
+                "key": key,
+                "agent_id": artifact.agent_id,
+                "rubric": rubric,
+            })
+            continue
+
         # Haiku tier — every mapped artifact every run.
         try:
             haiku_eval = evaluate_artifact(
                 artifact, judge_model=haiku_model, judged_artifact_s3_key=key,
             )
             haiku_persisted_key = persist_eval_artifact(
-                haiku_eval, s3_client=s3, bucket=bucket,
+                haiku_eval, s3_client=s3, bucket=bucket, prefix=eval_prefix,
             )
             haiku_evaluated += 1
             persisted_keys.append(haiku_persisted_key)
@@ -235,7 +289,7 @@ def evaluate_corpus(
                 artifact, judge_model=sonnet_model, judged_artifact_s3_key=key,
             )
             sonnet_persisted_key = persist_eval_artifact(
-                sonnet_eval, s3_client=s3, bucket=bucket,
+                sonnet_eval, s3_client=s3, bucket=bucket, prefix=eval_prefix,
             )
             sonnet_evaluated += 1
             persisted_keys.append(sonnet_persisted_key)
@@ -269,4 +323,9 @@ def evaluate_corpus(
         "haiku_model": haiku_model,
         "sonnet_model": sonnet_model,
         "force_sonnet_pass": force_sonnet_pass,
+        "dry_run": dry_run,
+        "judge_only": judge_only,
+        "eval_prefix": eval_prefix,
+        "cw_namespace": cw_namespace,
+        "would_evaluate": would_evaluate,
     }
