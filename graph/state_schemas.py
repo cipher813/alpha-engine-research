@@ -544,3 +544,69 @@ class CIORawOutput(BaseModel):
         min_length=1,
         description="One entry per input candidate. Never empty — every candidate must receive a decision (ADVANCE / REJECT / NO_ADVANCE_DEADLOCK).",
     )
+
+
+# ── LLM-as-judge eval (PR 2 of P3.1 workstream) ───────────────────────────
+
+
+class RubricDimensionScore(BaseModel):
+    """One dimension's score from the eval judge.
+
+    Score is integer 1-5 per the rubric anchors (see
+    eval_rubric_*.txt prompts in alpha-engine-config). The ``reasoning``
+    string carries the judge's per-dimension justification — used by
+    the dashboard's quality-trend page to surface WHY scores dropped,
+    not just THAT they dropped.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    dimension: str = Field(description="Rubric dimension name (e.g. 'numerical_grounding', 'signal_calibration').")
+    score: int = Field(ge=1, le=5, description="Integer score 1-5 per the rubric anchors.")
+    reasoning: str = Field(description="1-2 sentence justification citing specific artifact content that drove the score.")
+
+
+class RubricEvalLLMOutput(BaseModel):
+    """LLM-extraction shape for the eval judge call.
+
+    The judge LLM (Haiku or Sonnet) produces this against a rubric
+    prompt + DecisionArtifact pair. Wrapped in ``RubricEvalArtifact``
+    by ``evals.judge.evaluate_artifact`` before persisting to S3.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    dimension_scores: list[RubricDimensionScore] = Field(
+        default_factory=list,
+        min_length=1,
+        description="One score entry per rubric dimension. Order matches the rubric prompt's dimension list.",
+    )
+    overall_reasoning: str = Field(
+        description="1-2 sentence cross-dimension summary — strongest signal + most concerning gap.",
+    )
+
+
+class RubricEvalArtifact(BaseModel):
+    """One persisted eval result.
+
+    Stored at ``decision_artifacts/_eval/{YYYY-MM-DD}/{judged_agent_id}/
+    {run_id}.json`` (per ROADMAP §1630). Wraps the LLM output with
+    metadata that ties it back to the judged decision artifact, the
+    rubric prompt version, and the judge model.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1] = 1
+    run_id: str = Field(description="Pipeline-invocation identifier; ties this eval to the judged artifact's run_id.")
+    timestamp: str = Field(description="ISO-8601 capture time (wall clock at the moment the wrapper writes to S3).")
+    judged_agent_id: str = Field(description="agent_id of the DecisionArtifact this eval is scoring (e.g. 'sector_quant:technology').")
+    judged_artifact_s3_key: str | None = Field(
+        default=None,
+        description="Backref to the judged artifact's S3 key. Optional — None if eval was run on an in-memory artifact.",
+    )
+    rubric_id: str = Field(description="Rubric prompt name (e.g. 'eval_rubric_sector_quant').")
+    rubric_version: str = Field(description="Rubric prompt version at eval time (semver from prompt frontmatter).")
+    judge_model: str = Field(description="Model name of the judge LLM (e.g. 'claude-haiku-4-5').")
+    dimension_scores: list[RubricDimensionScore]
+    overall_reasoning: str
