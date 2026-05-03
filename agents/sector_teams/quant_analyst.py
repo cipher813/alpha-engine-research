@@ -16,7 +16,7 @@ from langchain_core.messages import HumanMessage
 from langgraph.errors import GraphRecursionError
 from langgraph.prebuilt import create_react_agent
 
-from config import PER_STOCK_MODEL, ANTHROPIC_API_KEY, QUANT_MAX_ITERATIONS
+from config import ANTHROPIC_API_KEY, MAX_TOKENS_STRATEGIC, PER_STOCK_MODEL, QUANT_MAX_ITERATIONS
 from agents.prompt_loader import load_prompt
 from agents.sector_teams.quant_tools import create_quant_tools
 from agents.sector_teams.team_config import TEAM_SCREENING_PARAMS, QUANT_TOP_N, MAX_TICKERS_IN_PROMPT
@@ -60,11 +60,14 @@ def run_quant_analyst(
 
     # Create LLM. Cost-telemetry callback aggregates token usage across
     # the ReAct loop's multiple Anthropic calls into the active
-    # ``track_llm_cost`` frame.
+    # ``track_llm_cost`` frame. Strategic-tier max_tokens mirrors
+    # qual_analyst — covers the structured-output extraction call's
+    # list of ranked picks (5 picks × ~400 tokens each + envelope ≈
+    # 2500 tokens typical, more at verbose end). Same risk class.
     llm = ChatAnthropic(
         model=PER_STOCK_MODEL,
         anthropic_api_key=api_key or ANTHROPIC_API_KEY,
-        max_tokens=4096,
+        max_tokens=MAX_TOKENS_STRATEGIC,
         callbacks=[get_cost_telemetry_callback()],
     )
 

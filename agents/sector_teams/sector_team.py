@@ -20,7 +20,10 @@ from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage
 
 from config import (
-    PER_STOCK_MODEL, ANTHROPIC_API_KEY, TEAM_PICKS_PER_RUN,
+    ANTHROPIC_API_KEY,
+    MAX_TOKENS_PER_STOCK,
+    PER_STOCK_MODEL,
+    TEAM_PICKS_PER_RUN,
 )
 from agents.sector_teams.team_config import (
     TEAM_SECTORS, TEAM_SCREENING_PARAMS, get_team_tickers,
@@ -313,10 +316,15 @@ def _update_thesis_for_held_stock(
     # research_graph during cost-tracker setup).
     from graph.llm_cost_tracker import get_cost_telemetry_callback
 
+    # Held-stock thesis update is a single-ticker output (bull_case +
+    # bear_case + score updates), fits the per-stock tier. Was hardcoded
+    # at 500 before consolidation 2026-05-03; MAX_TOKENS_PER_STOCK=800
+    # gives 60% more headroom for verbose triggers without altering
+    # other call sites.
     llm = ChatAnthropic(
         model=PER_STOCK_MODEL,
         anthropic_api_key=api_key or ANTHROPIC_API_KEY,
-        max_tokens=500,
+        max_tokens=MAX_TOKENS_PER_STOCK,
         callbacks=[get_cost_telemetry_callback()],
     )
 
