@@ -624,11 +624,53 @@ class RubricEvalLLMOutput(BaseModel):
     dimension_scores: list[RubricDimensionScore] = Field(
         default_factory=list,
         min_length=1,
-        description="One score entry per rubric dimension. Order matches the rubric prompt's dimension list.",
+        description=(
+            "Array of per-dimension score entries. Return one entry "
+            "per rubric dimension as a structured array (NOT a single "
+            "JSON-encoded string). Each entry must be a JSON object "
+            "with `dimension`, `score`, and `reasoning` fields. Order "
+            "matches the rubric prompt's dimension list."
+        ),
     )
     overall_reasoning: str = Field(
         description="1-2 sentence cross-dimension summary — strongest signal + most concerning gap.",
     )
+
+    @field_validator("dimension_scores", mode="before")
+    @classmethod
+    def _parse_string_as_list(cls, v):
+        """Defense for an observed Haiku failure mode (first surfaced
+        2026-05-03 in judge_only smoke against new-format Sat 5/3
+        captures): the model occasionally returns ``dimension_scores``
+        as a JSON-encoded string instead of a structured array, even
+        though the tool spec declares it as a list. Same pattern PR
+        #99 fixed for ``JointFinalizationOutput.selected_decisions``.
+
+        We log loudly (so flow-doctor surfaces the drift event in CW
+        alarms) and parse-and-continue rather than hard-fail, because
+        the downstream cost of a hard-fail is a wasted ~$0.0001 judge
+        call and a missing eval datapoint; the log entry preserves
+        observability while the parse salvages the run. If the string
+        isn't valid JSON list, fall through to the normal Pydantic
+        list-type error so the failure mode stays loud.
+        """
+        if isinstance(v, str):
+            import json
+            import logging
+            try:
+                parsed = json.loads(v)
+                if isinstance(parsed, list):
+                    logging.getLogger(__name__).warning(
+                        "[rubric_eval_schema] LLM returned "
+                        "dimension_scores as JSON-string of length %d "
+                        "instead of a structured array; parsed-and-continued "
+                        "(see schema-vs-LLM drift class).",
+                        len(v),
+                    )
+                    return parsed
+            except json.JSONDecodeError:
+                pass
+        return v
 
 
 class RubricEvalArtifact(BaseModel):

@@ -329,3 +329,88 @@ class TestPersistEvalArtifact:
             artifact, s3_client=mocked_s3, bucket="alpha-engine-research",
         )
         assert "/2026-04-25/" in key
+
+
+# ── RubricEvalLLMOutput stringify defense ─────────────────────────────────
+
+
+class TestRubricEvalLLMOutputStringDefense:
+    """Pins the 2026-05-03 fix for an observed Haiku failure mode:
+    ``dimension_scores`` returned as a JSON-encoded string instead of
+    a structured array. First surfaced in the judge_only smoke against
+    Sat 5/3 captures (5/32 evals failed at the schema boundary).
+    Mirrors the JointFinalizationOutput defense pattern from PR #99.
+    """
+
+    def test_actual_list_passes_through_unchanged(self):
+        out = RubricEvalLLMOutput(
+            dimension_scores=[
+                RubricDimensionScore(
+                    dimension="numerical_grounding", score=4,
+                    reasoning="cited multiples match filing",
+                ),
+                RubricDimensionScore(
+                    dimension="signal_calibration", score=3,
+                    reasoning="confidence within range",
+                ),
+            ],
+            overall_reasoning="balanced",
+        )
+        assert len(out.dimension_scores) == 2
+        assert out.dimension_scores[0].dimension == "numerical_grounding"
+
+    def test_json_string_of_list_is_parsed_and_logged(self, caplog):
+        """The exact failure shape Haiku produced 2026-05-03: a string
+        whose contents are valid JSON for the expected list."""
+        import logging
+        payload = json.dumps([
+            {"dimension": "numerical_grounding", "score": 4, "reasoning": "ok"},
+            {"dimension": "signal_calibration", "score": 3, "reasoning": "tight"},
+        ])
+
+        with caplog.at_level(logging.WARNING):
+            out = RubricEvalLLMOutput(
+                dimension_scores=payload,  # type: ignore[arg-type]
+                overall_reasoning="ok",
+            )
+
+        assert len(out.dimension_scores) == 2
+        assert out.dimension_scores[0].dimension == "numerical_grounding"
+        assert any(
+            "schema-vs-LLM drift" in rec.message
+            or "JSON-string" in rec.message
+            for rec in caplog.records
+        )
+
+    def test_invalid_json_string_raises_normal_pydantic_error(self):
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError, match="list_type|valid list"):
+            RubricEvalLLMOutput(
+                dimension_scores="not even close to valid json",  # type: ignore[arg-type]
+                overall_reasoning="ok",
+            )
+
+    def test_truncated_jsonlist_string_still_raises_loud(self):
+        """Truncated mid-string from max_tokens hit. Validator's
+        json.loads can't parse incomplete JSON → falls through to loud
+        Pydantic list_type error. Pin so silent rescue can't regress."""
+        from pydantic import ValidationError
+
+        truncated = (
+            '[\n  {\n    "dimension": "numerical_grounding",\n    "score": 4,\n'
+            '    "reasoning": "Extensive citation analysis was attem'
+            # truncated mid-string, no closing
+        )
+        with pytest.raises(ValidationError, match="list_type|valid list"):
+            RubricEvalLLMOutput(
+                dimension_scores=truncated,  # type: ignore[arg-type]
+                overall_reasoning="ok",
+            )
+
+    def test_field_description_present(self):
+        """Pin the 'structured array, NOT JSON-encoded string' hint
+        in the tool-use spec — same pattern as JointFinalizationOutput."""
+        field_info = RubricEvalLLMOutput.model_fields["dimension_scores"]
+        assert "structured array" in (field_info.description or "")
+        assert "NOT" in (field_info.description or "")
