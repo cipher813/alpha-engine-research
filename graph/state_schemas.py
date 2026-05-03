@@ -450,7 +450,15 @@ class JointFinalizationOutput(BaseModel):
 
     model_config = ConfigDict(extra="allow")
 
-    selected_decisions: list[JointFinalizationDecision] = Field(default_factory=list)
+    selected_decisions: list[JointFinalizationDecision] = Field(
+        default_factory=list,
+        description=(
+            "Array of per-ticker selection decisions. Return one entry "
+            "per selected ticker as a structured array (NOT a single "
+            "JSON-encoded string). Each entry must be a JSON object "
+            "with `ticker` and `rationale` fields."
+        ),
+    )
     team_rationale: str = Field(
         default="",
         description=(
@@ -458,6 +466,43 @@ class JointFinalizationOutput(BaseModel):
             "across the slate, asymmetry mix. 1-2 sentences."
         ),
     )
+
+    @field_validator("selected_decisions", mode="before")
+    @classmethod
+    def _parse_string_as_list(cls, v):
+        """Defense for an observed Sonnet failure mode: the model
+        occasionally returns ``selected_decisions`` as a JSON-encoded
+        string instead of a structured array, even though the tool
+        spec declares it as a list. First seen 2026-05-03 in SF
+        ``eval-pipeline-validation-2`` where Sonnet returned
+        ``'[\\n  {\\n    "ticker": "C..."\\n'`` — valid JSON inside a
+        string wrapper.
+
+        We log loudly (so flow-doctor surfaces the drift event in CW
+        alarms) and parse-and-continue rather than hard-fail, because
+        the downstream cost of a hard-fail is a wasted ~$5 Research
+        run; the log entry preserves observability while the parse
+        salvages the run. If the string isn't valid JSON list, fall
+        through to the normal Pydantic list-type error so the failure
+        mode stays loud.
+        """
+        if isinstance(v, str):
+            import json
+            import logging
+            try:
+                parsed = json.loads(v)
+                if isinstance(parsed, list):
+                    logging.getLogger(__name__).warning(
+                        "[joint_finalization_schema] LLM returned "
+                        "selected_decisions as JSON-string of length %d "
+                        "instead of a structured array; parsed-and-continued "
+                        "(see schema-vs-LLM drift class).",
+                        len(v),
+                    )
+                    return parsed
+            except json.JSONDecodeError:
+                pass
+        return v
 
 
 class HeldThesisUpdateLLMOutput(BaseModel):

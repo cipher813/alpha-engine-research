@@ -698,3 +698,92 @@ class TestCIORawOutput:
         )
         assert len(c.decisions) == 2
         assert c.decisions[0].entry_thesis.conviction == 85
+
+
+class TestJointFinalizationOutputStringDefense:
+    """Pins the 2026-05-03 fix for an observed Sonnet failure mode:
+    ``selected_decisions`` returned as a JSON-encoded string instead
+    of a structured array. First surfaced in SF
+    ``eval-pipeline-validation-2-20260503-130145``.
+    """
+
+    def test_actual_list_passes_through_unchanged(self):
+        from graph.state_schemas import (
+            JointFinalizationDecision,
+            JointFinalizationOutput,
+        )
+        out = JointFinalizationOutput(
+            selected_decisions=[
+                JointFinalizationDecision(ticker="AAPL", rationale="r/r 2.5"),
+                JointFinalizationDecision(ticker="MSFT", rationale="r/r 2.0"),
+            ],
+            team_rationale="balanced asymmetry mix",
+        )
+        assert len(out.selected_decisions) == 2
+        assert out.selected_decisions[0].ticker == "AAPL"
+
+    def test_json_string_of_list_is_parsed_and_logged(self, caplog):
+        """The exact failure shape Sonnet produced today: a string
+        whose contents are valid JSON for the expected list."""
+        import json
+        import logging
+        from graph.state_schemas import JointFinalizationOutput
+
+        payload = json.dumps([
+            {"ticker": "AAPL", "rationale": "asymmetric upside"},
+            {"ticker": "MSFT", "rationale": "earnings catalyst"},
+        ])
+
+        with caplog.at_level(logging.WARNING):
+            out = JointFinalizationOutput(
+                selected_decisions=payload,  # type: ignore[arg-type]
+                team_rationale="ok",
+            )
+
+        # Pydantic still constructed the structured form correctly.
+        assert len(out.selected_decisions) == 2
+        assert out.selected_decisions[0].ticker == "AAPL"
+        assert out.selected_decisions[1].rationale == "earnings catalyst"
+        # The drift event was logged loudly so flow-doctor / CW alarms
+        # can pick it up — the validator parse-and-continued rather
+        # than silently rescuing.
+        assert any(
+            "schema-vs-LLM drift" in rec.message
+            or "JSON-string" in rec.message
+            for rec in caplog.records
+        )
+
+    def test_invalid_json_string_raises_normal_pydantic_error(self):
+        """If the string isn't valid JSON-list, fall through to the
+        normal Pydantic list-type error — failure mode stays loud."""
+        import pytest
+        from pydantic import ValidationError
+        from graph.state_schemas import JointFinalizationOutput
+
+        with pytest.raises(ValidationError, match="list_type|valid list"):
+            JointFinalizationOutput(
+                selected_decisions="not even close to valid json",  # type: ignore[arg-type]
+                team_rationale="ok",
+            )
+
+    def test_json_string_of_dict_raises_normal_pydantic_error(self):
+        """A JSON-string of a dict (not a list) is NOT what we want
+        to silently rescue — list-type error fires normally."""
+        import pytest
+        from pydantic import ValidationError
+        from graph.state_schemas import JointFinalizationOutput
+
+        with pytest.raises(ValidationError, match="list_type|valid list"):
+            JointFinalizationOutput(
+                selected_decisions='{"ticker": "AAPL"}',  # type: ignore[arg-type]
+                team_rationale="ok",
+            )
+
+    def test_field_description_present(self):
+        """The field description is what Anthropic's tool-use spec
+        carries to the LLM — explicitly says 'array, NOT a JSON-encoded
+        string'. Pin so future schema edits don't drop it."""
+        from graph.state_schemas import JointFinalizationOutput
+        field_info = JointFinalizationOutput.model_fields["selected_decisions"]
+        assert "structured array" in (field_info.description or "")
+        assert "NOT" in (field_info.description or "")
