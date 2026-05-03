@@ -17,7 +17,7 @@ from langchain_core.messages import HumanMessage
 from langgraph.errors import GraphRecursionError
 from langgraph.prebuilt import create_react_agent
 
-from config import PER_STOCK_MODEL, ANTHROPIC_API_KEY, QUAL_MAX_ITERATIONS
+from config import ANTHROPIC_API_KEY, MAX_TOKENS_STRATEGIC, PER_STOCK_MODEL, QUAL_MAX_ITERATIONS
 from agents.prompt_loader import load_prompt
 from agents.sector_teams.qual_tools import create_qual_tools
 from graph.llm_cost_tracker import get_cost_telemetry_callback
@@ -54,10 +54,17 @@ def run_qual_analyst(
             "iterations": int,
         }
     """
+    # Strategic-tier max_tokens covers the structured-output extraction
+    # call at the end of this function — QualAnalystOutput.assessments is
+    # a list of ~5 QualAssessment entries × ~600 tokens each (bull_case +
+    # bear_case + catalysts + qual_score + reasoning) plus tool-use JSON
+    # envelope. ReAct-turn calls (which share this llm instance) are
+    # individually small so the higher cap doesn't shift their token
+    # cost (Anthropic bills emitted tokens, not the cap).
     llm = ChatAnthropic(
         model=PER_STOCK_MODEL,
         anthropic_api_key=api_key or ANTHROPIC_API_KEY,
-        max_tokens=4096,
+        max_tokens=MAX_TOKENS_STRATEGIC,
         callbacks=[get_cost_telemetry_callback()],
     )
 

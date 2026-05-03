@@ -18,7 +18,13 @@ from langchain_core.messages import HumanMessage
 
 from graph.llm_cost_tracker import get_cost_telemetry_callback
 
-from config import PER_STOCK_MODEL, MAX_TOKENS_PER_STOCK, ANTHROPIC_API_KEY, TEAM_PICKS_PER_RUN
+from config import (
+    ANTHROPIC_API_KEY,
+    MAX_TOKENS_PER_STOCK,
+    MAX_TOKENS_STRATEGIC,
+    PER_STOCK_MODEL,
+    TEAM_PICKS_PER_RUN,
+)
 from agents.prompt_loader import load_prompt
 
 log = logging.getLogger(__name__)
@@ -197,21 +203,6 @@ def _merge_candidates(
     return merged
 
 
-_JOINT_FINALIZATION_MAX_TOKENS = 2000
-"""Dedicated max_tokens budget for the joint-finalization Haiku call.
-
-The per-stock LLM (``MAX_TOKENS_PER_STOCK=800``) is sized for single-
-ticker outputs (one bull case + one bear case + score). Joint
-finalization produces a structured *list* of 2-3 ``JointFinalizationDecision``
-entries plus a ``team_rationale``, all wrapped in tool-use JSON
-envelope — easily 1200-1500 tokens at the verbose end. Surfaced
-2026-05-03 in SF eval-pipeline-validation-3 where Sonnet truncated
-mid-rationale at the 800-token cap, producing invalid JSON that
-the schema's ``mode='before'`` validator (added 2026-05-03 alongside
-this fix) couldn't rescue. 2000 gives ~25% headroom over observed
-verbose responses without bumping the cap on every per-stock call."""
-
-
 def _joint_finalization(
     llm: ChatAnthropic,
     team_id: str,
@@ -243,15 +234,18 @@ def _joint_finalization(
     from graph.state_schemas import JointFinalizationOutput
     from strict_mode import is_strict_validation_enabled
 
-    # Dedicated llm instance with a larger token budget — see
-    # _JOINT_FINALIZATION_MAX_TOKENS docstring for the truncation
-    # incident this addresses. Reuses the parent llm's model + api_key
-    # + callbacks via the cheap rebind below; no extra cost-tracker
+    # Dedicated llm instance with the strategic-tier token budget. The
+    # parent ``llm`` was created in run_peer_review() with
+    # MAX_TOKENS_PER_STOCK (sized for single-ticker outputs) — the joint
+    # finalization produces a list of 2-3 JointFinalizationDecision
+    # entries plus team_rationale, which fits the strategic tier sizing
+    # (synthesis-class structured output). Reuses parent's model +
+    # api_key + callbacks via cheap rebind; no extra cost-tracker
     # registration needed.
     finalization_llm = ChatAnthropic(
         model=llm.model,
         anthropic_api_key=llm.anthropic_api_key,
-        max_tokens=_JOINT_FINALIZATION_MAX_TOKENS,
+        max_tokens=MAX_TOKENS_STRATEGIC,
         callbacks=llm.callbacks,
     )
     structured_llm = finalization_llm.with_structured_output(JointFinalizationOutput)
