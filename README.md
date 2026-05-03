@@ -1,377 +1,158 @@
 # alpha-engine-research
 
-[![Python](https://img.shields.io/badge/python-3.13+-blue.svg)]()
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-172_passing-brightgreen.svg)]()
+> Part of [**Nous Ergon**](https://nousergon.ai) — Autonomous Multi-Agent Trading System. Repo and S3 names use the underlying project name `alpha-engine`.
 
-> Autonomous investment research pipeline for US equities. 6 sector teams with ReAct tool-calling agents screen the S&P 900 weekly, maintain rolling investment theses, and submit recommendations to a CIO for population selection.
+[![Part of Nous Ergon](https://img.shields.io/badge/Part_of-Nous_Ergon-1a73e8?style=flat-square)](https://nousergon.ai)
+[![Python](https://img.shields.io/badge/python-3.13+-blue?style=flat-square)](https://www.python.org/)
+[![LangGraph](https://img.shields.io/badge/LangGraph-1C3D5A?style=flat-square)](https://langchain-ai.github.io/langgraph/)
+[![Anthropic Claude](https://img.shields.io/badge/Anthropic_Claude-1a73e8?style=flat-square)](https://www.anthropic.com/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow?style=flat-square)](LICENSE)
+[![Phase 2 · Reliability](https://img.shields.io/badge/Phase_2-Reliability-e9c46a?style=flat-square)](https://github.com/cipher813/alpha-engine-docs#phase-trajectory)
 
-**Part of the [Nous Ergon](https://nousergon.ai) autonomous trading system.**
-See the [system overview](https://github.com/cipher813/alpha-engine#readme) for how all modules connect, or the [full documentation index](https://github.com/cipher813/alpha-engine-docs#readme).
+Multi-agent investment-research pipeline. Six sector teams, a CIO, and a macro economist scan the S&P 500+400 weekly, maintain rolling investment theses, and emit `signals.json` for the rest of the system. Built on LangGraph with Anthropic Claude (Haiku per-team, Sonnet for synthesis).
 
-## Table of Contents
+> System overview, Step Function orchestration, and module relationships live in [`alpha-engine-docs`](https://github.com/cipher813/alpha-engine-docs).
 
-- [Role in the System](#role-in-the-system)
-- [Architecture](#architecture)
-- [How Scoring Works](#how-scoring-works)
-- [Population Management](#population-management)
-- [Quick Start](#quick-start)
-- [Database Tables](#database-tables)
-- [S3 Contract](#s3-contract)
-- [Testing](#testing)
-- [Related Modules](#related-modules)
+## What this does
 
----
+- Runs **six sector teams in parallel** via LangGraph `Send()` fan-out: Technology, Healthcare, Financials, Industrials, Consumer, Defensives. Each team owns its GICS sector slice of the S&P 500+400 (~110-215 tickers per team).
+- Per-team flow: **quant analyst** (ReAct, Haiku, tool-calling — volume / technicals / fundamentals / options flow) → **qualitative analyst** (ReAct, Haiku — news / analyst reports / insider / SEC filings via RAG) → **peer review** → 2-3 ranked recommendations + thesis update.
+- **Macro economist** runs in parallel with the sector teams (independent reflection loop), producing market regime + per-sector ratings that scale recommendations downstream.
+- **CIO** (single Sonnet batch call) evaluates every recommendation against a 4-dimension rubric (team conviction · macro alignment · portfolio fit · catalyst specificity), gates new entrants per a configurable cap, and writes ADVANCE / REJECT / NO_ADVANCE_DEADLOCK with full rationale.
+- **LLM-as-judge layer** scores agent outputs at key stages against rubric prompts (sector peer review currently; expanding). Every decision is captured to S3 with prompt metadata + cost telemetry for replay and audit.
+- Maintains rolling thesis history per ticker — material-trigger-driven updates (news spike, price move > 2 ATR, analyst revision, earnings proximity, insider cluster, regime change) rather than full rewrites every week.
 
-## Role in the System
+## Phase 2 measurement contribution
 
-Research is the signal generator. It produces `signals/{date}/signals.json` — the file that the Predictor and Executor both depend on. Runs weekly on Monday (06:00 UTC via EventBridge). Each sector team builds on prior theses rather than starting from scratch, creating compounding institutional knowledge over time.
-
-**signals.json** contains:
-- `universe` — list of all stocks with signal (ENTER/HOLD/EXIT), score, rating, conviction, sector_rating, thesis
-- `buy_candidates` — subset with ENTER signals and enriched CIO theses
-- `market_regime`, `sector_ratings` — macro context for executor position sizing
-- `population` — current 25-stock portfolio ticker list
-
-Research and Predictor Training are **independent** — no data flows between them. They run sequentially on Monday only to spread API load.
-
----
+Research is the system's narrow waist between data and decisions. Phase 2 contribution: **every agent decision is captured as a structured artifact** — prompt id + version + hash, full prompt context, input snapshot, agent output, and cost — so any decision is replayable, auditable, and attributable to a specific prompt revision. The LLM-as-judge layer scores agent quality at key stages with rubric-based grading. Together these produce the substrate that lets Phase 3 measure whether prompt or model changes actually improve the agent layer, not just whether the system happens to make money in a given week.
 
 ## Architecture
 
-```
-PARALLEL (LangGraph Send() fan-out)
-├── Technology Team   (Quant→Qual→PeerReview→2-3 picks + thesis maintenance)
-├── Healthcare Team   (same pattern)
-├── Financials Team
-├── Industrials Team
-├── Consumer Team
-├── Defensives Team
-├── Macro Economist   (regime + sector ratings, reflection loop)
-└── Exit Evaluator    (determines exits from current population)
-     │
-SEQUENTIAL (fan-in)
-├── Merge Results     (combine team picks + macro + exits → compute open slots)
-├── Score Aggregator  (quant × w_quant + qual × w_qual + macro shift + boosts)
-├── CIO               (single Sonnet batch: evaluate all picks on 4 dimensions)
-├── Population Entry   (place CIO ADVANCE decisions into population)
-├── Consolidator      (morning email: macro, sector allocation, notable developments, universe ratings)
-├── Archive Writer    (S3 + SQLite + thesis history + IC audit trail + signals.json)
-└── Email Sender      (markdown → HTML via formatter, Gmail SMTP primary, SES fallback)
-```
+```mermaid
+flowchart LR
+    Trigger((Saturday SF<br/>Lambda · 15 min)) --> FetchData
 
-### 6 Sector Teams
+    FetchData[fetch_data<br/>universe + macro context] --> Teams
+    FetchData --> Macro
+    FetchData --> Exit
 
-| Team | GICS Sectors | ~Stocks |
-|------|-------------|---------|
-| Technology | Information Technology | ~120 |
-| Healthcare | Healthcare | ~110 |
-| Financials | Financials | ~140 |
-| Industrials | Industrials, Materials | ~215 |
-| Consumer | Consumer Disc, Consumer Staples, Comm Services | ~190 |
-| Defensives | Energy, Utilities, Real Estate | ~145 |
+    subgraph Teams[Sector Teams · LangGraph Send fan-out · parallel]
+        T1[Tech]
+        T2[Healthcare]
+        T3[Financials]
+        T4[Industrials]
+        T5[Consumer]
+        T6[Defensives]
+    end
 
-### Intra-Team Flow
+    Macro[Macro Economist<br/>regime + sector ratings<br/>reflection loop]
+    Exit[Exit Evaluator<br/>review held population]
 
-Each team runs autonomously using ReAct tool-calling agents:
+    Teams --> Merge
+    Macro --> Merge
+    Exit --> Merge
 
-1. **Quant Analyst** (Haiku, ReAct with tools, max 8 iterations): Screens the sector universe using tools it chooses — volume filters, technical indicators, analyst consensus, balance sheet, options flow. Produces ranked top 10.
-2. **Qualitative Analyst** (Haiku, ReAct with tools, max 8 iterations): Reviews quant's top 5 using news, analyst reports, insider activity, SEC filings, prior theses. Produces holistic `qual_score` (0-100) per stock. May add 0-1 additional candidate.
-3. **Peer Review** (Haiku): Quant reviews qual's addition (if any). Joint finalization selects 2-3 recommendations.
-4. **Thesis Maintenance**: For held population stocks, update thesis only when material triggers fire (news spike, price move > 2 ATR, analyst revision, earnings proximity, insider cluster, sector regime change).
-
-### CIO Evaluation
-
-The CIO (Sonnet) receives all team recommendations in a single batch call and evaluates on 4 dimensions:
-
-1. **Team conviction** — quant+qual agreement, peer review flags
-2. **Macro alignment** — regime fit, sector rating
-3. **Portfolio fit** — diversification vs concentration
-4. **Catalyst specificity** — time-bound vs vague
-
-Selects top N for open slots. Every decision (ADVANCE, REJECT, NO_ADVANCE_DEADLOCK) saved with full rationale to `thesis_history` table.
-
----
-
-## Proprietary Source Files
-
-This repo is open-source, but files containing prompts, scoring logic, and orchestration are **gitignored**. You must create these files yourself to run the pipeline.
-
-### Gitignored (Must Create)
-
-| File | Purpose |
-|------|---------|
-| `config.py` | Centralized configuration loader |
-| `config/universe.yaml` | Population size, thresholds, LLM models |
-| `graph/research_graph.py` | LangGraph orchestrator (Send fan-out, sector teams) |
-| `agents/macro_agent.py` | Macro economist with reflection loop |
-| `agents/investment_committee/ic_cio.py` | CIO batch evaluator |
-| `agents/sector_teams/quant_analyst.py` | Quant analyst ReAct agent |
-| `agents/sector_teams/qual_analyst.py` | Qual analyst ReAct agent |
-| `agents/sector_teams/peer_review.py` | Intra-team peer review |
-| `agents/sector_teams/sector_team.py` | Team orchestrator |
-| `scoring/technical.py` | Technical scoring engine |
-| `scoring/performance_tracker.py` | Signal accuracy tracking |
-| `data/scanner.py` | Quant filter pipeline |
-| `data/population_selector.py` | Population management + exit/entry handlers |
-| `thesis/updater.py` | Thesis record builder |
-
-### Tracked (Infrastructure + Tools)
-
-- `agents/sector_teams/team_config.py` — GICS-to-team mapping, slot allocation
-- `agents/sector_teams/quant_tools.py` — LangChain @tool wrappers for quant agent
-- `agents/sector_teams/qual_tools.py` — LangChain @tool wrappers for qual agent
-- `agents/sector_teams/material_triggers.py` — Thesis update triggers (no LLM)
-- `agents/prompt_loader.py` — Loads prompts from `config/prompts/`
-- `agents/token_guard.py` — Token budget validation
-- `scoring/composite.py` — Composite scoring (quant × w_quant + qual × w_qual)
-- `agents/json_utils.py` — Shared JSON extraction (balanced-brace scanner)
-- `agents/langchain_utils.py` — Shared LangGraph message utilities
-- `data/fetchers/` — All 8 data fetchers (price, news, analyst, macro, insider, institutional, options, revision)
-- `data/deduplicator.py` — Duplicate headline handling
-- `archive/manager.py` — S3 + SQLite CRUD + thesis history + IC audit trail + `load_latest_theses()` for prior week backfill
-- `retry.py` — Exponential-backoff retry decorator (used by archive manager + price fetcher)
-- `emailer/` — Markdown to HTML email + SES/Gmail delivery
-- `lambda/` — AWS Lambda handlers (main pipeline + intraday alerts)
-- `infrastructure/` — Deploy scripts, IAM policies
-
----
-
-## How Scoring Works
-
-```
-composite = quant_score × w_quant + qual_score × w_qual + macro_shift + signal_boosts
-
-Signal boosts: PEAD (±5), analyst revisions (±3), options flow (±4),
-               insider activity (±5), short interest (±4), institutional (±3)
-               → aggregate capped at ±10 pts
+    Merge[merge_results] --> Score
+    Score[score_aggregator<br/>quant·w_q + qual·w_q + macro shift] --> CIO
+    CIO[CIO · Sonnet batch<br/>4-dim rubric · gates new entrants] --> Pop
+    Pop[population_entry_handler] --> Cons
+    Cons[consolidator<br/>morning email payload] --> Archive
+    Archive[archive_writer<br/>S3 + research.db<br/>thesis history + signals.json] --> Email((Email))
 ```
 
-- `w_quant` and `w_qual` auto-tuned by backtester via `config/scoring_weights.json`
-- Macro shift uses additive bounded formula (not a multiplier)
-- Ratings: BUY / HOLD / SELL based on configurable thresholds
-- Predictor veto: high-confidence DOWN from GBM can override BUY signals
+Each sector team is itself a sub-graph: `quant_analyst → qual_analyst → peer_review → recommendations + thesis_update`. The quant and qual analysts are ReAct agents with tools; peer review is a single-shot finalization step.
 
----
+**Decision-artifact capture** runs at every LLM call site via `LoadedPrompt` (frontmatter-versioned prompts, sha256 body hash, hard-fail on missing) plus `track_llm_cost` ContextVar accumulator. Every artifact is persisted to S3 under `decision_artifacts/{date}/{agent_id}/{run_id}.json`. Cost telemetry is captured per call (one JSONL row per Anthropic invocation) and aggregated to a daily parquet for the backtester evaluator email.
 
-## Population Management
+## Key files
 
-- **Target**: ~25 stocks
-- **Exits**: thesis collapse (score < 40, immediate), score degradation (< 45 with tenure > 2 weeks), forced rotation floor (min 10% weekly turnover)
-- **Entries**: CIO selects from sector team recommendations to fill open slots
-- **Tenure protection**: 2-week minimum (except thesis collapse)
-- **Max rotations**: 10 per run (~40% of population)
+| File | What it does |
+|---|---|
+| [`graph/research_graph.py`](graph/research_graph.py) | Top-level LangGraph orchestrator — Send fan-out, fan-in, state schema |
+| [`agents/sector_teams/sector_team.py`](agents/sector_teams/sector_team.py) | Per-team sub-graph: quant → qual → peer review |
+| [`agents/sector_teams/qual_tools.py`](agents/sector_teams/qual_tools.py) | Qual analyst's tool surface (incl. `query_filings` → RAG via `alpha_engine_lib.rag`) |
+| [`agents/investment_committee/ic_cio.py`](agents/investment_committee/ic_cio.py) | CIO batch evaluation, 4-dim rubric, ADVANCE / REJECT / DEADLOCK |
+| [`agents/macro_agent.py`](agents/macro_agent.py) | Macro economist with reflection loop |
+| [`evals/judge.py`](evals/judge.py) | LLM-as-judge rubric scoring + persistence |
+| [`graph/llm_cost_tracker.py`](graph/llm_cost_tracker.py) | Per-call cost telemetry + run-budget hard ceiling |
+| [`scoring/composite.py`](scoring/composite.py) | Composite score formula (proprietary weights live in `alpha-engine-config`) |
+| [`archive/manager.py`](archive/manager.py) | S3 + SQLite persistence; thesis history; IC audit trail |
 
-### Slot Allocation
+## How it runs
 
-Based on open slots + macro sector ratings:
+| Stage | Where | When | Trigger |
+|---|---|---|---|
+| Pipeline | Lambda (Docker on ECR) | Sat 00:00 UTC, ~15 min | Saturday Step Function (after DataPhase1, RAGIngestion) |
+| Local dry run | Laptop venv | On demand | `.venv/bin/python local/run.py --dry-run` |
+| Local stub run | Laptop venv | On demand | `.venv/bin/python local/run.py --stub-llm` (no API spend) |
 
-| Open Slots | Base | Overweight (+1) | Market Weight (0) | Underweight (-1) |
-|------------|------|-----------------|--------------------|--------------------|
-| 0 | 0 | 0 | 0 | 0 |
-| 1-3 | 1 | 2 | 1 | 0 |
-| 4-7 | 2 | 3 | 2 | 1 |
-| 8-10 | 3 | 4 | 3 | 2 |
+Deploy: `./infrastructure/deploy.sh main`.
 
-Teams always produce 2-3 picks regardless of allocation. The CIO selects from the full pool.
+## Configuration + disclosure boundary
 
----
+This repo is **public**, but anything proprietary lives in the private [`alpha-engine-config`](https://github.com/cipher813/alpha-engine-config) repo or is gitignored locally. Specifically:
 
-## Weekly Email Format
+- **Agent prompts** — gitignored (`.py` files containing `_PROMPT_TEMPLATE` / `_build_system_prompt`); loaded at runtime via `LoadedPrompt` from the config repo
+- **Scoring weights + sub-score formulas** — in `alpha-engine-config`
+- **Universe + sector configuration** — `config/universe.yaml`, gitignored
+- **Population selection logic** — `data/population_selector.py`, gitignored
+- **Technical scoring** — `scoring/technical.py`, gitignored
 
-The morning research brief contains 4 sections:
+The orchestration layer (`graph/research_graph.py`), tool wrappers (`agents/sector_teams/{quant,qual}_tools.py`), CIO scaffolding, and persistence (`archive/manager.py`) are all public. Architecture and approach are public; specific weights, prompts, and thresholds are private.
 
-1. **Macro Regime Summary** — full macro narrative (Fed, yield curve, credit, equity, commodities), key risks to monitor
-2. **Sector Allocation** — 11-sector table with overweight/market weight/underweight ratings and rationale
-3. **Notable Developments** — high-conviction recommendations, CIO advances, material exits
-4. **Universe Ratings** — unified table of all stocks with status column:
+Environment variables: `ANTHROPIC_API_KEY`, `FMP_API_KEY`, `FRED_API_KEY`, `RAG_DATABASE_URL`, `VOYAGE_API_KEY`, AWS credentials. See `.env.example` for the full list.
 
-| Status | Meaning |
-|--------|---------|
-| NEW | Entered portfolio this week (CIO advanced) |
-| BUY REC | Buy recommendation, not yet held (no open slot) |
-| UPDATED | Continuing stock with material trigger, fresh thesis |
-| HOLD | Continuing stock, carryover thesis from prior week |
-| EXIT | Dropped from portfolio this week |
+## Outputs
 
-Sorted by status priority, then score descending. Each stock has rating, score, and thesis rationale.
+### S3
+| Path | Content |
+|---|---|
+| `signals/{date}/signals.json` | Universe + buy_candidates + market_regime + sector_ratings + population — read by Predictor + Executor |
+| `archive/universe/{TICKER}/` | Per-ticker rolling thesis snapshots (never overwritten) |
+| `archive/candidates/{TICKER}/` | Per-ticker buy-candidate theses |
+| `archive/macro/` | Macro environment reports |
+| `consolidated/{date}/morning.md` | Morning email payload |
+| `decision_artifacts/{date}/{agent_id}/` | Replay-grade decision capture |
+| `decision_artifacts/_cost_raw/{date}/{run_id}/` | Per-call LLM cost JSONLs |
+| `research.db` | SQLite — signal history, theses, IC audit trail |
 
----
-
-## Data Sources
-
-| Data Type | Source | Cost |
-|-----------|--------|------|
-| Price data (OHLCV) | yfinance | Free |
-| Technical indicators | Computed from price data | Free |
-| News headlines | Yahoo Finance RSS | Free |
-| SEC 8-K filings | EDGAR full-text search API | Free |
-| SEC Form 4 insider transactions | EDGAR (EdgarTools) | Free |
-| 13F institutional holdings | SEC EDGAR | Free |
-| Analyst consensus | Financial Modeling Prep (FMP) | Free tier (250 req/day) |
-| EPS revision trends | Financial Modeling Prep (FMP) | Free tier |
-| Options chain (IV, put/call) | yfinance | Free |
-| Macro data | FRED CSV API | Free |
-| LLM | Anthropic Claude (Haiku + Sonnet) | ~$0.89/week ($46/year) |
-| Email | AWS SES + Gmail SMTP | Free tier |
-| Storage | AWS S3 | ~$0.50/month |
-
-FMP rate-limited: 1 req/sec with global thread lock, 250/day budget tracked in-process. First 429 response immediately disables all FMP calls for remainder of run (graceful degradation — agents proceed without analyst data). yfinance uses sequential batches of 100 with rate-limited session via `requests-ratelimiter`.
-
----
-
-## Quick Start
-
-### Prerequisites
-
-- Python 3.12+
-- API keys: `ANTHROPIC_API_KEY`, `FMP_API_KEY`, `FRED_API_KEY`
-- AWS credentials with S3 read/write and SES send permission
-
-### Setup
+## Quick start
 
 ```bash
 git clone https://github.com/cipher813/alpha-engine-research.git
 cd alpha-engine-research
-python3 -m venv .venv
-source .venv/bin/activate
+python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
-# 1. Environment variables
 cp .env.example .env
-# Edit .env — add API keys, AWS config, email settings
+# Edit .env — set ANTHROPIC_API_KEY, FMP_API_KEY, FRED_API_KEY, AWS creds, RAG_DATABASE_URL, VOYAGE_API_KEY
 
-# 2. Configuration files (module searches alpha-engine-config repo first, falls back to local)
-cp config/universe.sample.yaml config/universe.yaml
-# Edit universe.yaml — set LLM models, thresholds, population config
+# Stub run (no API spend) — verifies graph wiring + persistence
+.venv/bin/python local/run.py --stub-llm
 
-# 3. Create gitignored source files (see table above)
-
-# 4. Dry run (skips email + S3 write, still calls APIs/LLM)
-python local/run.py --dry-run
-
-# 5. Deploy to Lambda
-./infrastructure/deploy.sh main
+# Real dry run (small population, no S3 writes)
+.venv/bin/python local/run.py --dry-run --tickers AAPL,MSFT
 ```
-
-### Offline Mode
-
-Run the full pipeline end-to-end with **zero external calls** — no API keys, no LLM, no S3, no network required. All data fetchers, LLM agents, S3 operations, and email are replaced with synthetic stubs that return structurally valid data.
-
-```bash
-# Basic offline run (uses today's date)
-python local/run.py --offline
-
-# Offline with a specific date
-python local/run.py --offline --date 2026-03-23
-```
-
-**What gets stubbed:**
-
-| Category | Stubbed Functions | Synthetic Output |
-|----------|-------------------|-----------------|
-| Price data | `fetch_price_data`, `fetch_sp500_sp400_with_sectors` (ArcticDB + S3 reads) | 252-day synthetic OHLCV for 30 sample tickers |
-| News | `fetch_all_news` | 2 synthetic headlines per ticker |
-| Analyst | `fetch_analyst_consensus`, `fetch_revisions` | Randomized consensus ratings + targets |
-| Macro | `fetch_macro_data`, `compute_market_breadth` | Hardcoded neutral macro environment |
-| Insider/Options | `fetch_insider_activity`, `fetch_options_signals`, `fetch_short_interest`, `fetch_institutional_accumulation` | Empty or minimal synthetic data |
-| LLM agents | `run_macro_agent_with_reflection`, `run_sector_team`, `run_cio` | Deterministic scores (40-75 range), stub reports |
-| Sector teams | `run_sector_team`, `run_quant_analyst`, `run_qual_analyst`, `run_peer_review` | Synthetic picks with randomized quant/qual scores |
-| CIO | `run_cio` | Advances candidates up to open slot count |
-| S3 / Archive | `download_db`, `upload_db`, `load_predictions_json`, `write_signals_json`, `upload_population_json` | Uses local SQLite (creates empty if none exists), skips all S3 I/O |
-| Email | `send_email` | Prints subject line to stdout |
-
-**Use cases:**
-- Validate graph topology and node wiring after refactors
-- Test scoring/aggregation/population logic changes without burning API credits
-- CI pipeline smoke tests
-- Develop and debug new graph nodes or scoring features
-- Onboard new contributors without requiring API keys or AWS credentials
-
-**How it works:** `local/offline_stubs.py` monkey-patches all external call sites at import time. Stubs are installed before graph modules load, so `from X import Y` bindings in the graph pick up the patched functions. The pipeline runs in ~1 second.
-
-**Combining with other flags:**
-
-```bash
-# Offline run
-python local/run.py --offline
-```
-
-> **Note:** `--offline` implies `--dry-run` behavior (no email delivery, no S3 writes). You don't need to pass both.
-
----
-
-## Database Tables
-
-### Core
-`investment_thesis`, `agent_reports`, `population`, `population_history`, `scanner_appearances`, `technical_scores`, `macro_snapshots`, `score_performance`, `news_article_hashes`, `predictor_outcomes`, `stock_archive`, `thesis_history`, `analyst_resources`, `memory_episodes`, `memory_semantic`
-
----
 
 ## Testing
 
 ```bash
-source .venv/bin/activate
 pytest tests/ -v
 ```
 
-Tests cover scoring engine, agent JSON extraction, rotation logic, archive CRUD, and scheduling. No LLM API calls or AWS access required.
+Tests cover state schemas, scoring math, LangGraph trajectory invariants (e.g., `sector_team_node` runs exactly 6 times per Send), reducers, decision-artifact capture, RAG retrieval shape, and prompt-versioning regression locks.
 
-### Local Pipeline Runs
+## Sister repos
 
-```bash
-# Offline mode: synthetic data, no API/LLM/S3 calls
-python local/run.py --offline
-
-# No-S3 mode: real APIs, writes signals to local/output/ instead of S3, no email
-# Safe for preprod testing — does not affect live executor
-python local/run.py --no-s3
-
-# Full local run: real APIs, writes to S3, sends email (same as Lambda)
-python local/run.py --local
-
-# Specify date
-python local/run.py --offline --date 2026-03-24
-```
-
-**Preprod workflow:**
-1. `--offline` — verify pipeline logic runs without crashes
-2. `--no-s3` — verify with real APIs, inspect `local/output/signals-{date}.json`
-3. Validate output: `python ~/Development/alpha-engine/tests/validate_signals.py local/output/signals-{date}.json`
-4. `--local` — push to prod S3 and send email
-
----
-
-## S3 Contract
-
-### Reads
-| Path | Source | Content |
-|------|--------|---------|
-| `config/scoring_weights.json` | Backtester | Auto-optimized quant/qual weights |
-| `predictor/predictions/{date}.json` | Predictor | Merged into signals for downstream |
-| `market_data/weekly/{date}/` | Data | Constituents, macro, alternative data |
-
-### Writes
-| Path | Content |
-|------|---------|
-| `signals/{date}/signals.json` | Per-ticker signal, score, conviction, sector |
-| `signals/latest.json` | Pointer to most recent signals |
-| `archive/universe/{TICKER}/` | Per-ticker thesis (never overwritten) |
-| `archive/candidates/{TICKER}/` | Buy candidate theses |
-| `archive/macro/` | Macro environment reports |
-| `consolidated/{date}/morning.md` | Email content |
-| `research.db` | SQLite (investment_thesis, score_performance, macro_snapshots, scanner_evaluations, team_candidates, cio_evaluations) |
-
----
-
-## Related Modules
-
-- [`alpha-engine`](https://github.com/cipher813/alpha-engine) — Executor + system overview
-- [`alpha-engine-predictor`](https://github.com/cipher813/alpha-engine-predictor) — Meta-model predictor
-- [`alpha-engine-backtester`](https://github.com/cipher813/alpha-engine-backtester) — Evaluation framework and parameter optimization
-- [`alpha-engine-dashboard`](https://github.com/cipher813/alpha-engine-dashboard) — Streamlit monitoring dashboard
-- [`alpha-engine-data`](https://github.com/cipher813/alpha-engine-data) — Centralized data collection and ArcticDB
-- [`alpha-engine-docs`](https://github.com/cipher813/alpha-engine-docs) — Documentation index
+| Module | Repo |
+|---|---|
+| Executor | [`alpha-engine`](https://github.com/cipher813/alpha-engine) |
+| Data | [`alpha-engine-data`](https://github.com/cipher813/alpha-engine-data) |
+| Predictor | [`alpha-engine-predictor`](https://github.com/cipher813/alpha-engine-predictor) |
+| Backtester | [`alpha-engine-backtester`](https://github.com/cipher813/alpha-engine-backtester) |
+| Dashboard | [`alpha-engine-dashboard`](https://github.com/cipher813/alpha-engine-dashboard) |
+| Library | [`alpha-engine-lib`](https://github.com/cipher813/alpha-engine-lib) |
+| Docs | [`alpha-engine-docs`](https://github.com/cipher813/alpha-engine-docs) |
 
 ## License
 
