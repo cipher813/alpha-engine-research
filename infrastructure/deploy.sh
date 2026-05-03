@@ -18,6 +18,7 @@ set -euo pipefail
 
 FUNCTION_MAIN="alpha-engine-research-runner"
 FUNCTION_ALERTS="alpha-engine-research-alerts"
+FUNCTION_EVAL_JUDGE="alpha-engine-research-eval-judge"
 REGION="${AWS_REGION:-us-east-1}"
 BUCKET="alpha-engine-research"
 BUILD_DIR="lambda/package"
@@ -439,13 +440,85 @@ build_and_deploy_alerts() {
   echo "  $FUNCTION_ALERTS deployed (container image)."
 }
 
+# ── Eval-judge function: reuses the main container image ─────────────────────
+#
+# The eval-judge Lambda runs ``lambda/eval_judge_handler.py`` (LLM-as-judge
+# orchestrator). It needs the same dependency set as the main runner
+# (langchain_anthropic, alpha_engine_lib, prompt loader, schemas), so
+# rather than build a parallel image we point this function at the same
+# ECR image and override CMD via ``--image-config`` to
+# ``eval_judge_handler.handler``.
+#
+# Prerequisite: build_and_deploy_main must have run at least once on this
+# branch so the ECR ${ECR_REPO}:latest image contains
+# /var/task/eval_judge_handler.py (Dockerfile COPY of lambda/eval_judge_handler.py).
+
+deploy_eval_judge() {
+  echo "=== Deploying $FUNCTION_EVAL_JUDGE (image-share with $FUNCTION_MAIN) ==="
+
+  IMAGE_URI="$ECR_REPO:latest"
+  IMAGE_CONFIG='{"Command":["eval_judge_handler.handler"]}'
+
+  ENV_ARGS=()
+  if [ -n "$LAMBDA_ENV_JSON" ]; then
+    ENV_ARGS=(--environment "$LAMBDA_ENV_JSON")
+  fi
+
+  if aws lambda get-function --function-name "$FUNCTION_EVAL_JUDGE" --region "$REGION" &>/dev/null; then
+    aws lambda update-function-code \
+      --function-name "$FUNCTION_EVAL_JUDGE" \
+      --image-uri "$IMAGE_URI" \
+      --region "$REGION" > /dev/null
+    echo "  Waiting for code update to complete..."
+    aws lambda wait function-updated --function-name "$FUNCTION_EVAL_JUDGE" --region "$REGION" 2>/dev/null || sleep 5
+    aws lambda update-function-configuration \
+      --function-name "$FUNCTION_EVAL_JUDGE" \
+      --image-config "$IMAGE_CONFIG" \
+      "${ENV_ARGS[@]}" \
+      --region "$REGION" > /dev/null
+  else
+    aws lambda create-function \
+      --function-name "$FUNCTION_EVAL_JUDGE" \
+      --package-type Image \
+      --code "ImageUri=$IMAGE_URI" \
+      --image-config "$IMAGE_CONFIG" \
+      --role "$ROLE_ARN" \
+      --timeout 900 \
+      --memory-size 1024 \
+      "${ENV_ARGS[@]}" \
+      --region "$REGION" > /dev/null
+  fi
+  echo "  $FUNCTION_EVAL_JUDGE deployed (CMD=eval_judge_handler.handler)."
+
+  echo "  Publishing Lambda version..."
+  aws lambda wait function-updated --function-name "$FUNCTION_EVAL_JUDGE" --region "$REGION" 2>/dev/null || sleep 5
+  VERSION=$(aws lambda publish-version \
+    --function-name "$FUNCTION_EVAL_JUDGE" \
+    --query "Version" --output text \
+    --region "$REGION")
+  echo "  Published version: $VERSION"
+  aws lambda update-alias \
+    --function-name "$FUNCTION_EVAL_JUDGE" \
+    --name live \
+    --function-version "$VERSION" \
+    --region "$REGION" 2>/dev/null || \
+  aws lambda create-alias \
+    --function-name "$FUNCTION_EVAL_JUDGE" \
+    --name live \
+    --function-version "$VERSION" \
+    --region "$REGION"
+  echo "  Alias 'live' → version $VERSION"
+}
+
 # ── Dispatch ─────────────────────────────────────────────────────────────────
 
 case "$TARGET" in
-  main)    build_and_deploy_main ;;
-  alerts)  build_and_deploy_alerts ;;
-  both)    build_and_deploy_main; build_and_deploy_alerts ;;
-  *)       echo "Usage: $0 [main|alerts|both]"; exit 1 ;;
+  main)        build_and_deploy_main ;;
+  alerts)      build_and_deploy_alerts ;;
+  eval_judge)  deploy_eval_judge ;;
+  both)        build_and_deploy_main; build_and_deploy_alerts ;;
+  all)         build_and_deploy_main; build_and_deploy_alerts; deploy_eval_judge ;;
+  *)           echo "Usage: $0 [main|alerts|eval_judge|both|all]"; exit 1 ;;
 esac
 
 echo ""

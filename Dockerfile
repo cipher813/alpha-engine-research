@@ -52,4 +52,11 @@ COPY strict_mode.py ${LAMBDA_TASK_ROOT}/
 # Main Lambda handler
 COPY lambda/handler.py ${LAMBDA_TASK_ROOT}/handler.py
 
+# Eval-judge Lambda handler — same image, separate Lambda function in
+# AWS that overrides CMD to ["eval_judge_handler.handler"] via
+# --image-config at deploy time. Sharing the image with the main
+# function avoids a parallel ECR repo + duplicate Docker build for a
+# handler that needs the exact same dependency set.
+COPY lambda/eval_judge_handler.py ${LAMBDA_TASK_ROOT}/eval_judge_handler.py
+
 CMD ["handler.handler"]
