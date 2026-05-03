@@ -59,4 +59,8 @@ COPY lambda/handler.py ${LAMBDA_TASK_ROOT}/handler.py
 # handler that needs the exact same dependency set.
 COPY lambda/eval_judge_handler.py ${LAMBDA_TASK_ROOT}/eval_judge_handler.py
 
+# Rolling-4-week-mean Lambda handler (PR 4b) — same image, separate
+# Lambda overriding CMD to ["eval_rolling_mean_handler.handler"].
+COPY lambda/eval_rolling_mean_handler.py ${LAMBDA_TASK_ROOT}/eval_rolling_mean_handler.py
+
 CMD ["handler.handler"]

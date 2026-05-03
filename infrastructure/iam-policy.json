@@ -44,6 +44,15 @@
           "cloudwatch:namespace": "AlphaEngine/Eval"
         }
       }
+    },
+    {
+      "Sid": "CloudWatchMetricsRollingMeanRead",
+      "Effect": "Allow",
+      "Action": [
+        "cloudwatch:ListMetrics",
+        "cloudwatch:GetMetricData"
+      ],
+      "Resource": "*"
     }
   ]
 }
