@@ -33,6 +33,17 @@
         "logs:PutLogEvents"
       ],
       "Resource": "arn:aws:logs:*:*:*"
+    },
+    {
+      "Sid": "CloudWatchMetricsEvalJudge",
+      "Effect": "Allow",
+      "Action": "cloudwatch:PutMetricData",
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "cloudwatch:namespace": "AlphaEngine/Eval"
+        }
+      }
     }
   ]
 }

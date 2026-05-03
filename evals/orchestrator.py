@@ -48,6 +48,7 @@ from evals.judge import (
     persist_eval_artifact,
     resolve_rubric_for_agent,
 )
+from evals.metrics import emit_eval_metric
 from graph.state_schemas import RubricEvalArtifact
 
 logger = logging.getLogger(__name__)
@@ -134,6 +135,8 @@ def evaluate_corpus(
     force_sonnet_pass: bool = False,
     haiku_escalate_threshold: int = DEFAULT_HAIKU_ESCALATE_THRESHOLD,
     s3_client: Optional[Any] = None,
+    cloudwatch_client: Optional[Any] = None,
+    emit_metrics: bool = True,
 ) -> dict[str, Any]:
     """Score every captured artifact under ``date`` per the two-tier
     sampling policy. Returns a summary dict suitable for SF inspection.
@@ -143,15 +146,38 @@ def evaluate_corpus(
     ``failed`` and the run continues with the next artifact. Eval is
     observability — one rubric or LLM hiccup must not silently halt
     every other agent's eval.
+
+    CloudWatch metric emission (PR 4a, ROADMAP §1634): each persisted
+    eval also pushes one ``AlphaEngine/Eval/agent_quality_score``
+    datapoint per rubric dimension. Metric write failures are
+    observability OF observability — they're caught + counted in
+    ``summary['metric_emission_failures']`` but never halt the run.
+    Set ``emit_metrics=False`` to disable in tests / local replay.
     """
     s3 = s3_client or boto3.client("s3")
+    cw = cloudwatch_client or (boto3.client("cloudwatch") if emit_metrics else None)
     capture_keys = list_capture_keys(s3, date=date, bucket=bucket)
 
     haiku_evaluated = 0
     sonnet_evaluated = 0
     skipped_unmapped = 0
+    metric_emission_failures = 0
     failed: list[dict[str, str]] = []
     persisted_keys: list[str] = []
+
+    def _try_emit(eval_artifact: RubricEvalArtifact) -> None:
+        nonlocal metric_emission_failures
+        if not emit_metrics:
+            return
+        try:
+            emit_eval_metric(eval_artifact, cloudwatch_client=cw)
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "[eval_orchestrator] cloudwatch emit failed for "
+                "agent_id=%s judge=%s",
+                eval_artifact.judged_agent_id, eval_artifact.judge_model,
+            )
+            metric_emission_failures += 1
 
     logger.info(
         "[eval_orchestrator] start date=%s bucket=%s capture_keys=%d "
@@ -183,6 +209,7 @@ def evaluate_corpus(
             )
             haiku_evaluated += 1
             persisted_keys.append(haiku_persisted_key)
+            _try_emit(haiku_eval)
         except Exception as exc:  # noqa: BLE001
             logger.exception(
                 "[eval_orchestrator] haiku eval failed for %s (%s)",
@@ -212,6 +239,7 @@ def evaluate_corpus(
             )
             sonnet_evaluated += 1
             persisted_keys.append(sonnet_persisted_key)
+            _try_emit(sonnet_eval)
         except Exception as exc:  # noqa: BLE001
             logger.exception(
                 "[eval_orchestrator] sonnet eval failed for %s (%s)",
@@ -224,8 +252,9 @@ def evaluate_corpus(
 
     logger.info(
         "[eval_orchestrator] done date=%s haiku=%d sonnet=%d "
-        "skipped_unmapped=%d failed=%d",
-        date, haiku_evaluated, sonnet_evaluated, skipped_unmapped, len(failed),
+        "skipped_unmapped=%d failed=%d metric_emission_failures=%d",
+        date, haiku_evaluated, sonnet_evaluated, skipped_unmapped,
+        len(failed), metric_emission_failures,
     )
 
     return {
@@ -234,6 +263,7 @@ def evaluate_corpus(
         "haiku_evaluated": haiku_evaluated,
         "sonnet_evaluated": sonnet_evaluated,
         "skipped_unmapped": skipped_unmapped,
+        "metric_emission_failures": metric_emission_failures,
         "failed": failed,
         "persisted_keys": persisted_keys,
         "haiku_model": haiku_model,

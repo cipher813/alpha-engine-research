@@ -24,6 +24,7 @@ def _ok_summary() -> dict:
         "haiku_evaluated": 4,
         "sonnet_evaluated": 0,
         "skipped_unmapped": 1,
+        "metric_emission_failures": 0,
         "failed": [],
         "persisted_keys": ["k1", "k2", "k3", "k4"],
         "haiku_model": "claude-haiku-4-5",
