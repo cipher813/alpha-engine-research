@@ -1,16 +1,15 @@
 FROM --platform=linux/amd64 public.ecr.aws/lambda/python:3.12
 
-# Stage alpha-engine-lib from vendor/ (deploy.sh stages it from a sibling
-# checkout). alerts_handler uses alpha_engine_lib.logging.setup_logging
-# to route ERROR logs through flow-doctor when FLOW_DOCTOR_ENABLED=1.
-# No [arcticdb] extra — the alerts Lambda never touches ArcticDB.
-COPY vendor/alpha-engine-lib /tmp/alpha-engine-lib
+# alerts_handler uses alpha_engine_lib.logging.setup_logging to route
+# ERROR logs through flow-doctor when FLOW_DOCTOR_ENABLED=1. Installed
+# from public git+https (lib was flipped public 2026-05-03). No
+# [arcticdb] extra — the alerts Lambda never touches ArcticDB.
 
 # Minimal deps for alerts handler
 COPY requirements-alerts.txt ${LAMBDA_TASK_ROOT}/
-RUN pip install --no-cache-dir /tmp/alpha-engine-lib[flow_doctor] && \
+RUN pip install --no-cache-dir "alpha-engine-lib[flow_doctor] @ git+https://github.com/cipher813/alpha-engine-lib@v0.3.0" && \
     pip install --no-cache-dir -r requirements-alerts.txt && \
-    rm -rf /root/.cache/pip /tmp/alpha-engine-lib
+    rm -rf /root/.cache/pip
 
 # Application code needed by alerts handler
 COPY config/ ${LAMBDA_TASK_ROOT}/config/
