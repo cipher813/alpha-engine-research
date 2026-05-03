@@ -210,11 +210,14 @@ class TestEvaluateArtifact:
     def test_full_pipeline_with_mocked_llm(self, monkeypatch):
         from evals import judge as judge_mod
 
-        # Stub structured_llm.invoke to return a fixed output without
-        # touching the network. ``with_structured_output`` returns a
-        # runnable; we replace it at the ChatAnthropic instance level.
+        # PR #106: with_structured_output(include_raw=True) returns a
+        # runnable whose .invoke() yields a dict with parsed/raw/parsing_error.
         fake_structured = MagicMock()
-        fake_structured.invoke.return_value = _make_llm_output()
+        fake_structured.invoke.return_value = {
+            "parsed": _make_llm_output(),
+            "raw": MagicMock(content="ok"),
+            "parsing_error": None,
+        }
 
         fake_llm = MagicMock()
         fake_llm.with_structured_output.return_value = fake_structured
@@ -244,6 +247,12 @@ class TestEvaluateArtifact:
         assert result.dimension_scores[0].dimension == "numerical_grounding"
         # Overall reasoning propagated
         assert "regime engagement" in result.overall_reasoning
+        # First-attempt success — should NOT have called invoke more than once
+        assert fake_structured.invoke.call_count == 1
+        # And must have requested include_raw=True
+        fake_llm.with_structured_output.assert_called_once()
+        kwargs = fake_llm.with_structured_output.call_args.kwargs
+        assert kwargs.get("include_raw") is True
 
     def test_renders_artifact_payload_into_prompt(self, monkeypatch):
         """Verify the rubric prompt is rendered with the artifact's
@@ -251,7 +260,11 @@ class TestEvaluateArtifact:
         from evals import judge as judge_mod
 
         fake_structured = MagicMock()
-        fake_structured.invoke.return_value = _make_llm_output()
+        fake_structured.invoke.return_value = {
+            "parsed": _make_llm_output(),
+            "raw": MagicMock(content="ok"),
+            "parsing_error": None,
+        }
         fake_llm = MagicMock()
         fake_llm.with_structured_output.return_value = fake_structured
 
@@ -272,6 +285,110 @@ class TestEvaluateArtifact:
         # Substitution variables should NOT remain unrendered
         assert "{agent_input}" not in rendered
         assert "{agent_output}" not in rendered
+
+    def test_retries_on_parse_failure_and_succeeds(self, monkeypatch, caplog):
+        """First attempt returns parsing_error; second attempt succeeds.
+        Pin: retry loop catches the parse failure, logs WARNING with
+        raw payload head, retries, returns the parsed result. Counts
+        2 invokes total."""
+        import logging
+        from evals import judge as judge_mod
+        from pydantic import ValidationError
+
+        bad_resp = {
+            "parsed": None,
+            "raw": MagicMock(content='[{"dimension": "x", "score": 4'),
+            "parsing_error": ValidationError.from_exception_data(
+                "RubricEvalLLMOutput", []
+            ),
+        }
+        good_resp = {
+            "parsed": _make_llm_output(),
+            "raw": MagicMock(content="ok"),
+            "parsing_error": None,
+        }
+
+        fake_structured = MagicMock()
+        fake_structured.invoke.side_effect = [bad_resp, good_resp]
+        fake_llm = MagicMock()
+        fake_llm.with_structured_output.return_value = fake_structured
+
+        with patch.object(judge_mod, "ChatAnthropic", return_value=fake_llm), \
+             patch("time.sleep"), \
+             caplog.at_level(logging.WARNING):
+            artifact = _make_artifact("sector_quant:technology")
+            result = judge_mod.evaluate_artifact(
+                artifact, judge_model="claude-haiku-4-5", api_key="sk-test",
+            )
+
+        assert isinstance(result, RubricEvalArtifact)
+        assert fake_structured.invoke.call_count == 2
+        # Loud-log the parse failure with raw head for diagnostic.
+        warn_msgs = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+        assert any("parse attempt 1/3 failed" in m for m in warn_msgs)
+        assert any("raw head=" in m for m in warn_msgs)
+
+    def test_raises_after_max_retries_exhausted(self, monkeypatch):
+        """All 3 attempts return parsing_error → raises RuntimeError
+        with diagnostic context. Bounds worst-case latency + makes
+        structural failures loud."""
+        from evals import judge as judge_mod
+        from pydantic import ValidationError
+
+        bad_resp = {
+            "parsed": None,
+            "raw": MagicMock(content="malformed"),
+            "parsing_error": ValidationError.from_exception_data(
+                "RubricEvalLLMOutput", []
+            ),
+        }
+
+        fake_structured = MagicMock()
+        fake_structured.invoke.return_value = bad_resp
+        fake_llm = MagicMock()
+        fake_llm.with_structured_output.return_value = fake_structured
+
+        with patch.object(judge_mod, "ChatAnthropic", return_value=fake_llm), \
+             patch("time.sleep"):
+            artifact = _make_artifact("sector_quant:technology")
+            with pytest.raises(RuntimeError, match="parse attempts failed"):
+                judge_mod.evaluate_artifact(
+                    artifact, judge_model="claude-haiku-4-5", api_key="sk-test",
+                )
+
+        # All 3 attempts fired (default MAX_JUDGE_RETRIES=3).
+        assert fake_structured.invoke.call_count == 3
+
+    def test_retry_count_param_overrides_default(self, monkeypatch):
+        """``max_retries`` param lets callers tune the budget — useful
+        for the test-track flag and for ad-hoc replay scripts that
+        want to fail fast."""
+        from evals import judge as judge_mod
+        from pydantic import ValidationError
+
+        bad_resp = {
+            "parsed": None,
+            "raw": MagicMock(content="x"),
+            "parsing_error": ValidationError.from_exception_data(
+                "RubricEvalLLMOutput", []
+            ),
+        }
+
+        fake_structured = MagicMock()
+        fake_structured.invoke.return_value = bad_resp
+        fake_llm = MagicMock()
+        fake_llm.with_structured_output.return_value = fake_structured
+
+        with patch.object(judge_mod, "ChatAnthropic", return_value=fake_llm), \
+             patch("time.sleep"):
+            artifact = _make_artifact("sector_quant:technology")
+            with pytest.raises(RuntimeError):
+                judge_mod.evaluate_artifact(
+                    artifact, max_retries=1, api_key="sk-test",
+                )
+
+        # Single attempt only.
+        assert fake_structured.invoke.call_count == 1
 
 
 # ── persist_eval_artifact ─────────────────────────────────────────────────
