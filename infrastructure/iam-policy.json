@@ -40,8 +40,8 @@
       "Action": "cloudwatch:PutMetricData",
       "Resource": "*",
       "Condition": {
-        "StringEquals": {
-          "cloudwatch:namespace": "AlphaEngine/Eval"
+        "StringLike": {
+          "cloudwatch:namespace": "AlphaEngine/Eval*"
         }
       }
     },
