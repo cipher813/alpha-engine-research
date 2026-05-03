@@ -21,15 +21,17 @@ lxml~=5.2
 pyyaml~=6.0.1
 boto3~=1.34
 pydantic~=2.7
-# alpha-engine-lib provides setup_logging + BasePreflight. The
-# [arcticdb] extra pulls arcticdb (used by data/fetchers/price_fetcher.py);
-# [flow_doctor] pulls flow-doctor so lambda/handler.py's setup_logging
-# call can attach the FlowDoctorHandler when FLOW_DOCTOR_ENABLED=1.
-# Private repo — pip install needs ALPHA_ENGINE_LIB_TOKEN:
-#   CI: .github/workflows/ci.yml configures a git URL insteadOf rewrite.
-#   Lambda: Dockerfile installs from vendor/alpha-engine-lib staged by
-#           infrastructure/deploy.sh (sibling checkout in CI, local dev on laptop).
-alpha-engine-lib[arcticdb,flow_doctor] @ git+https://github.com/cipher813/alpha-engine-lib@v0.2.4
+# alpha-engine-lib provides setup_logging, BasePreflight, and (since v0.3.0)
+# the rag submodule consolidating db/embeddings/retrieval/schema previously
+# duplicated in this repo's rag/ folder.
+# Extras:
+#   [arcticdb]    arcticdb (data/fetchers/price_fetcher.py)
+#   [flow_doctor] flow-doctor (lambda/handler.py setup_logging integration)
+#   [rag]         psycopg2-binary + pgvector + numpy (qual_tools query_filings,
+#                 graph/research_graph rag.is_available probe)
+# Lib is now public — no PAT required. Lambda Dockerfile installs via the
+# git URL; CI pulls directly.
+alpha-engine-lib[arcticdb,flow_doctor,rag] @ git+https://github.com/cipher813/alpha-engine-lib@v0.3.0
 
 # Scheduling / calendar
 exchange-calendars~=4.5

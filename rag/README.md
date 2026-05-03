@@ -2,6 +2,8 @@
 
 Vector retrieval over SEC filings, earnings transcripts, and thesis history. Provides the qual analyst agents with deep fundamental context beyond headlines and consensus data.
 
+> **As of alpha-engine-lib v0.3.0, the shared retrieval/db/embeddings/schema code lives in [`alpha_engine_lib.rag`](https://github.com/cipher813/alpha-engine-lib/tree/main/src/alpha_engine_lib/rag).** This folder now retains only the ingestion pipelines + tests. Retrieval consumers (`graph/research_graph.py`, `agents/sector_teams/qual_tools.py`) import from the lib.
+
 ## Architecture
 
 ```
@@ -13,15 +15,18 @@ Thesis History       ──→   (HNSW index)   ──→         top-k results 
 
 ## Components
 
-| File | Purpose |
-|------|---------|
-| `embeddings.py` | Voyage voyage-3-lite wrapper (512d), batch support |
-| `db.py` | Neon PostgreSQL connection management |
-| `retrieval.py` | Filtered similarity search + document ingestion |
-| `schema.sql` | pgvector table definitions + HNSW index |
-| `pipelines/ingest_sec_filings.py` | 10-K/10-Q section extraction + chunking |
-| `pipelines/ingest_earnings_transcripts.py` | FMP transcript ingestion (currently blocked — see below) |
-| `pipelines/ingest_theses.py` | Self-ingestion of thesis_history from research.db |
+| Location | File | Purpose |
+|---|---|---|
+| `alpha_engine_lib.rag` | `embeddings.py` | Voyage voyage-3-lite wrapper (512d), batch support |
+| `alpha_engine_lib.rag` | `db.py` | Neon PostgreSQL connection management |
+| `alpha_engine_lib.rag` | `retrieval.py` | Filtered similarity search + document ingestion |
+| `alpha_engine_lib.rag` | `schema.sql` | pgvector table definitions + HNSW index |
+| this repo | `pipelines/ingest_sec_filings.py` | 10-K/10-Q section extraction + chunking |
+| this repo | `pipelines/ingest_earnings_transcripts.py` | FMP transcript ingestion (currently blocked — see below) |
+| this repo | `pipelines/ingest_theses.py` | Self-ingestion of thesis_history from research.db |
+| this repo | `pipelines/_signals_resolver.py` | Shared S3 signals → ticker-list resolver |
+
+> **Note on canonical ingestion home:** `alpha-engine-data` also has a `rag/pipelines/` directory. Reconciliation between research's pipelines (which use `_signals_resolver`) and data's pipelines (which inline the signals lookup) is a separate cleanup arc. For now, both live; the production Saturday SF state runs whichever target the SSM document points to.
 
 ## Ingestion CLI
 
@@ -46,28 +51,28 @@ Thesis History       ──→   (HNSW index)   ──→         top-k results 
 
 ## Active Data Sources
 
-### SEC Filings (10-K / 10-Q) ✅
+### SEC Filings (10-K / 10-Q)
 - Source: EDGAR submissions API (`data.sec.gov/submissions/`)
 - Sections extracted: Risk Factors, MD&A, Business, Market Risk Disclosures
 - Chunked at ~400 tokens with 50-token overlap
 - Dedup by (ticker, doc_type, filed_date, source)
 
-### Thesis History ✅
+### Thesis History
 - Source: `thesis_history` table in research.db
 - Embeds bull_case, bear_case, catalysts, risks, conviction_rationale
 - Note: currently empty for most records (CIO writes score/conviction but not text fields). Will populate as research agents produce richer theses.
 
 ## Future Opportunities
 
-### Earnings Call Transcripts ⏳
+### Earnings Call Transcripts
 Pipeline built (`ingest_earnings_transcripts.py`) but **FMP deprecated its transcript endpoint** (legacy-only as of Aug 2025). Alternatives:
-- **Alpha Vantage** premium tier ($50/month) — full transcript text
+- **Alpha Vantage** premium tier (~$50/month) — full transcript text
 - **Free transcript sources** — Motley Fool publishes partial transcripts; would need a scraper
 - **Whisper + podcast feeds** — some earnings calls are available as audio; could transcribe with Whisper
 
-When a transcript source becomes available, the pipeline is ready — just swap `_fetch_transcript()`.
+When a transcript source becomes available, the pipeline is ready — swap `_fetch_transcript()`.
 
-### Analyst Reports ⏳
+### Analyst Reports
 Full analyst reports (Goldman, Morgan Stanley, etc.) are behind paywalls. If access becomes available, the chunking + embedding pipeline generalizes to any long-form document.
 
 ## Cost
