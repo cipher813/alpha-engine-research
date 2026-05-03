@@ -325,7 +325,7 @@ def fetch_data(state: ResearchState) -> dict:
     # RAG availability check (early, so we know before agents start)
     rag_available = False
     try:
-        from rag.db import is_available as _rag_is_available
+        from alpha_engine_lib.rag import is_available as _rag_is_available
         rag_available = _rag_is_available()
         logger.info("[fetch_data] RAG database: %s", "available" if rag_available else "UNAVAILABLE")
         # Reset per-run RAG stats

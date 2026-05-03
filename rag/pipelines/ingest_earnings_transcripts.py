@@ -138,8 +138,8 @@ def ingest_ticker(
 
     Returns number of transcripts ingested.
     """
-    from rag.embeddings import embed_texts
-    from rag.retrieval import ingest_document, document_exists
+    from alpha_engine_lib.rag.embeddings import embed_texts
+    from alpha_engine_lib.rag.retrieval import ingest_document, document_exists
 
     ingested = 0
 
