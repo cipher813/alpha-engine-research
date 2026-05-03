@@ -35,6 +35,7 @@ from graph.state_schemas import (
     QualAnalystOutput,
     QuantAcceptanceVerdict,
     QuantAnalystOutput,
+    RubricEvalLLMOutput,
     SectorTeamOutput,
 )
 
@@ -55,6 +56,7 @@ _FIXTURES: list[tuple[str, type]] = [
     ("sector_team_output.json", SectorTeamOutput),
     ("investment_thesis.json", InvestmentThesis),
     ("cio_decision.json", CIODecision),
+    ("rubric_eval_llm_output.json", RubricEvalLLMOutput),
 ]
 
 

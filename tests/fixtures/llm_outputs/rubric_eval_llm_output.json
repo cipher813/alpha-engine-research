@@ -1,0 +1,25 @@
+{
+  "dimension_scores": [
+    {
+      "dimension": "numerical_grounding",
+      "score": 4,
+      "reasoning": "AAPL and NVDA rationales cite specific RSI and momentum values from the input technical_scores; MSFT pick references technical_score numerically. One pick (TSM) gives directional reasoning without numbers."
+    },
+    {
+      "dimension": "signal_calibration",
+      "score": 3,
+      "reasoning": "Score gradient roughly tracks rationale strength but NVDA at 78 has weaker cited evidence than AAPL at 75 — a mild inversion."
+    },
+    {
+      "dimension": "ranking_coherence",
+      "score": 4,
+      "reasoning": "Rank order matches quant_score order; rationale quality visibly degrades from #1 to #5. No contradictions."
+    },
+    {
+      "dimension": "regime_awareness",
+      "score": 3,
+      "reasoning": "Caution regime is named once in the team-level commentary but doesn't visibly shape pick selection across the ranked list."
+    }
+  ],
+  "overall_reasoning": "Strong on numerical grounding and ranking discipline; weakest signal is regime engagement — caution regime should have triggered visible filtering on the ranked picks."
+}
