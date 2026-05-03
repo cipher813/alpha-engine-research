@@ -190,23 +190,30 @@ def build_eval_s3_key(
     *,
     judged_agent_id: str,
     run_id: str,
+    judge_model: str,
     timestamp: Optional[datetime] = None,
 ) -> str:
     """Build the canonical S3 key for an eval artifact.
 
-    Path shape (per ROADMAP §1630):
-      ``decision_artifacts/_eval/{YYYY-MM-DD}/{judged_agent_id}/{run_id}.json``
+    Path shape (extends ROADMAP §1630 to disambiguate two-tier judges):
+      ``decision_artifacts/_eval/{YYYY-MM-DD}/{judged_agent_id}/{run_id}.{judge_model}.json``
+
+    The ``judge_model`` segment lets Haiku-tier and Sonnet-tier evals
+    of the same artifact coexist without clobbering each other (PR 3b
+    two-tier orchestration). ROADMAP §1630 wrote ``{run_id}.json``
+    before the two-tier dimension was specified; the extra segment is
+    backwards-compat-friendly for new writes.
 
     The date partition is taken from ``timestamp`` (defaults to
     now-UTC) so multiple runs on the same calendar day cluster under
-    one prefix. ``run_id`` is the filename so retries with the same
-    run_id idempotently overwrite.
+    one prefix. ``run_id`` is the filename stem so retries with the
+    same run_id + judge_model idempotently overwrite.
     """
     ts = timestamp or datetime.now(timezone.utc)
     date_partition = ts.strftime("%Y-%m-%d")
     return (
         f"decision_artifacts/_eval/{date_partition}/"
-        f"{judged_agent_id}/{run_id}.json"
+        f"{judged_agent_id}/{run_id}.{judge_model}.json"
     )
 
 
@@ -233,6 +240,7 @@ def persist_eval_artifact(
     key = build_eval_s3_key(
         judged_agent_id=artifact.judged_agent_id,
         run_id=artifact.run_id,
+        judge_model=artifact.judge_model,
         timestamp=artifact_ts,
     )
     body = artifact.model_dump_json(indent=2).encode("utf-8")

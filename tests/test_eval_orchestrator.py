@@ -1,0 +1,380 @@
+"""Unit tests for the LLM-as-judge orchestrator (PR 3b of P3.1).
+
+Covers:
+- ``should_escalate_to_sonnet`` — Haiku-tier flag-out logic.
+- ``list_capture_keys`` — S3 listing of captures, exclusion of the
+  ``_eval/`` subtree, and ``.json``-only filtering.
+- ``evaluate_corpus`` end-to-end with moto-mocked S3 + a stubbed
+  ``evaluate_artifact``: per-artifact escalation, force_sonnet_pass,
+  unmapped-agent skipping, mid-batch error containment.
+
+Real LLM is never called — all eval invocations go through a stubbed
+``evaluate_artifact`` patched on the orchestrator module.
+"""
+
+from __future__ import annotations
+
+import json
+from unittest.mock import patch
+
+import boto3
+import pytest
+from moto import mock_aws
+
+from alpha_engine_lib.decision_capture import (
+    DecisionArtifact,
+    FullPromptContext,
+    ModelMetadata,
+)
+from graph.state_schemas import (
+    RubricDimensionScore,
+    RubricEvalArtifact,
+)
+
+
+# ── Fixtures ──────────────────────────────────────────────────────────────
+
+
+def _make_capture(agent_id: str, run_id: str = "run-1") -> dict:
+    """Build a captured-artifact dict (the JSON shape S3 stores)."""
+    return DecisionArtifact(
+        run_id=run_id,
+        timestamp="2026-05-09T22:30:00.000Z",
+        agent_id=agent_id,
+        model_metadata=ModelMetadata(model_name="claude-haiku-4-5"),
+        full_prompt_context=FullPromptContext(
+            system_prompt="<see config/prompts>",
+            user_prompt="<rendered>",
+        ),
+        input_data_snapshot={"k": "v"},
+        input_data_summary="k=v",
+        agent_output={"out": "ok"},
+    ).model_dump()
+
+
+def _make_eval(
+    judged_agent_id: str,
+    *,
+    run_id: str = "run-1",
+    judge_model: str = "claude-haiku-4-5",
+    scores: list[int] | None = None,
+) -> RubricEvalArtifact:
+    """Build a RubricEvalArtifact with controllable dimension scores
+    so escalation logic can be exercised."""
+    scores = scores if scores is not None else [4, 4, 4, 4]
+    return RubricEvalArtifact(
+        run_id=run_id,
+        timestamp="2026-05-09T22:30:00.000Z",
+        judged_agent_id=judged_agent_id,
+        rubric_id="eval_rubric_test",
+        rubric_version="1.0.0",
+        judge_model=judge_model,
+        dimension_scores=[
+            RubricDimensionScore(
+                dimension=f"dim_{i}", score=s, reasoning=f"r_{i}",
+            )
+            for i, s in enumerate(scores)
+        ],
+        overall_reasoning="ok",
+    )
+
+
+@pytest.fixture
+def mocked_s3_with_captures():
+    """Yields an S3 client + bucket pre-populated with a small Sat-5/9-style
+    capture set: 1 sector_quant + 1 sector_qual + 1 ic_cio + 1
+    macro_economist + 1 thesis_update (intentionally unmapped) + 1 stray
+    non-JSON file (defensive listing case)."""
+    with mock_aws():
+        client = boto3.client("s3", region_name="us-east-1")
+        client.create_bucket(Bucket="alpha-engine-research")
+
+        prefix = "decision_artifacts/2026/05/09"
+        captures = {
+            f"{prefix}/sector_quant:technology/run-1.json":
+                _make_capture("sector_quant:technology"),
+            f"{prefix}/sector_qual:technology/run-1.json":
+                _make_capture("sector_qual:technology"),
+            f"{prefix}/macro_economist/run-1.json":
+                _make_capture("macro_economist"),
+            f"{prefix}/ic_cio/run-1.json":
+                _make_capture("ic_cio"),
+            f"{prefix}/thesis_update:technology:AAPL/run-1.json":
+                _make_capture("thesis_update:technology:AAPL"),
+        }
+        for key, payload in captures.items():
+            client.put_object(
+                Bucket="alpha-engine-research", Key=key,
+                Body=json.dumps(payload, default=str).encode("utf-8"),
+            )
+
+        # Stray non-JSON file under the partition — must be ignored
+        # by list_capture_keys.
+        client.put_object(
+            Bucket="alpha-engine-research",
+            Key=f"{prefix}/README.txt",
+            Body=b"not an artifact",
+        )
+
+        # A pre-existing eval artifact under _eval/ — must NOT be
+        # picked up as input.
+        client.put_object(
+            Bucket="alpha-engine-research",
+            Key=f"decision_artifacts/_eval/2026-05-09/ic_cio/run-prev.claude-haiku-4-5.json",
+            Body=b"{}",
+        )
+
+        yield client
+
+
+# ── should_escalate_to_sonnet ─────────────────────────────────────────────
+
+
+class TestShouldEscalateToSonnet:
+    def test_no_dimension_below_threshold(self):
+        from evals.orchestrator import should_escalate_to_sonnet
+        eval_ = _make_eval("ic_cio", scores=[5, 4, 3, 4])
+        assert should_escalate_to_sonnet(eval_, threshold=3) is False
+
+    def test_one_dimension_below_threshold(self):
+        from evals.orchestrator import should_escalate_to_sonnet
+        eval_ = _make_eval("ic_cio", scores=[5, 4, 2, 4])
+        assert should_escalate_to_sonnet(eval_, threshold=3) is True
+
+    def test_threshold_is_strict_less_than(self):
+        # score == threshold should NOT escalate (the rubric midpoint
+        # is acceptable; only "below 3" triggers).
+        from evals.orchestrator import should_escalate_to_sonnet
+        eval_ = _make_eval("ic_cio", scores=[3, 3, 3, 3])
+        assert should_escalate_to_sonnet(eval_, threshold=3) is False
+
+    def test_custom_threshold(self):
+        from evals.orchestrator import should_escalate_to_sonnet
+        eval_ = _make_eval("ic_cio", scores=[4, 4, 4, 4])
+        # Tighter gate: below 5 → escalate.
+        assert should_escalate_to_sonnet(eval_, threshold=5) is True
+
+
+# ── list_capture_keys ─────────────────────────────────────────────────────
+
+
+class TestListCaptureKeys:
+    def test_lists_only_capture_jsons(self, mocked_s3_with_captures):
+        from evals.orchestrator import list_capture_keys
+        keys = list_capture_keys(
+            mocked_s3_with_captures,
+            date="2026-05-09",
+            bucket="alpha-engine-research",
+        )
+        # 5 capture artifacts; README.txt + _eval/ entry both excluded.
+        assert len(keys) == 5
+        assert all(k.endswith(".json") for k in keys)
+        assert all("/_eval/" not in k for k in keys)
+        assert all(k.startswith("decision_artifacts/2026/05/09/") for k in keys)
+
+
+# ── evaluate_corpus ───────────────────────────────────────────────────────
+
+
+class TestEvaluateCorpus:
+    def test_haiku_only_when_no_escalation(self, mocked_s3_with_captures):
+        """All Haiku scores are 4; no force_sonnet_pass → only Haiku
+        evals are written. Sonnet count = 0."""
+        from evals import orchestrator as orch
+
+        def fake_eval(artifact, *, judge_model, judged_artifact_s3_key, **kw):
+            return _make_eval(
+                artifact.agent_id,
+                run_id=artifact.run_id,
+                judge_model=judge_model,
+                scores=[4, 4, 4, 4],
+            )
+
+        with patch.object(orch, "evaluate_artifact", side_effect=fake_eval):
+            result = orch.evaluate_corpus(
+                date="2026-05-09",
+                bucket="alpha-engine-research",
+                s3_client=mocked_s3_with_captures,
+            )
+
+        # 4 mapped agents (sector_quant + sector_qual + macro_economist + ic_cio);
+        # thesis_update is intentionally unmapped → skipped.
+        assert result["haiku_evaluated"] == 4
+        assert result["sonnet_evaluated"] == 0
+        assert result["skipped_unmapped"] == 1
+        assert result["failed"] == []
+        assert len(result["persisted_keys"]) == 4
+        assert all(
+            ".claude-haiku-4-5.json" in k for k in result["persisted_keys"]
+        )
+
+    def test_force_sonnet_pass_runs_both_tiers(self, mocked_s3_with_captures):
+        from evals import orchestrator as orch
+
+        def fake_eval(artifact, *, judge_model, judged_artifact_s3_key, **kw):
+            return _make_eval(
+                artifact.agent_id,
+                run_id=artifact.run_id,
+                judge_model=judge_model,
+                scores=[5, 5, 5, 5],  # No per-artifact escalation reason.
+            )
+
+        with patch.object(orch, "evaluate_artifact", side_effect=fake_eval):
+            result = orch.evaluate_corpus(
+                date="2026-05-09",
+                bucket="alpha-engine-research",
+                force_sonnet_pass=True,
+                s3_client=mocked_s3_with_captures,
+            )
+
+        # Every mapped artifact gets BOTH Haiku and Sonnet evals.
+        assert result["haiku_evaluated"] == 4
+        assert result["sonnet_evaluated"] == 4
+        assert len(result["persisted_keys"]) == 8
+        haiku_keys = [k for k in result["persisted_keys"] if "claude-haiku-4-5" in k]
+        sonnet_keys = [k for k in result["persisted_keys"] if "claude-sonnet-4-6" in k]
+        assert len(haiku_keys) == 4
+        assert len(sonnet_keys) == 4
+
+    def test_per_artifact_escalation_when_haiku_score_below_threshold(
+        self, mocked_s3_with_captures,
+    ):
+        """ic_cio gets a Haiku score of 2 → escalates to Sonnet.
+        Other agents stay at 4 → no escalation."""
+        from evals import orchestrator as orch
+
+        def fake_eval(artifact, *, judge_model, judged_artifact_s3_key, **kw):
+            scores = [2, 4, 4, 4] if artifact.agent_id == "ic_cio" else [4, 4, 4, 4]
+            return _make_eval(
+                artifact.agent_id,
+                run_id=artifact.run_id,
+                judge_model=judge_model,
+                scores=scores,
+            )
+
+        with patch.object(orch, "evaluate_artifact", side_effect=fake_eval):
+            result = orch.evaluate_corpus(
+                date="2026-05-09",
+                bucket="alpha-engine-research",
+                s3_client=mocked_s3_with_captures,
+            )
+
+        assert result["haiku_evaluated"] == 4
+        assert result["sonnet_evaluated"] == 1
+        # The Sonnet escalation should be for ic_cio specifically.
+        sonnet_keys = [k for k in result["persisted_keys"] if "claude-sonnet-4-6" in k]
+        assert len(sonnet_keys) == 1
+        assert "/ic_cio/" in sonnet_keys[0]
+
+    def test_haiku_failure_is_contained(self, mocked_s3_with_captures):
+        """LLM raising on one artifact must not halt evaluation of others."""
+        from evals import orchestrator as orch
+
+        def fake_eval(artifact, *, judge_model, judged_artifact_s3_key, **kw):
+            if artifact.agent_id == "macro_economist":
+                raise RuntimeError("anthropic 5xx")
+            return _make_eval(
+                artifact.agent_id,
+                run_id=artifact.run_id,
+                judge_model=judge_model,
+                scores=[4, 4, 4, 4],
+            )
+
+        with patch.object(orch, "evaluate_artifact", side_effect=fake_eval):
+            result = orch.evaluate_corpus(
+                date="2026-05-09",
+                bucket="alpha-engine-research",
+                s3_client=mocked_s3_with_captures,
+            )
+
+        # 3 succeed (sector_quant + sector_qual + ic_cio); macro fails.
+        assert result["haiku_evaluated"] == 3
+        assert result["sonnet_evaluated"] == 0
+        assert len(result["failed"]) == 1
+        assert result["failed"][0]["agent_id"] == "macro_economist"
+        assert result["failed"][0]["stage"] == "haiku"
+        assert "anthropic 5xx" in result["failed"][0]["error"]
+
+    def test_sonnet_failure_does_not_invalidate_haiku(self, mocked_s3_with_captures):
+        """If Haiku succeeds + Sonnet fails, the Haiku eval is still
+        persisted; only Sonnet is marked failed."""
+        from evals import orchestrator as orch
+
+        def fake_eval(artifact, *, judge_model, judged_artifact_s3_key, **kw):
+            if judge_model == "claude-sonnet-4-6":
+                raise RuntimeError("anthropic 429")
+            return _make_eval(
+                artifact.agent_id,
+                run_id=artifact.run_id,
+                judge_model=judge_model,
+                scores=[2, 4, 4, 4],  # triggers escalation
+            )
+
+        with patch.object(orch, "evaluate_artifact", side_effect=fake_eval):
+            result = orch.evaluate_corpus(
+                date="2026-05-09",
+                bucket="alpha-engine-research",
+                s3_client=mocked_s3_with_captures,
+            )
+
+        # Every mapped artifact has Haiku score 2 → all 4 escalate.
+        assert result["haiku_evaluated"] == 4
+        assert result["sonnet_evaluated"] == 0
+        # All 4 Sonnet attempts failed; no Haiku failures.
+        sonnet_failures = [f for f in result["failed"] if f["stage"] == "sonnet"]
+        haiku_failures = [f for f in result["failed"] if f["stage"] == "haiku"]
+        assert len(sonnet_failures) == 4
+        assert len(haiku_failures) == 0
+
+    def test_skipped_unmapped_agents_not_in_failed(
+        self, mocked_s3_with_captures,
+    ):
+        """thesis_update:* artifacts have no rubric; they should be
+        counted as skipped, NOT as failures."""
+        from evals import orchestrator as orch
+
+        def fake_eval(artifact, *, judge_model, judged_artifact_s3_key, **kw):
+            return _make_eval(
+                artifact.agent_id,
+                run_id=artifact.run_id,
+                judge_model=judge_model,
+                scores=[4, 4, 4, 4],
+            )
+
+        with patch.object(orch, "evaluate_artifact", side_effect=fake_eval):
+            result = orch.evaluate_corpus(
+                date="2026-05-09",
+                bucket="alpha-engine-research",
+                s3_client=mocked_s3_with_captures,
+            )
+
+        assert result["skipped_unmapped"] == 1
+        assert result["failed"] == []
+
+    def test_persisted_keys_reflect_two_tier_naming(
+        self, mocked_s3_with_captures,
+    ):
+        """Persisted keys must include the judge_model segment so
+        Haiku and Sonnet writes for the same artifact don't collide."""
+        from evals import orchestrator as orch
+
+        def fake_eval(artifact, *, judge_model, judged_artifact_s3_key, **kw):
+            return _make_eval(
+                artifact.agent_id,
+                run_id=artifact.run_id,
+                judge_model=judge_model,
+                scores=[2, 4, 4, 4] if artifact.agent_id == "ic_cio" else [4, 4, 4, 4],
+            )
+
+        with patch.object(orch, "evaluate_artifact", side_effect=fake_eval):
+            result = orch.evaluate_corpus(
+                date="2026-05-09",
+                bucket="alpha-engine-research",
+                s3_client=mocked_s3_with_captures,
+            )
+
+        # Find the two ic_cio keys (Haiku + Sonnet).
+        ic_cio_keys = [k for k in result["persisted_keys"] if "/ic_cio/" in k]
+        assert len(ic_cio_keys) == 2
+        assert any(".claude-haiku-4-5.json" in k for k in ic_cio_keys)
+        assert any(".claude-sonnet-4-6.json" in k for k in ic_cio_keys)

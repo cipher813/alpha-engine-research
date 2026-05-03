@@ -145,18 +145,38 @@ class TestBuildEvalS3Key:
         key = build_eval_s3_key(
             judged_agent_id="sector_quant:technology",
             run_id="run-abc-123",
+            judge_model="claude-haiku-4-5",
             timestamp=ts,
         )
-        assert key == "decision_artifacts/_eval/2026-05-09/sector_quant:technology/run-abc-123.json"
+        assert key == "decision_artifacts/_eval/2026-05-09/sector_quant:technology/run-abc-123.claude-haiku-4-5.json"
 
     def test_default_timestamp_is_now(self):
         from evals.judge import build_eval_s3_key
         key = build_eval_s3_key(
             judged_agent_id="ic_cio", run_id="r1",
+            judge_model="claude-haiku-4-5",
         )
         # Today's UTC date partition; we just verify shape, not exact match
         assert "decision_artifacts/_eval/" in key
-        assert "/ic_cio/r1.json" in key
+        assert "/ic_cio/r1.claude-haiku-4-5.json" in key
+
+    def test_judge_model_disambiguates_two_tier(self):
+        """Haiku + Sonnet of same (date, agent, run_id) must coexist —
+        the judge_model segment is what keeps the two writes from
+        clobbering each other (PR 3b two-tier orchestration)."""
+        from evals.judge import build_eval_s3_key
+        ts = datetime(2026, 5, 9, 22, 30, tzinfo=timezone.utc)
+        haiku_key = build_eval_s3_key(
+            judged_agent_id="ic_cio", run_id="r1",
+            judge_model="claude-haiku-4-5", timestamp=ts,
+        )
+        sonnet_key = build_eval_s3_key(
+            judged_agent_id="ic_cio", run_id="r1",
+            judge_model="claude-sonnet-4-6", timestamp=ts,
+        )
+        assert haiku_key != sonnet_key
+        assert haiku_key.endswith(".claude-haiku-4-5.json")
+        assert sonnet_key.endswith(".claude-sonnet-4-6.json")
 
 
 # ── evaluate_artifact end-to-end ──────────────────────────────────────────
@@ -265,7 +285,7 @@ class TestPersistEvalArtifact:
             artifact, s3_client=mocked_s3, bucket="alpha-engine-research",
         )
 
-        assert key == "decision_artifacts/_eval/2026-05-09/sector_quant:technology/run-1.json"
+        assert key == "decision_artifacts/_eval/2026-05-09/sector_quant:technology/run-1.claude-haiku-4-5.json"
         obj = mocked_s3.get_object(Bucket="alpha-engine-research", Key=key)
         roundtrip = RubricEvalArtifact.model_validate(json.loads(obj["Body"].read()))
         assert roundtrip.judge_model == "claude-haiku-4-5"
