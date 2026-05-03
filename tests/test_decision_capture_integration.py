@@ -72,70 +72,226 @@ class TestFeatureFlag:
 # ── Per-node payload builders ─────────────────────────────────────────────
 
 
-class TestSectorTeamPayloadBuilder:
-    @pytest.fixture
-    def fake_ctx(self):
-        from agents.sector_teams.sector_team import SectorTeamContext
-        return SectorTeamContext(
-            scanner_universe=["AAPL", "MSFT", "JPM", "JNJ", "XOM"],
-            sector_map={
-                "AAPL": "Technology", "MSFT": "Technology",
-                "JPM": "Financial", "JNJ": "Healthcare", "XOM": "Energy",
-            },
-            price_data={},
-            technical_scores={
-                "AAPL": {"rsi_14": 55, "technical_score": 70},
-                "MSFT": {"rsi_14": 50, "technical_score": 65},
-            },
-            market_regime="neutral",
-            prior_theses={"AAPL": {"final_score": 65, "rating": "BUY"}},
-            held_tickers=["AAPL"],
-            news_data_by_ticker={"AAPL": {"articles": []}},
-            analyst_data_by_ticker={},
-            insider_data_by_ticker={},
-            prior_sector_ratings={},
-            current_sector_ratings={"Technology": {"rating": "overweight"}},
-            run_date="2026-04-29",
-            episodic_memories={},
-            semantic_memories={},
-        )
+@pytest.fixture
+def fake_ctx():
+    from agents.sector_teams.sector_team import SectorTeamContext
+    return SectorTeamContext(
+        scanner_universe=["AAPL", "MSFT", "JPM", "JNJ", "XOM"],
+        sector_map={
+            "AAPL": "Technology", "MSFT": "Technology",
+            "JPM": "Financial", "JNJ": "Healthcare", "XOM": "Energy",
+        },
+        price_data={},
+        technical_scores={
+            "AAPL": {"rsi_14": 55, "technical_score": 70},
+            "MSFT": {"rsi_14": 50, "technical_score": 65},
+        },
+        market_regime="neutral",
+        prior_theses={"AAPL": {"final_score": 65, "rating": "BUY"}},
+        held_tickers=["AAPL"],
+        news_data_by_ticker={
+            "AAPL": {"articles": [{"headline": "x"}]},
+            "MSFT": {"articles": []},
+        },
+        analyst_data_by_ticker={"AAPL": {"consensus_rating": "Buy"}},
+        insider_data_by_ticker={},
+        prior_sector_ratings={},
+        current_sector_ratings={"Technology": {"rating": "overweight"}},
+        run_date="2026-04-29",
+        episodic_memories={},
+        semantic_memories={},
+    )
 
+
+class TestSectorQuantPayloadBuilder:
     def test_payload_is_json_serializable(self, fake_ctx):
-        from graph.decision_capture_helpers import build_sector_team_capture_payload
-        snapshot, summary = build_sector_team_capture_payload(
+        from graph.decision_capture_helpers import build_sector_quant_capture_payload
+        snapshot, summary = build_sector_quant_capture_payload(
             "technology", fake_ctx, team_tickers=["AAPL", "MSFT"],
         )
-        # Must serialize cleanly — capture_decision will JSON-dump for S3
         json.dumps(snapshot)
         assert isinstance(summary, str)
         assert "team_id=technology" in summary
 
     def test_payload_includes_required_fields(self, fake_ctx):
-        from graph.decision_capture_helpers import build_sector_team_capture_payload
-        snapshot, _ = build_sector_team_capture_payload(
+        from graph.decision_capture_helpers import build_sector_quant_capture_payload
+        snapshot, _ = build_sector_quant_capture_payload(
             "technology", fake_ctx, team_tickers=["AAPL", "MSFT"],
         )
         for key in (
             "team_id", "run_date", "market_regime",
-            "scanner_universe_size", "team_tickers", "held_tickers_in_team",
-            "news_data_by_ticker", "analyst_data_by_ticker",
-            "insider_data_by_ticker", "prior_theses_in_team",
-            "prior_sector_ratings", "current_sector_ratings",
-            "technical_scores_team", "memories_summary",
+            "scanner_universe_size", "sector_tickers",
+            "sector_tickers_count", "technical_scores_team",
         ):
             assert key in snapshot, f"missing field: {key}"
 
-    def test_team_filtering(self, fake_ctx):
-        # technical_scores filters to team tickers; full universe scores
-        # are NOT captured (they'd duplicate other agents' captures).
-        from graph.decision_capture_helpers import build_sector_team_capture_payload
-        snapshot, _ = build_sector_team_capture_payload(
+    def test_excludes_qual_tier_inputs(self, fake_ctx):
+        # Quant doesn't see news/analyst/insider data — those are qual-tier.
+        # Capturing them would over-state quant's inputs and pollute eval.
+        from graph.decision_capture_helpers import build_sector_quant_capture_payload
+        snapshot, _ = build_sector_quant_capture_payload(
             "technology", fake_ctx, team_tickers=["AAPL", "MSFT"],
         )
-        ts = snapshot["technical_scores_team"]
-        assert set(ts.keys()) == {"AAPL", "MSFT"}
-        # Held tickers filtered to only those in the team
-        assert snapshot["held_tickers_in_team"] == ["AAPL"]
+        assert "news_data_by_ticker" not in snapshot
+        assert "analyst_data_by_ticker" not in snapshot
+        assert "insider_data_by_ticker" not in snapshot
+        assert "prior_theses_in_team" not in snapshot
+
+    def test_technical_scores_filtered_to_team(self, fake_ctx):
+        from graph.decision_capture_helpers import build_sector_quant_capture_payload
+        snapshot, _ = build_sector_quant_capture_payload(
+            "technology", fake_ctx, team_tickers=["AAPL", "MSFT"],
+        )
+        assert set(snapshot["technical_scores_team"].keys()) == {"AAPL", "MSFT"}
+
+
+class TestSectorQualPayloadBuilder:
+    def test_payload_is_json_serializable(self, fake_ctx):
+        from graph.decision_capture_helpers import build_sector_qual_capture_payload
+        snapshot, summary = build_sector_qual_capture_payload(
+            "technology", fake_ctx,
+            quant_top5=[{"ticker": "AAPL", "score": 70}, {"ticker": "MSFT", "score": 65}],
+        )
+        json.dumps(snapshot)
+        assert isinstance(summary, str)
+        assert "team_id=technology" in summary
+        assert "top5=2" in summary
+
+    def test_payload_includes_required_fields(self, fake_ctx):
+        from graph.decision_capture_helpers import build_sector_qual_capture_payload
+        snapshot, _ = build_sector_qual_capture_payload(
+            "technology", fake_ctx,
+            quant_top5=[{"ticker": "AAPL", "score": 70}, {"ticker": "MSFT", "score": 65}],
+        )
+        for key in (
+            "team_id", "run_date", "market_regime",
+            "quant_top5", "quant_top5_tickers", "held_in_top5",
+            "prior_theses_for_top5", "news_data_for_top5",
+            "analyst_data_for_top5", "insider_data_for_top5",
+            "prior_sector_ratings", "current_sector_ratings",
+            "memories_summary",
+        ):
+            assert key in snapshot, f"missing field: {key}"
+
+    def test_inputs_scoped_to_top5(self, fake_ctx):
+        # Qual only reviews top5 — capturing news/analyst data outside that
+        # set would over-state inputs.
+        from graph.decision_capture_helpers import build_sector_qual_capture_payload
+        snapshot, _ = build_sector_qual_capture_payload(
+            "technology", fake_ctx,
+            quant_top5=[{"ticker": "AAPL", "score": 70}],
+        )
+        assert snapshot["quant_top5_tickers"] == ["AAPL"]
+        assert set(snapshot["news_data_for_top5"].keys()) == {"AAPL"}
+        assert set(snapshot["analyst_data_for_top5"].keys()) == {"AAPL"}
+        assert snapshot["held_in_top5"] == ["AAPL"]
+        assert "AAPL" in snapshot["prior_theses_for_top5"]
+
+    def test_skips_picks_without_ticker(self, fake_ctx):
+        # quant LLM output parsing can drop the ticker key — match
+        # run_sector_team's filter at sector_team.py:96-109.
+        from graph.decision_capture_helpers import build_sector_qual_capture_payload
+        snapshot, _ = build_sector_qual_capture_payload(
+            "technology", fake_ctx,
+            quant_top5=[{"ticker": "AAPL"}, {"score": 50}, {"ticker": "MSFT"}],
+        )
+        assert snapshot["quant_top5_tickers"] == ["AAPL", "MSFT"]
+
+
+class TestSectorPeerReviewPayloadBuilder:
+    def test_payload_is_json_serializable(self, fake_ctx):
+        from graph.decision_capture_helpers import build_sector_peer_review_capture_payload
+        snapshot, summary = build_sector_peer_review_capture_payload(
+            "technology", fake_ctx,
+            quant_top5=[{"ticker": "AAPL", "score": 70}, {"ticker": "MSFT", "score": 65}],
+            qual_assessments=[{"ticker": "AAPL", "qual_score": 72}],
+            qual_additional_candidate={"ticker": "NVDA", "score": 68},
+        )
+        json.dumps(snapshot)
+        assert isinstance(summary, str)
+        assert "team_id=technology" in summary
+        assert "addition=yes" in summary
+
+    def test_no_addition_summary(self, fake_ctx):
+        from graph.decision_capture_helpers import build_sector_peer_review_capture_payload
+        snapshot, summary = build_sector_peer_review_capture_payload(
+            "technology", fake_ctx,
+            quant_top5=[{"ticker": "AAPL", "score": 70}],
+            qual_assessments=[{"ticker": "AAPL", "qual_score": 72}],
+            qual_additional_candidate=None,
+        )
+        assert snapshot["qual_additional_candidate"] is None
+        assert "addition=no" in summary
+
+    def test_review_set_includes_addition(self, fake_ctx):
+        # When qual adds a candidate, technical_scores_review_set must
+        # include the addition's ticker (peer review reviews the
+        # addition's quant case).
+        from graph.decision_capture_helpers import build_sector_peer_review_capture_payload
+        # Add MSFT to technical_scores; AAPL already there from fixture
+        fake_ctx.technical_scores["NVDA"] = {"technical_score": 75}
+        snapshot, _ = build_sector_peer_review_capture_payload(
+            "technology", fake_ctx,
+            quant_top5=[{"ticker": "AAPL"}],
+            qual_assessments=[],
+            qual_additional_candidate={"ticker": "NVDA"},
+        )
+        assert "AAPL" in snapshot["technical_scores_review_set"]
+        assert "NVDA" in snapshot["technical_scores_review_set"]
+
+    def test_payload_includes_required_fields(self, fake_ctx):
+        from graph.decision_capture_helpers import build_sector_peer_review_capture_payload
+        snapshot, _ = build_sector_peer_review_capture_payload(
+            "technology", fake_ctx,
+            quant_top5=[{"ticker": "AAPL"}],
+            qual_assessments=[],
+            qual_additional_candidate=None,
+        )
+        for key in (
+            "team_id", "run_date", "market_regime",
+            "quant_top5", "qual_assessments", "qual_additional_candidate",
+            "technical_scores_review_set",
+        ):
+            assert key in snapshot, f"missing field: {key}"
+
+
+class TestThesisUpdatePayloadBuilder:
+    def test_payload_is_json_serializable(self, fake_ctx):
+        from graph.decision_capture_helpers import build_thesis_update_capture_payload
+        snapshot, summary = build_thesis_update_capture_payload(
+            "technology", "AAPL", fake_ctx,
+            triggers=["earnings_beat", "analyst_upgrade"],
+        )
+        json.dumps(snapshot)
+        assert isinstance(summary, str)
+        assert "ticker=AAPL" in summary
+        assert "triggers=2" in summary
+
+    def test_pulls_per_ticker_inputs(self, fake_ctx):
+        # Thesis-update prompt sees prior_thesis + news + analyst data
+        # for the held ticker; verify the snapshot mirrors that.
+        from graph.decision_capture_helpers import build_thesis_update_capture_payload
+        snapshot, _ = build_thesis_update_capture_payload(
+            "technology", "AAPL", fake_ctx,
+            triggers=["news_event"],
+        )
+        assert snapshot["ticker"] == "AAPL"
+        assert snapshot["prior_thesis"] == {"final_score": 65, "rating": "BUY"}
+        assert snapshot["news_data"] == {"articles": [{"headline": "x"}]}
+        assert snapshot["analyst_data"] == {"consensus_rating": "Buy"}
+
+    def test_missing_per_ticker_inputs(self, fake_ctx):
+        # Held ticker may have no news/analyst data — capture should
+        # carry None rather than crashing.
+        from graph.decision_capture_helpers import build_thesis_update_capture_payload
+        snapshot, summary = build_thesis_update_capture_payload(
+            "technology", "ZZZZ", fake_ctx,
+            triggers=["sector_regime_change"],
+        )
+        assert snapshot["prior_thesis"] is None
+        assert snapshot["news_data"] is None
+        assert snapshot["analyst_data"] is None
+        assert "news_articles=0" in summary
 
 
 class TestMacroEconomistPayloadBuilder:
@@ -254,11 +410,11 @@ class TestCaptureNoOpWhenDisabled:
         # function must short-circuit on the env-var check.
         _capture_if_enabled(
             state={"run_date": "2026-04-29"},
-            agent_id="sector_team:technology",
+            agent_id="sector_quant:technology",
             model_name_key="sector_team",
             input_data_snapshot={"x": 1},
             input_data_summary="test",
-            agent_output={"recommendations": []},
+            agent_output={"ranked_picks": []},
         )
 
         # Verify nothing was written to S3
@@ -298,11 +454,11 @@ class TestCaptureHardFailsOnS3Error:
             with pytest.raises(DecisionCaptureWriteError):
                 _capture_if_enabled(
                     state={"run_date": "2026-04-29"},
-                    agent_id="sector_team:technology",
+                    agent_id="sector_quant:technology",
                     model_name_key="sector_team",
                     input_data_snapshot={"x": 1},
                     input_data_summary="test",
-                    agent_output={"recommendations": []},
+                    agent_output={"ranked_picks": []},
                 )
 
 
