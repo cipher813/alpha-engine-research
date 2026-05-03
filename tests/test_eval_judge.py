@@ -178,6 +178,24 @@ class TestBuildEvalS3Key:
         assert haiku_key.endswith(".claude-haiku-4-5.json")
         assert sonnet_key.endswith(".claude-sonnet-4-6.json")
 
+    def test_prefix_override_for_judge_only_mode(self):
+        """PR 4e: ``judge_only=True`` test runs persist under a
+        non-prod prefix. Verify the prefix override propagates."""
+        from evals.judge import build_eval_s3_key
+        ts = datetime(2026, 5, 9, 22, 30, tzinfo=timezone.utc)
+        prod_key = build_eval_s3_key(
+            judged_agent_id="ic_cio", run_id="r1",
+            judge_model="claude-haiku-4-5", timestamp=ts,
+        )
+        test_key = build_eval_s3_key(
+            judged_agent_id="ic_cio", run_id="r1",
+            judge_model="claude-haiku-4-5", timestamp=ts,
+            prefix="decision_artifacts/_eval_judge_only/",
+        )
+        assert prod_key.startswith("decision_artifacts/_eval/")
+        assert test_key.startswith("decision_artifacts/_eval_judge_only/")
+        assert prod_key != test_key
+
 
 # ── evaluate_artifact end-to-end ──────────────────────────────────────────
 

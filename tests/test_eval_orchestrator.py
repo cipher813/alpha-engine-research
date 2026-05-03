@@ -15,7 +15,7 @@ Real LLM is never called — all eval invocations go through a stubbed
 from __future__ import annotations
 
 import json
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import boto3
 import pytest
@@ -449,6 +449,154 @@ class TestEvaluateCorpus:
         assert result["metric_emission_failures"] == 4
         assert result["failed"] == []  # not promoted to artifact-level failure
         assert len(result["persisted_keys"]) == 4
+
+    def test_dry_run_skips_llm_persist_and_metrics(
+        self, mocked_s3_with_captures,
+    ):
+        """dry_run lists artifacts + resolves rubrics + populates
+        ``would_evaluate``, but DOES NOT call evaluate_artifact /
+        persist / emit metrics. Cost: $0."""
+        from evals import orchestrator as orch
+
+        eval_mock = MagicMock(side_effect=AssertionError(
+            "evaluate_artifact must NOT be called in dry_run"
+        ))
+        emit_mock = MagicMock(side_effect=AssertionError(
+            "emit_eval_metric must NOT be called in dry_run"
+        ))
+
+        with patch.object(orch, "evaluate_artifact", eval_mock), \
+             patch.object(orch, "emit_eval_metric", emit_mock):
+            result = orch.evaluate_corpus(
+                date="2026-05-09",
+                bucket="alpha-engine-research",
+                s3_client=mocked_s3_with_captures,
+                dry_run=True,
+            )
+
+        assert result["dry_run"] is True
+        assert result["haiku_evaluated"] == 0
+        assert result["sonnet_evaluated"] == 0
+        # 4 mapped agents (sector_quant + sector_qual + macro + cio);
+        # thesis_update is unmapped → skipped, not in would_evaluate.
+        assert len(result["would_evaluate"]) == 4
+        assert result["skipped_unmapped"] == 1
+        assert result["persisted_keys"] == []
+        # Each entry carries enough info to manually verify what would
+        # have run before paying for real LLM.
+        for entry in result["would_evaluate"]:
+            assert "key" in entry
+            assert "agent_id" in entry
+            assert "rubric" in entry
+
+    def test_judge_only_redirects_persist_to_isolated_prefix(
+        self, mocked_s3_with_captures,
+    ):
+        from evals import orchestrator as orch
+
+        def fake_eval(artifact, *, judge_model, judged_artifact_s3_key, **kw):
+            return _make_eval(
+                artifact.agent_id,
+                run_id=artifact.run_id,
+                judge_model=judge_model,
+                scores=[4, 4, 4, 4],
+            )
+
+        with patch.object(orch, "evaluate_artifact", side_effect=fake_eval):
+            result = orch.evaluate_corpus(
+                date="2026-05-09",
+                bucket="alpha-engine-research",
+                s3_client=mocked_s3_with_captures,
+                judge_only=True,
+            )
+
+        assert result["judge_only"] is True
+        assert result["eval_prefix"] == "decision_artifacts/_eval_judge_only/"
+        # Every persisted key lands under the isolated prefix.
+        for key in result["persisted_keys"]:
+            assert key.startswith("decision_artifacts/_eval_judge_only/")
+
+    def test_judge_only_redirects_cw_namespace(self, mocked_s3_with_captures):
+        from evals import orchestrator as orch
+
+        def fake_eval(artifact, *, judge_model, judged_artifact_s3_key, **kw):
+            return _make_eval(
+                artifact.agent_id,
+                run_id=artifact.run_id,
+                judge_model=judge_model,
+                scores=[4, 4, 4, 4],
+            )
+
+        emit_calls = []
+
+        def fake_emit(eval_artifact, *, namespace=None, **kwargs):
+            emit_calls.append(namespace)
+
+        with patch.object(orch, "evaluate_artifact", side_effect=fake_eval), \
+             patch.object(orch, "emit_eval_metric", side_effect=fake_emit):
+            result = orch.evaluate_corpus(
+                date="2026-05-09",
+                bucket="alpha-engine-research",
+                s3_client=mocked_s3_with_captures,
+                judge_only=True,
+            )
+
+        assert result["cw_namespace"] == "AlphaEngine/EvalJudgeOnly"
+        assert all(ns == "AlphaEngine/EvalJudgeOnly" for ns in emit_calls)
+        assert "AlphaEngine/Eval" not in emit_calls
+
+    def test_dry_run_and_judge_only_compose(self, mocked_s3_with_captures):
+        """The cheapest end-to-end smoke: lists + renders against prod
+        captures, no LLM, no writes anywhere — and the result still
+        carries the judge_only namespace + prefix flags so operators
+        can confirm WHERE the run WOULD have written if dry_run were
+        flipped off."""
+        from evals import orchestrator as orch
+
+        eval_mock = MagicMock(side_effect=AssertionError("must not be called"))
+
+        with patch.object(orch, "evaluate_artifact", eval_mock):
+            result = orch.evaluate_corpus(
+                date="2026-05-09",
+                bucket="alpha-engine-research",
+                s3_client=mocked_s3_with_captures,
+                dry_run=True,
+                judge_only=True,
+            )
+
+        assert result["dry_run"] is True
+        assert result["judge_only"] is True
+        assert result["eval_prefix"] == "decision_artifacts/_eval_judge_only/"
+        assert result["cw_namespace"] == "AlphaEngine/EvalJudgeOnly"
+        assert result["haiku_evaluated"] == 0
+        assert len(result["would_evaluate"]) == 4
+
+    def test_default_keeps_prod_paths(self, mocked_s3_with_captures):
+        """Default invocation (no flags) must NOT redirect anything —
+        prod Saturday SF runs depend on these defaults."""
+        from evals import orchestrator as orch
+
+        def fake_eval(artifact, *, judge_model, judged_artifact_s3_key, **kw):
+            return _make_eval(
+                artifact.agent_id,
+                run_id=artifact.run_id,
+                judge_model=judge_model,
+                scores=[4, 4, 4, 4],
+            )
+
+        with patch.object(orch, "evaluate_artifact", side_effect=fake_eval):
+            result = orch.evaluate_corpus(
+                date="2026-05-09",
+                bucket="alpha-engine-research",
+                s3_client=mocked_s3_with_captures,
+            )
+
+        assert result["dry_run"] is False
+        assert result["judge_only"] is False
+        assert result["eval_prefix"] == "decision_artifacts/_eval/"
+        assert result["cw_namespace"] == "AlphaEngine/Eval"
+        for key in result["persisted_keys"]:
+            assert key.startswith("decision_artifacts/_eval/")
 
     def test_persisted_keys_reflect_two_tier_naming(
         self, mocked_s3_with_captures,
