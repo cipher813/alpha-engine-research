@@ -787,3 +787,40 @@ class TestJointFinalizationOutputStringDefense:
         field_info = JointFinalizationOutput.model_fields["selected_decisions"]
         assert "structured array" in (field_info.description or "")
         assert "NOT" in (field_info.description or "")
+
+    def test_truncated_jsonlist_string_still_raises_loud(self):
+        """Replay of the exact 2026-05-03 SF run-3 failure shape: Sonnet
+        truncated mid-rationale at the 800-token cap so the string ends
+        with no closing `]`. The mode='before' validator's json.loads()
+        rightly rejects incomplete JSON (silently truncating-and-completing
+        would mask real malformed responses), so the failure stays loud
+        as a Pydantic list_type ValidationError. Pin so the validator's
+        fall-through behavior can't regress to a silent rescue."""
+        import pytest
+        from pydantic import ValidationError
+        from graph.state_schemas import JointFinalizationOutput
+
+        truncated = (
+            '[\n  {\n    "ticker": "S",\n    "rationale": "something high-'
+            'confidence names.'  # <-- truncated mid-string, no closing
+        )
+        with pytest.raises(ValidationError, match="list_type|valid list"):
+            JointFinalizationOutput(
+                selected_decisions=truncated,  # type: ignore[arg-type]
+                team_rationale="ok",
+            )
+
+    def test_jsonlist_with_extra_close_brace_raises_loud(self):
+        """Replay of the 2026-05-03 SF run-4 qual_analyst-style failure
+        shape (different schema, same class): malformed JSON with
+        spurious extra closing braces. Should still raise loud."""
+        import pytest
+        from pydantic import ValidationError
+        from graph.state_schemas import JointFinalizationOutput
+
+        malformed = '[\n  {\n    "ticker": "X",\n    "rationale": null\n}\n}\n'
+        with pytest.raises(ValidationError, match="list_type|valid list"):
+            JointFinalizationOutput(
+                selected_decisions=malformed,  # type: ignore[arg-type]
+                team_rationale="ok",
+            )
