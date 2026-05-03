@@ -234,11 +234,20 @@ def _joint_finalization(
             [HumanMessage(content=prompt)],
             config={"metadata": loaded_prompt.langsmith_metadata()},
         )
-        selected = set(result.selected_tickers)
-        picks = [c for c in candidates if c["ticker"] in selected]
+        rationale_by_ticker = {
+            d.ticker: d.rationale for d in result.selected_decisions
+        }
+        picks = []
+        for c in candidates:
+            if c["ticker"] in rationale_by_ticker:
+                pick = dict(c)
+                # Per-pick rationale captured for LLM-as-judge eval — flows
+                # into ``recommendations`` and on into decision artifacts.
+                pick["peer_review_rationale"] = rationale_by_ticker[c["ticker"]]
+                picks.append(pick)
         return {
             "picks": picks[:TEAM_PICKS_PER_RUN],
-            "rationale": result.rationale,
+            "rationale": result.team_rationale,
         }
     except Exception as e:
         if is_strict_validation_enabled():

@@ -14,6 +14,7 @@ capture (alpha-engine-research-typed-state-capture-260429.md).
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
 from graph.state_schemas import (
     CIODecision,
@@ -547,15 +548,40 @@ class TestJointFinalizationOutput:
     def test_minimal(self):
         from graph.state_schemas import JointFinalizationOutput
         j = JointFinalizationOutput()
-        assert j.selected_tickers == []
+        assert j.selected_decisions == []
+        assert j.team_rationale == ""
 
     def test_full(self):
-        from graph.state_schemas import JointFinalizationOutput
-        j = JointFinalizationOutput(
-            selected_tickers=["AAPL", "MSFT", "NVDA"],
-            rationale="Top 3 by combined conviction",
+        from graph.state_schemas import (
+            JointFinalizationDecision, JointFinalizationOutput,
         )
-        assert len(j.selected_tickers) == 3
+        j = JointFinalizationOutput(
+            selected_decisions=[
+                JointFinalizationDecision(
+                    ticker="AAPL", rationale="Strongest R/R, services catalyst.",
+                ),
+                JointFinalizationDecision(
+                    ticker="MSFT", rationale="Steady core, AI cap-ex thesis.",
+                ),
+                JointFinalizationDecision(
+                    ticker="NVDA", rationale="Asymmetric breakout setup.",
+                ),
+            ],
+            team_rationale="Sector overweight justified, asymmetry mix balanced.",
+        )
+        assert len(j.selected_decisions) == 3
+        assert j.selected_decisions[0].ticker == "AAPL"
+        assert "R/R" in j.selected_decisions[0].rationale
+
+    def test_decision_requires_ticker(self):
+        from graph.state_schemas import JointFinalizationDecision
+        with pytest.raises(ValidationError):
+            JointFinalizationDecision()  # ticker is required
+
+    def test_decision_default_rationale_empty(self):
+        from graph.state_schemas import JointFinalizationDecision
+        d = JointFinalizationDecision(ticker="AAPL")
+        assert d.rationale == ""
 
 
 class TestHeldThesisUpdateLLMOutput:

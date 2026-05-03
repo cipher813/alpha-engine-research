@@ -1,4 +1,8 @@
 {
-  "selected_tickers": ["NVDA", "MSFT", "TSM"],
-  "rationale": "Top 3 by combined conviction: NVDA (highest), MSFT (steady core), TSM (quant-confirmed addition). Sector concentration acceptable given technology overweight."
+  "selected_decisions": [
+    {"ticker": "NVDA", "rationale": "Highest R/R: rr_ratio 2.4 with quant 78 and qual 70 — breakout above MA200 confirmed by momentum, AI cap-ex catalyst remains acute."},
+    {"ticker": "MSFT", "rationale": "Steady core: rr_ratio 1.8, qual 72, technical_score 65 — Azure run-rate plus capacity-expansion guide gives durable narrative without binary risk."},
+    {"ticker": "TSM", "rationale": "Quant-confirmed addition: rr_ratio 2.1, technical_score 75 — qual case (HBM share, gross margin re-rating) supported by entry-timing signal."}
+  ],
+  "team_rationale": "Sector concentration acceptable given technology overweight; mix of asymmetry (NVDA/TSM) balanced by steady core (MSFT). Slate fits neutral regime via stock-specific catalysts rather than beta exposure."
 }
