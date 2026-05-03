@@ -88,9 +88,9 @@ _AUDIT_TABLE: list[tuple[str, str, int, int, str]] = [
     (
         "evals.judge.evaluate_artifact",
         "RubricEvalLLMOutput",
-        1500,  # DEFAULT_MAX_TOKENS in evals/judge.py
-        1200,  # 4-5 RubricDimensionScore × ~250tok each + overall_reasoning + envelope
-        "5 dimensions × (dim + score + reasoning ~200tok) + overall_reasoning",
+        8192,  # DEFAULT_MAX_TOKENS now routes through MAX_TOKENS_STRATEGIC
+        2500,  # 5 RubricDimensionScore × ~400tok verbose reasoning + overall_reasoning + envelope
+        "5 dimensions × (dim + score + reasoning ~400tok at verbose end) + overall_reasoning + envelope",
     ),
     (
         "sector_team._update_thesis_for_held_stock",

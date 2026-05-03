@@ -39,7 +39,7 @@ from langchain_core.messages import HumanMessage
 
 from alpha_engine_lib.decision_capture import DecisionArtifact
 
-from config import ANTHROPIC_API_KEY, S3_BUCKET
+from config import ANTHROPIC_API_KEY, MAX_TOKENS_STRATEGIC, S3_BUCKET
 from agents.prompt_loader import load_prompt
 from graph.llm_cost_tracker import get_cost_telemetry_callback, track_llm_cost
 from graph.state_schemas import (
@@ -59,10 +59,14 @@ DEFAULT_JUDGE_MODEL = "claude-haiku-4-5"
 Sonnet (``claude-sonnet-4-6``) is used for the nuance-tier sampled
 subset; orchestration logic lands in PR 3."""
 
-DEFAULT_MAX_TOKENS = 1500
-"""Token cap for the judge response. 1500 covers 4-5 dimension
-entries at ~250 tokens each + overall_reasoning. Bump if specific
-rubrics consistently truncate."""
+DEFAULT_MAX_TOKENS = MAX_TOKENS_STRATEGIC
+"""Token cap for the judge response. Routes through the strategic-tier
+constant per the consolidation in PR #102 (4 hardcoded literals
+replaced; CI lint guard prevents drift). Synthesis-class output:
+4-5 dimension entries × verbose reasoning + overall_reasoning, plus
+tool-use envelope. Bumped from 1500 hardcoded on 2026-05-03 after
+judge_only smoke against Sat 5/3 captures showed ~5/32 evals failed
+with truncated/stringified dimension_scores at the prior 1500 cap."""
 
 
 # ── Agent → rubric mapping ────────────────────────────────────────────────
