@@ -60,11 +60,15 @@ def run_quant_analyst(
 
     # Create LLM. Cost-telemetry callback aggregates token usage across
     # the ReAct loop's multiple Anthropic calls into the active
-    # ``track_llm_cost`` frame.
+    # ``track_llm_cost`` frame. max_tokens=8192 mirrors qual_analyst —
+    # covers the structured-output extraction call's list of ranked picks
+    # (5 picks × ~400 tokens each + envelope ≈ 2500 tokens typical, more
+    # at verbose end). Bumped 2026-05-03 from 4096 alongside qual_analyst
+    # for symmetry; both list-output sites at the same risk class.
     llm = ChatAnthropic(
         model=PER_STOCK_MODEL,
         anthropic_api_key=api_key or ANTHROPIC_API_KEY,
-        max_tokens=4096,
+        max_tokens=8192,
         callbacks=[get_cost_telemetry_callback()],
     )
 

@@ -197,19 +197,20 @@ def _merge_candidates(
     return merged
 
 
-_JOINT_FINALIZATION_MAX_TOKENS = 2000
+_JOINT_FINALIZATION_MAX_TOKENS = 8192
 """Dedicated max_tokens budget for the joint-finalization Haiku call.
 
 The per-stock LLM (``MAX_TOKENS_PER_STOCK=800``) is sized for single-
 ticker outputs (one bull case + one bear case + score). Joint
 finalization produces a structured *list* of 2-3 ``JointFinalizationDecision``
 entries plus a ``team_rationale``, all wrapped in tool-use JSON
-envelope — easily 1200-1500 tokens at the verbose end. Surfaced
-2026-05-03 in SF eval-pipeline-validation-3 where Sonnet truncated
-mid-rationale at the 800-token cap, producing invalid JSON that
-the schema's ``mode='before'`` validator (added 2026-05-03 alongside
-this fix) couldn't rescue. 2000 gives ~25% headroom over observed
-verbose responses without bumping the cap on every per-stock call."""
+envelope. First surfaced 2026-05-03 SF run 3 truncating at the
+800-token cap; bumped to 2000 in PR #100. SF run 4 then surfaced the
+same class in qual_analyst at its 4096 cap, so 2026-05-03 follow-up
+moved all team-level structured-output sites (qual_analyst,
+quant_analyst, this) to a uniform 8192 — gives 2x headroom over
+verbose responses across the team-LLM family and removes the
+whack-a-mole risk of similar truncations at adjacent sites."""
 
 
 def _joint_finalization(

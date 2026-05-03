@@ -54,10 +54,20 @@ def run_qual_analyst(
             "iterations": int,
         }
     """
+    # max_tokens=8192: covers the structured-output extraction call at
+    # the end of this function — QualAnalystOutput.assessments is a list
+    # of ~5 QualAssessment entries × ~600 tokens each (bull_case +
+    # bear_case + catalysts + qual_score + reasoning) = ~3000 tokens of
+    # content, plus tool-use JSON envelope. Bumped 2026-05-03 from 4096
+    # after SF eval-pipeline-validation-4 truncated mid-list (input_value
+    # ended at "qual_score: null\n}\n}\n" with no closing array bracket).
+    # 8192 gives ~2x headroom over observed verbose responses; ReAct-turn
+    # calls (which share this LLM) are individually small so the higher
+    # cap doesn't change their token cost (only emitted tokens billed).
     llm = ChatAnthropic(
         model=PER_STOCK_MODEL,
         anthropic_api_key=api_key or ANTHROPIC_API_KEY,
-        max_tokens=4096,
+        max_tokens=8192,
         callbacks=[get_cost_telemetry_callback()],
     )
 
