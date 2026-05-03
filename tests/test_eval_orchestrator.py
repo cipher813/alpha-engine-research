@@ -351,6 +351,105 @@ class TestEvaluateCorpus:
         assert result["skipped_unmapped"] == 1
         assert result["failed"] == []
 
+    def test_emit_metrics_false_skips_cloudwatch(
+        self, mocked_s3_with_captures,
+    ):
+        """`emit_metrics=False` should completely bypass CloudWatch —
+        no client built, no failures counted."""
+        from evals import orchestrator as orch
+
+        def fake_eval(artifact, *, judge_model, judged_artifact_s3_key, **kw):
+            return _make_eval(
+                artifact.agent_id,
+                run_id=artifact.run_id,
+                judge_model=judge_model,
+                scores=[4, 4, 4, 4],
+            )
+
+        emit_calls = []
+
+        def fake_emit(*args, **kwargs):
+            emit_calls.append((args, kwargs))
+
+        with patch.object(orch, "evaluate_artifact", side_effect=fake_eval), \
+             patch.object(orch, "emit_eval_metric", side_effect=fake_emit):
+            result = orch.evaluate_corpus(
+                date="2026-05-09",
+                bucket="alpha-engine-research",
+                s3_client=mocked_s3_with_captures,
+                emit_metrics=False,
+            )
+
+        assert emit_calls == []
+        assert result["metric_emission_failures"] == 0
+
+    def test_metric_emission_called_per_persisted_eval(
+        self, mocked_s3_with_captures,
+    ):
+        """Default ``emit_metrics=True``: every successful persist should
+        trigger one ``emit_eval_metric`` call. With 4 mapped agents +
+        no escalation, that's 4 emission calls."""
+        from evals import orchestrator as orch
+
+        def fake_eval(artifact, *, judge_model, judged_artifact_s3_key, **kw):
+            return _make_eval(
+                artifact.agent_id,
+                run_id=artifact.run_id,
+                judge_model=judge_model,
+                scores=[4, 4, 4, 4],
+            )
+
+        emit_calls = []
+
+        def fake_emit(eval_artifact, **kwargs):
+            emit_calls.append(eval_artifact.judged_agent_id)
+
+        with patch.object(orch, "evaluate_artifact", side_effect=fake_eval), \
+             patch.object(orch, "emit_eval_metric", side_effect=fake_emit):
+            result = orch.evaluate_corpus(
+                date="2026-05-09",
+                bucket="alpha-engine-research",
+                s3_client=mocked_s3_with_captures,
+            )
+
+        assert len(emit_calls) == 4
+        assert result["metric_emission_failures"] == 0
+        assert sorted(emit_calls) == sorted([
+            "sector_quant:technology",
+            "sector_qual:technology",
+            "macro_economist",
+            "ic_cio",
+        ])
+
+    def test_metric_emission_failure_does_not_halt_run(
+        self, mocked_s3_with_captures,
+    ):
+        """CloudWatch hiccup must not cascade into the eval pipeline.
+        Failures get counted in the summary; persisted_keys is unchanged."""
+        from evals import orchestrator as orch
+
+        def fake_eval(artifact, *, judge_model, judged_artifact_s3_key, **kw):
+            return _make_eval(
+                artifact.agent_id,
+                run_id=artifact.run_id,
+                judge_model=judge_model,
+                scores=[4, 4, 4, 4],
+            )
+
+        with patch.object(orch, "evaluate_artifact", side_effect=fake_eval), \
+             patch.object(orch, "emit_eval_metric",
+                          side_effect=RuntimeError("CW throttled")):
+            result = orch.evaluate_corpus(
+                date="2026-05-09",
+                bucket="alpha-engine-research",
+                s3_client=mocked_s3_with_captures,
+            )
+
+        assert result["haiku_evaluated"] == 4
+        assert result["metric_emission_failures"] == 4
+        assert result["failed"] == []  # not promoted to artifact-level failure
+        assert len(result["persisted_keys"]) == 4
+
     def test_persisted_keys_reflect_two_tier_naming(
         self, mocked_s3_with_captures,
     ):
