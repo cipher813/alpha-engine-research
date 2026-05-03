@@ -81,29 +81,10 @@ LAMBDA_ENV_JSON=$(build_lambda_env_json)
 build_and_deploy_main() {
   echo "=== Building container image for $FUNCTION_MAIN ==="
 
-  # Stage alpha-engine-lib into vendor/ so the Dockerfile can COPY it.
-  # alpha-engine-lib is a private repo — the Dockerfile installs via
-  # local pip path rather than git+https to avoid a Docker build secret.
-  # flow-doctor is pulled in transitively via the [flow_doctor] extra;
-  # the old bundled flow-doctor-pkg pattern is removed.
-  LIB_REPO_DIR="${LIB_REPO_DIR:-$(dirname "$(pwd)")/alpha-engine-lib}"
-  LIB_STAGED_FROM_REPO=0
+  # alpha-engine-lib is installed inside the Dockerfile via pip from
+  # public git+https (lib was flipped public 2026-05-03). No vendor
+  # staging needed.
   rm -rf flow-doctor-pkg  # legacy path — remove any stale artifact from prior builds
-  if [ -d "vendor/alpha-engine-lib" ]; then
-    echo "Using existing vendor/alpha-engine-lib (local dev workflow)"
-  elif [ -d "$LIB_REPO_DIR" ]; then
-    echo "Staging vendor/alpha-engine-lib from $LIB_REPO_DIR..."
-    mkdir -p vendor
-    cp -R "$LIB_REPO_DIR" vendor/alpha-engine-lib
-    LIB_STAGED_FROM_REPO=1
-  else
-    echo "ERROR: alpha-engine-lib not found — tried:"
-    echo "  vendor/alpha-engine-lib (local dev)"
-    echo "  $LIB_REPO_DIR (sibling checkout)"
-    echo "Hint: clone cipher813/alpha-engine-lib as a sibling directory,"
-    echo "      or set LIB_REPO_DIR=/path/to/alpha-engine-lib"
-    exit 1
-  fi
 
   # Stage proprietary configs from the private alpha-engine-config repo
   # into the build context. Prompts, scoring.yaml, and universe.yaml are
@@ -187,10 +168,6 @@ build_and_deploy_main() {
 
   # Only remove staged files — never touch a local dev checkout that
   # already had real files present.
-  if [ "$LIB_STAGED_FROM_REPO" = "1" ] && [ -d vendor/alpha-engine-lib ]; then
-    rm -rf vendor/alpha-engine-lib
-    rmdir vendor 2>/dev/null || true
-  fi
   if [ "$PROMPTS_STAGED_FROM_CONFIG_REPO" = "1" ]; then
     rm -rf config/prompts
   fi
@@ -340,35 +317,15 @@ build_and_deploy_alerts() {
 
   ECR_REPO_ALERTS="${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com/${FUNCTION_ALERTS}"
 
-  # Stage alpha-engine-lib into vendor/ (same pattern as main build).
-  # Dockerfile.alerts COPYs vendor/alpha-engine-lib to install setup_logging
-  # + the flow-doctor extra.
-  LIB_REPO_DIR="${LIB_REPO_DIR:-$(dirname "$(pwd)")/alpha-engine-lib}"
-  LIB_ALERTS_STAGED_FROM_REPO=0
-  if [ -d "vendor/alpha-engine-lib" ]; then
-    echo "Using existing vendor/alpha-engine-lib (local dev workflow)"
-  elif [ -d "$LIB_REPO_DIR" ]; then
-    echo "Staging vendor/alpha-engine-lib from $LIB_REPO_DIR..."
-    mkdir -p vendor
-    cp -R "$LIB_REPO_DIR" vendor/alpha-engine-lib
-    LIB_ALERTS_STAGED_FROM_REPO=1
-  else
-    echo "ERROR: alpha-engine-lib not found — tried:"
-    echo "  vendor/alpha-engine-lib (local dev)"
-    echo "  $LIB_REPO_DIR (sibling checkout)"
-    exit 1
-  fi
+  # alpha-engine-lib is installed inside Dockerfile.alerts via pip from
+  # public git+https (lib was flipped public 2026-05-03). No vendor
+  # staging needed.
 
   # Build Docker image
   echo "Building Docker image..."
   docker build --platform linux/amd64 --provenance=false \
     -f Dockerfile.alerts \
     -t "$FUNCTION_ALERTS:latest" .
-
-  if [ "$LIB_ALERTS_STAGED_FROM_REPO" = "1" ] && [ -d vendor/alpha-engine-lib ]; then
-    rm -rf vendor/alpha-engine-lib
-    rmdir vendor 2>/dev/null || true
-  fi
 
   # Authenticate with ECR
   echo "Authenticating with ECR..."
