@@ -38,9 +38,22 @@ logger = logging.getLogger(__name__)
 
 
 DERIVED_METRIC_NAME = "agent_quality_score_4w_mean"
-"""Derived metric the rolling-mean Lambda emits. Alarms (PR 4c) point
-at this name; the dashboard quality-trend page can reference either
-the raw or derived stream depending on the panel."""
+"""Per-combo derived metric — one datapoint per (judged_agent_id,
+criterion, judge_model) combo. Powers the dashboard's per-combo
+trend lines."""
+
+DERIVED_FLOOR_METRIC_NAME = "agent_quality_score_4w_mean_min"
+"""Dimensionless floor metric — single datapoint per run = MIN across
+every combo's 4-week mean. The CloudWatch alarm fires against this
+metric. Reason: CloudWatch alarms reject SEARCH expressions
+(``ValidationError: SEARCH is not supported on Metric Alarms``), so
+we can't dynamically reduce across combos at alarm-evaluation time;
+we have to pre-compute the floor at emission time and alarm on the
+single derived stream. Trade-off: the alarm message says "the floor
+dropped below 3.0" but not WHICH combo triggered — operator clicks
+dashboard to find out. Same operator workflow a SEARCH-based design
+would have produced (alarms on a reduced time series carry no
+per-combo identity in the alarm body anyway)."""
 
 ROLLING_WINDOW_DAYS = 28
 """4-week (28-day) window — matches ROADMAP §1634 wording."""
@@ -102,6 +115,7 @@ def compute_and_emit_4w_mean(
     namespace: str = DEFAULT_NAMESPACE,
     source_metric: str = DEFAULT_METRIC_NAME,
     derived_metric: str = DERIVED_METRIC_NAME,
+    floor_metric: str = DERIVED_FLOOR_METRIC_NAME,
     cloudwatch_client: Optional[Any] = None,
 ) -> dict[str, Any]:
     """Compute and emit the rolling-4-week-mean derived metric.
@@ -141,6 +155,8 @@ def compute_and_emit_4w_mean(
             "failed": [],
             "window_start": start.isoformat(),
             "window_end": end.isoformat(),
+            "floor_value": None,
+            "floor_metric_emitted": False,
         }
 
     queries = _build_metric_data_queries(
@@ -207,9 +223,29 @@ def compute_and_emit_4w_mean(
             chunk = derived_data[chunk_start:chunk_start + 1000]
             cw.put_metric_data(Namespace=namespace, MetricData=chunk)
 
+    # Floor metric: single dimensionless datapoint = MIN across every
+    # combo's 4-week mean. The alarm fires against this. Only emitted
+    # when at least one combo had data — otherwise there's no floor
+    # to compute and emitting None would corrupt the alarm.
+    floor_value = (
+        min(d["Value"] for d in derived_data) if derived_data else None
+    )
+    if floor_value is not None:
+        cw.put_metric_data(
+            Namespace=namespace,
+            MetricData=[{
+                "MetricName": floor_metric,
+                "Value": float(floor_value),
+                "Unit": "None",
+                "Timestamp": end,
+            }],
+        )
+
     logger.info(
-        "[rolling_mean] done emitted=%d skipped_no_data=%d failed=%d",
+        "[rolling_mean] done emitted=%d skipped_no_data=%d failed=%d "
+        "floor=%s",
         len(derived_data), skipped_no_data, len(failed),
+        f"{floor_value:.3f}" if floor_value is not None else "(no data)",
     )
 
     return {
@@ -219,4 +255,6 @@ def compute_and_emit_4w_mean(
         "failed": failed,
         "window_start": start.isoformat(),
         "window_end": end.isoformat(),
+        "floor_value": floor_value,
+        "floor_metric_emitted": floor_value is not None,
     }

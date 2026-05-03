@@ -129,6 +129,10 @@ class TestComputeAndEmit4wMean:
         assert result["datapoints_emitted"] == 0
         cw.get_metric_data.assert_not_called()
         cw.put_metric_data.assert_not_called()
+        # No combos → no floor emission. The alarm correctly stays in
+        # INSUFFICIENT_DATA rather than firing on a None.
+        assert result["floor_value"] is None
+        assert result["floor_metric_emitted"] is False
 
     def test_happy_path_emits_one_per_combo(self):
         from evals.rolling_mean import compute_and_emit_4w_mean
@@ -152,21 +156,34 @@ class TestComputeAndEmit4wMean:
         assert result["combos_skipped_no_data"] == 0
         assert result["failed"] == []
 
-        cw.put_metric_data.assert_called_once()
-        kwargs = cw.put_metric_data.call_args.kwargs
-        assert kwargs["Namespace"] == "AlphaEngine/Eval"
+        # Two put_metric_data calls now: per-combo batch + floor.
+        assert cw.put_metric_data.call_count == 2
+        per_combo_call = cw.put_metric_data.call_args_list[0]
+        floor_call = cw.put_metric_data.call_args_list[1]
+
+        # Per-combo batch
+        assert per_combo_call.kwargs["Namespace"] == "AlphaEngine/Eval"
+        per_combo_metrics = per_combo_call.kwargs["MetricData"]
         assert all(
             d["MetricName"] == "agent_quality_score_4w_mean"
-            for d in kwargs["MetricData"]
+            for d in per_combo_metrics
         )
-        # Values map back to combos correctly via Id index.
         values_by_agent = {
             d["Dimensions"][0]["Value"] + "/" + d["Dimensions"][1]["Value"]: d["Value"]
-            for d in kwargs["MetricData"]
+            for d in per_combo_metrics
         }
         assert values_by_agent["ic_cio/decision_coherence"] == 4.2
         assert values_by_agent["ic_cio/rationale_quality"] == 3.8
         assert values_by_agent["macro_economist/regime_grounding"] == 4.5
+
+        # Floor metric: single dimensionless datapoint = MIN across combos.
+        floor_metrics = floor_call.kwargs["MetricData"]
+        assert len(floor_metrics) == 1
+        assert floor_metrics[0]["MetricName"] == "agent_quality_score_4w_mean_min"
+        assert "Dimensions" not in floor_metrics[0]
+        assert floor_metrics[0]["Value"] == 3.8  # min of 4.2, 3.8, 4.5
+        assert result["floor_value"] == 3.8
+        assert result["floor_metric_emitted"] is True
 
     def test_skips_combos_with_no_data_in_window(self):
         """A combo that ListMetrics returns but GetMetricData has no
@@ -206,9 +223,11 @@ class TestComputeAndEmit4wMean:
         assert kwargs["StartTime"] == end - timedelta(days=ROLLING_WINDOW_DAYS)
 
     def test_dimension_shape_preserved_on_derived_emission(self):
-        """The derived metric must carry the SAME dimension shape as the
-        source so a CloudWatch alarm pivoting on `judged_agent_id` /
-        `criterion` works without further translation."""
+        """The derived per-combo metric must carry the SAME dimension
+        shape as the source so the dashboard's per-combo trend lines
+        work without further translation. (The floor metric is
+        intentionally dimensionless — see
+        ``test_floor_metric_is_dimensionless``.)"""
         from evals.rolling_mean import compute_and_emit_4w_mean
 
         combos = [_dims("sector_quant:technology", "numerical_grounding", "claude-sonnet-4-6")]
@@ -216,13 +235,60 @@ class TestComputeAndEmit4wMean:
 
         compute_and_emit_4w_mean(cloudwatch_client=cw)
 
-        emitted = cw.put_metric_data.call_args.kwargs["MetricData"][0]
+        # Index 0 = per-combo emission; index 1 = floor.
+        per_combo_call = cw.put_metric_data.call_args_list[0]
+        emitted = per_combo_call.kwargs["MetricData"][0]
         emitted_dims = {d["Name"]: d["Value"] for d in emitted["Dimensions"]}
         assert emitted_dims == {
             "judged_agent_id": "sector_quant:technology",
             "criterion": "numerical_grounding",
             "judge_model": "claude-sonnet-4-6",
         }
+
+    def test_floor_metric_is_dimensionless(self):
+        """The floor metric carries NO dimensions — that's what lets a
+        single CloudWatch alarm fire on it (alarms can't use SEARCH
+        to reduce across dimensions). One alarm, one stream, one
+        threshold."""
+        from evals.rolling_mean import compute_and_emit_4w_mean
+
+        combos = [
+            _dims("a", "c1"),
+            _dims("a", "c2"),
+        ]
+        cw = _make_cw_with_combos(combos, values_by_idx={0: [4.5], 1: [3.2]})
+
+        compute_and_emit_4w_mean(cloudwatch_client=cw)
+
+        floor_call = cw.put_metric_data.call_args_list[1]
+        floor_metric = floor_call.kwargs["MetricData"][0]
+        assert floor_metric["MetricName"] == "agent_quality_score_4w_mean_min"
+        assert "Dimensions" not in floor_metric
+        # MIN across the two combo means.
+        assert floor_metric["Value"] == 3.2
+
+    def test_floor_emitted_only_when_at_least_one_combo_had_data(self):
+        """All combos return empty Values → no floor emission even
+        though combos were discovered. Alarm stays in
+        INSUFFICIENT_DATA rather than getting a None datapoint."""
+        from evals.rolling_mean import compute_and_emit_4w_mean
+
+        combos = [_dims("a", "c1"), _dims("a", "c2")]
+        cw = _make_cw_with_combos(combos, values_by_idx={
+            0: [],  # no data
+            1: [],
+        })
+
+        result = compute_and_emit_4w_mean(cloudwatch_client=cw)
+
+        assert result["combos_discovered"] == 2
+        assert result["datapoints_emitted"] == 0
+        assert result["combos_skipped_no_data"] == 2
+        assert result["floor_value"] is None
+        assert result["floor_metric_emitted"] is False
+        # Only the combo discovery happened — no put calls at all
+        # because no per-combo data AND no floor to emit.
+        cw.put_metric_data.assert_not_called()
 
     def test_missing_query_result_recorded_as_failure(self):
         """If GetMetricData drops a query result (shouldn't happen
