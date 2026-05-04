@@ -29,7 +29,7 @@ from agents.sector_teams.team_config import (
     TEAM_SECTORS, TEAM_SCREENING_PARAMS, get_team_tickers,
 )
 from agents.prompt_loader import load_prompt
-from agents.sector_teams.quant_analyst import run_quant_analyst
+from agents.sector_teams.quant_analyst import run_quant_analyst_with_retry
 from agents.sector_teams.qual_analyst import run_qual_analyst
 from agents.sector_teams.peer_review import run_peer_review
 from agents.sector_teams.material_triggers import check_material_triggers
@@ -86,7 +86,12 @@ def run_sector_team(team_id: str, ctx: SectorTeamContext) -> dict:
         return _empty_result(team_id)
 
     # ── Step 2: Quant analyst screens sector ──────────────────────────────────
-    quant_output = run_quant_analyst(
+    # Uses the retry wrapper so the agent-gave-up failure mode (zero
+    # picks despite running tools) gets one augmented-prompt retry
+    # before falling through to the empty-result path. Recursion
+    # exhaustion + exceptions are NOT retried — see
+    # _should_retry_on_empty_picks() for the trigger contract.
+    quant_output = run_quant_analyst_with_retry(
         team_id=team_id,
         sector_tickers=sector_tickers,
         market_regime=ctx.market_regime,

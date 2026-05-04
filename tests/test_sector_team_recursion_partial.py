@@ -189,3 +189,221 @@ def test_sector_team_no_partial_when_quant_clean(fresh_modules):
     })
     assert result["partial"] is False
     assert result["partial_reasons"] == []
+
+
+# ── Retry-on-empty-picks for quant ────────────────────────────────────────────
+#
+# The 2026-05-04 diagnosis: ``sector_quant:financials`` produced 22 tool
+# calls and emitted ``ranked_picks=[]`` cleanly (no exception, no
+# recursion exhaustion). The agent gave up at the structured-extraction
+# step. ``run_quant_analyst_with_retry`` re-invokes once with an
+# augmented prompt that requires at least 3 picks. Tests below lock the
+# retry trigger contract + observability fields.
+
+
+class TestQuantRetryOnEmpty:
+    def test_should_retry_returns_true_for_give_up_case(self):
+        """Empty picks + iterations>0 + no error + not partial = retry."""
+        from agents.sector_teams.quant_analyst import _should_retry_on_empty_picks
+        give_up = {
+            "ranked_picks": [],
+            "iterations": 22,
+            "error": None,
+            "partial": False,
+        }
+        assert _should_retry_on_empty_picks(give_up) is True
+
+    def test_should_retry_returns_false_when_picks_present(self):
+        from agents.sector_teams.quant_analyst import _should_retry_on_empty_picks
+        ok = {
+            "ranked_picks": [{"ticker": "AAPL"}],
+            "iterations": 5,
+            "error": None,
+            "partial": False,
+        }
+        assert _should_retry_on_empty_picks(ok) is False
+
+    def test_should_retry_returns_false_on_recursion_exhaustion(self):
+        """Recursion budget already given — retry won't help."""
+        from agents.sector_teams.quant_analyst import _should_retry_on_empty_picks
+        recursion = {
+            "ranked_picks": [],
+            "iterations": 18,
+            "error": None,
+            "partial": True,
+            "partial_reason": "recursion_limit_exhausted",
+        }
+        assert _should_retry_on_empty_picks(recursion) is False
+
+    def test_should_retry_returns_false_on_exception(self):
+        """Exception path — retry won't fix a missing API key etc."""
+        from agents.sector_teams.quant_analyst import _should_retry_on_empty_picks
+        errored = {
+            "ranked_picks": [],
+            "iterations": 0,
+            "error": "RuntimeError: api key missing",
+            "partial": False,
+        }
+        assert _should_retry_on_empty_picks(errored) is False
+
+    def test_should_retry_returns_false_when_no_iterations(self):
+        """Zero iterations means tools never ran — same input would
+        produce same failure. Don't retry."""
+        from agents.sector_teams.quant_analyst import _should_retry_on_empty_picks
+        no_iter = {
+            "ranked_picks": [],
+            "iterations": 0,
+            "error": None,
+            "partial": False,
+        }
+        assert _should_retry_on_empty_picks(no_iter) is False
+
+    def test_wrapper_no_op_when_first_attempt_succeeds(self, fresh_modules):
+        """When the first attempt produces picks, the wrapper must NOT
+        retry — verify run_quant_analyst is called exactly once."""
+        from agents.sector_teams import quant_analyst as _qa
+
+        first_result = {
+            "team_id": "technology",
+            "ranked_picks": [{"ticker": "AAPL", "quant_score": 70}],
+            "tool_calls": [{"tool": "screen_by_volume"}],
+            "iterations": 1,
+            "error": None,
+            "partial": False,
+        }
+
+        with patch.object(_qa, "run_quant_analyst", return_value=first_result) as mock_run:
+            result = _qa.run_quant_analyst_with_retry(**_quant_kwargs())
+
+        assert mock_run.call_count == 1, (
+            "First-attempt success must NOT trigger retry. "
+            f"Got call_count={mock_run.call_count}"
+        )
+        assert result["retry_attempted"] is False
+        assert result["retry_succeeded"] is False
+        assert result["retry_first_iterations"] is None
+        # Original picks pass through unchanged.
+        assert result["ranked_picks"] == [{"ticker": "AAPL", "quant_score": 70}]
+
+    def test_wrapper_retries_once_on_empty_picks_with_iterations(self, fresh_modules):
+        """The give-up case: empty picks + iterations>0. Wrapper must
+        invoke the inner function exactly twice, the second call MUST
+        carry the retry preamble, and observability fields populate."""
+        from agents.sector_teams import quant_analyst as _qa
+
+        first_result = {
+            "team_id": "financials",
+            "ranked_picks": [],
+            "tool_calls": [{"tool": "screen_by_volume"}] * 22,
+            "iterations": 22,
+            "error": None,
+            "partial": False,
+        }
+        retry_result = {
+            "team_id": "financials",
+            "ranked_picks": [
+                {"ticker": "JPM", "quant_score": 55},
+                {"ticker": "BAC", "quant_score": 52},
+                {"ticker": "WFC", "quant_score": 50},
+            ],
+            "tool_calls": [{"tool": "screen_by_volume"}] * 8,
+            "iterations": 8,
+            "error": None,
+            "partial": False,
+        }
+
+        with patch.object(
+            _qa, "run_quant_analyst",
+            side_effect=[first_result, retry_result],
+        ) as mock_run:
+            kwargs = _quant_kwargs()
+            kwargs["team_id"] = "financials"
+            result = _qa.run_quant_analyst_with_retry(**kwargs)
+
+        # Exactly two invocations.
+        assert mock_run.call_count == 2
+
+        # Second call must carry the retry preamble; first must NOT.
+        first_call_kwargs = mock_run.call_args_list[0].kwargs
+        second_call_kwargs = mock_run.call_args_list[1].kwargs
+        assert first_call_kwargs.get("_retry_preamble") is None
+        assert second_call_kwargs.get("_retry_preamble") is not None
+        assert "RETRY NOTICE" in second_call_kwargs["_retry_preamble"]
+        assert "22 tool calls" in second_call_kwargs["_retry_preamble"]
+
+        # Observability fields populated; retry succeeded.
+        assert result["retry_attempted"] is True
+        assert result["retry_succeeded"] is True
+        assert result["retry_first_iterations"] == 22
+        assert len(result["ranked_picks"]) == 3
+
+    def test_wrapper_records_failure_when_retry_also_returns_empty(self, fresh_modules):
+        """If retry ALSO produces zero picks, we surface that explicitly
+        via retry_succeeded=False rather than silently returning empty.
+        Downstream behavior is unchanged (qual loop bypasses) but
+        ops can see the give-up persisted across both attempts."""
+        from agents.sector_teams import quant_analyst as _qa
+
+        empty_first = {
+            "team_id": "financials",
+            "ranked_picks": [], "tool_calls": [{}] * 22,
+            "iterations": 22, "error": None, "partial": False,
+        }
+        empty_retry = {
+            "team_id": "financials",
+            "ranked_picks": [], "tool_calls": [{}] * 6,
+            "iterations": 6, "error": None, "partial": False,
+        }
+
+        with patch.object(
+            _qa, "run_quant_analyst",
+            side_effect=[empty_first, empty_retry],
+        ):
+            kwargs = _quant_kwargs()
+            kwargs["team_id"] = "financials"
+            result = _qa.run_quant_analyst_with_retry(**kwargs)
+
+        assert result["retry_attempted"] is True
+        assert result["retry_succeeded"] is False
+        assert result["retry_first_iterations"] == 22
+        assert result["ranked_picks"] == []
+
+    def test_wrapper_does_not_retry_on_recursion_exhaustion(self, fresh_modules):
+        """``partial=True`` means the agent already used its full budget;
+        rerunning won't help. Retry must NOT fire."""
+        from agents.sector_teams import quant_analyst as _qa
+
+        recursion_result = {
+            "team_id": "technology",
+            "ranked_picks": [], "tool_calls": [],
+            "iterations": _qa._QUANT_RECURSION_LIMIT,
+            "error": None, "partial": True,
+            "partial_reason": "recursion_limit_exhausted",
+        }
+
+        with patch.object(_qa, "run_quant_analyst", return_value=recursion_result) as mock_run:
+            result = _qa.run_quant_analyst_with_retry(**_quant_kwargs())
+
+        assert mock_run.call_count == 1, "Recursion exhaustion must NOT trigger retry"
+        assert result["retry_attempted"] is False
+        assert result["partial"] is True
+
+    def test_wrapper_does_not_retry_on_exception_path(self, fresh_modules):
+        """Exception in the first attempt populates ``error`` and gets
+        ``iterations=0``. Retry must NOT fire — same input, same crash."""
+        from agents.sector_teams import quant_analyst as _qa
+
+        errored_result = {
+            "team_id": "technology",
+            "ranked_picks": [], "tool_calls": [],
+            "iterations": 0,
+            "error": "RuntimeError: api key missing",
+            "partial": False,
+        }
+
+        with patch.object(_qa, "run_quant_analyst", return_value=errored_result) as mock_run:
+            result = _qa.run_quant_analyst_with_retry(**_quant_kwargs())
+
+        assert mock_run.call_count == 1, "Exception path must NOT trigger retry"
+        assert result["retry_attempted"] is False
+        assert result["error"] is not None
