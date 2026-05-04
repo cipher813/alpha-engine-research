@@ -96,6 +96,10 @@ def _make_llm_output() -> RubricEvalLLMOutput:
                 dimension="reasoning_complexity", score=2,
                 reasoning="Threshold-summing pattern; reproducible by short script.",
             ),
+            RubricDimensionScore(
+                dimension="output_completeness", score=4,
+                reasoning="2 picks emitted with full rationales — adequate coverage.",
+            ),
         ],
         overall_reasoning="Solid grounding; regime engagement weakest.",
     )
@@ -247,7 +251,7 @@ class TestEvaluateArtifact:
         # break this test.
         assert result.rubric_version  # non-empty
         # Dimension scores propagated
-        assert len(result.dimension_scores) == 5
+        assert len(result.dimension_scores) == 6
         assert result.dimension_scores[0].dimension == "numerical_grounding"
         # Overall reasoning propagated
         assert "regime engagement" in result.overall_reasoning
@@ -560,7 +564,7 @@ class TestPersistEvalArtifact:
         roundtrip = RubricEvalArtifact.model_validate(json.loads(obj["Body"].read()))
         assert roundtrip.judge_model == "claude-haiku-4-5"
         assert roundtrip.rubric_version == "1.0.0"
-        assert len(roundtrip.dimension_scores) == 5
+        assert len(roundtrip.dimension_scores) == 6
 
     def test_partition_date_matches_artifact_timestamp(self, mocked_s3):
         # Re-derives partition from the artifact's stamped timestamp so
