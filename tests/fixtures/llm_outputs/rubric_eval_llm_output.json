@@ -24,6 +24,11 @@
       "dimension": "reasoning_complexity",
       "score": 2,
       "reasoning": "Rationales sum 2-3 indicator thresholds without cross-indicator synthesis; output is reproducible by a short scoring script."
+    },
+    {
+      "dimension": "output_completeness",
+      "score": 4,
+      "reasoning": "5 ranked picks emitted matching expected coverage; iterations > 0 confirm tools ran. Coverage adequate for downstream synthesis."
     }
   ],
   "overall_reasoning": "Strong on numerical grounding and ranking discipline; weakest signals are regime engagement and reasoning complexity — picks track threshold-summing patterns rather than agent synthesis."
