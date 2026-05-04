@@ -173,6 +173,43 @@ def evaluate_artifact(
             f"a mixed batch."
         )
 
+    # Empty-input short-circuit. When the captured ``agent_output`` is
+    # falsy (None or {}), the agent never produced anything to evaluate
+    # — the most common case is ``sector_qual:{team}`` whose loop is
+    # bypassed by graph design when the upstream ``quant_top5`` is
+    # empty (and ``sector_peer_review:{team}`` cascading off that).
+    # Asking the judge to score "no rationale, no citations, no
+    # synthesis" produces uniform 1/1/1/1 outputs that drag the
+    # rolling-mean alarm threshold toward the floor without any real
+    # quality regression. Short-circuit BEFORE the LLM call so we pay
+    # no token cost and emit no spurious low scores. Distinct from the
+    # agent-ran-and-emitted-empty-output case (e.g. quant returning
+    # ``ranked_picks: []`` after iterating its tools) — that capture
+    # has work to evaluate (tool_calls, iterations, the empty result
+    # itself) and is the agent-failure signal we WANT the judge to
+    # surface, not skip. We detect structural-skip via the broader
+    # ``not agent_output`` check (catches None + {} but lets through
+    # any non-empty payload).
+    if not artifact.agent_output:
+        loaded_prompt = load_prompt(rubric_name)
+        return RubricEvalArtifact(
+            run_id=artifact.run_id,
+            timestamp=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            judged_agent_id=artifact.agent_id,
+            judged_artifact_s3_key=judged_artifact_s3_key,
+            rubric_id=rubric_name,
+            rubric_version=loaded_prompt.version,
+            judge_model=judge_model,
+            dimension_scores=[],
+            overall_reasoning=(
+                "Judge short-circuited: captured agent_output is empty "
+                "(graph bypassed the agent — typically sector_qual or "
+                "sector_peer_review when upstream quant_top5 is empty). "
+                "No work to evaluate; not a quality regression."
+            ),
+            judge_skip_reason="precluded_by_empty_upstream",
+        )
+
     loaded_prompt = load_prompt(rubric_name)
 
     # Render with the artifact's payload. ``json.dumps(..., default=str)``

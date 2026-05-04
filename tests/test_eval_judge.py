@@ -398,6 +398,137 @@ class TestEvaluateArtifact:
 # ── persist_eval_artifact ─────────────────────────────────────────────────
 
 
+class TestEmptyInputShortCircuit:
+    """Empty-input structural-skip handling.
+
+    Sector_qual + sector_peer_review captures land with ``agent_output={}``
+    when graph design bypasses them (e.g. qual loop is skipped when
+    upstream ``quant_top5`` is empty). Pre-fix, the judge LLM was asked
+    to score nothing and uniformly returned 1/1/1/1 across dimensions —
+    dragging the rolling-mean alarm threshold toward the floor without
+    any real quality regression. The fix detects empty agent_output,
+    short-circuits BEFORE the LLM call, and persists a skip marker
+    with empty dimension_scores + judge_skip_reason set.
+    """
+
+    def _make_empty_qual_artifact(self):
+        return DecisionArtifact(
+            run_id="run-empty-1",
+            timestamp="2026-05-04T13:00:00.000Z",
+            agent_id="sector_qual:financials",
+            model_metadata=ModelMetadata(model_name="claude-haiku-4-5"),
+            full_prompt_context=FullPromptContext(
+                system_prompt="<see config/prompts>",
+                user_prompt="<rendered>",
+            ),
+            input_data_snapshot={
+                "team_id": "financials",
+                "run_date": "2026-05-04",
+                "quant_top5": [],
+                "quant_top5_tickers": [],
+                "held_in_top5": [],
+            },
+            input_data_summary="team_id=financials, top5=0",
+            agent_output={},  # The empty-input pattern
+        )
+
+    def test_empty_agent_output_short_circuits_before_llm(self, monkeypatch):
+        """The LLM call is never made when agent_output is empty —
+        zero token cost, zero retry surface."""
+        from evals import judge as judge_mod
+
+        fake_llm = MagicMock()
+        fake_structured = MagicMock()
+        fake_llm.with_structured_output.return_value = fake_structured
+
+        with patch.object(judge_mod, "ChatAnthropic", return_value=fake_llm):
+            result = judge_mod.evaluate_artifact(
+                self._make_empty_qual_artifact(),
+                judge_model="claude-haiku-4-5",
+                api_key="sk-test",
+            )
+
+        # ChatAnthropic must have been instantiated only by load_prompt's
+        # downstream paths, NOT for an LLM call. The structured-output
+        # invoke path must never have fired.
+        assert fake_structured.invoke.call_count == 0, (
+            "Empty-input short-circuit must skip the LLM invoke entirely. "
+            f"Got invoke_count={fake_structured.invoke.call_count}"
+        )
+
+    def test_empty_agent_output_returns_skip_marker_artifact(self):
+        """Skip path persists a RubricEvalArtifact with empty dimensions
+        + judge_skip_reason set + a non-empty overall_reasoning string
+        explaining why."""
+        from evals.judge import evaluate_artifact
+
+        result = evaluate_artifact(
+            self._make_empty_qual_artifact(),
+            judge_model="claude-haiku-4-5",
+            api_key="sk-test",
+        )
+
+        assert isinstance(result, RubricEvalArtifact)
+        assert result.judge_skip_reason == "precluded_by_empty_upstream"
+        assert result.dimension_scores == []
+        assert result.overall_reasoning  # non-empty
+        assert "short-circuited" in result.overall_reasoning.lower()
+        # Metadata must still be populated so the audit trail traces
+        # back to the judged artifact + rubric + judge model.
+        assert result.judged_agent_id == "sector_qual:financials"
+        assert result.rubric_id == "eval_rubric_sector_qual"
+        assert result.rubric_version  # frontmatter version
+        assert result.judge_model == "claude-haiku-4-5"
+        assert result.run_id == "run-empty-1"
+
+    def test_none_agent_output_is_also_short_circuited(self):
+        """``agent_output=None`` is treated identically to ``{}`` — both
+        are falsy and indicate the agent never ran. Otherwise an
+        upstream nullability change in DecisionArtifact would silently
+        bypass the skip path."""
+        from evals.judge import evaluate_artifact
+
+        artifact = self._make_empty_qual_artifact()
+        # DecisionArtifact.agent_output is typed dict but tests can poke
+        # the model_dump path; bypass with object.__setattr__ for the
+        # null edge case.
+        object.__setattr__(artifact, "agent_output", None)
+
+        result = evaluate_artifact(artifact, api_key="sk-test")
+        assert result.judge_skip_reason == "precluded_by_empty_upstream"
+        assert result.dimension_scores == []
+
+    def test_non_empty_agent_output_does_not_short_circuit(self, monkeypatch):
+        """A non-empty agent_output (even one with empty inner lists,
+        e.g. quant returning ranked_picks=[]) is NOT a structural skip
+        — the agent ran. The judge runs as normal and the empty inner
+        result becomes the agent-failure signal we WANT to surface."""
+        from evals import judge as judge_mod
+
+        fake_structured = MagicMock()
+        fake_structured.invoke.return_value = {
+            "parsed": _make_llm_output(),
+            "raw": MagicMock(content="ok"),
+            "parsing_error": None,
+        }
+        fake_llm = MagicMock()
+        fake_llm.with_structured_output.return_value = fake_structured
+
+        artifact = _make_artifact("sector_quant:technology")
+        # Quant ran, did 22 tool calls, but returned no qualifying picks
+        # — the agent-failure pattern from workstream #2 (separate).
+        artifact.agent_output = {"ranked_picks": [], "tool_calls": [{}] * 22, "iterations": 22}
+
+        with patch.object(judge_mod, "ChatAnthropic", return_value=fake_llm):
+            result = judge_mod.evaluate_artifact(artifact, api_key="sk-test")
+
+        # Judge MUST have run — empty ranked_picks is not the structural
+        # skip pattern; it's an agent-quality signal we want surfaced.
+        assert fake_structured.invoke.call_count == 1
+        assert result.judge_skip_reason is None
+        assert len(result.dimension_scores) > 0
+
+
 @pytest.fixture
 def mocked_s3():
     with mock_aws():

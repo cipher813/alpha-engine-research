@@ -695,5 +695,38 @@ class RubricEvalArtifact(BaseModel):
     rubric_id: str = Field(description="Rubric prompt name (e.g. 'eval_rubric_sector_quant').")
     rubric_version: str = Field(description="Rubric prompt version at eval time (semver from prompt frontmatter).")
     judge_model: str = Field(description="Model name of the judge LLM (e.g. 'claude-haiku-4-5').")
-    dimension_scores: list[RubricDimensionScore]
-    overall_reasoning: str
+    dimension_scores: list[RubricDimensionScore] = Field(
+        default_factory=list,
+        description=(
+            "Per-dimension scores from the judge LLM. Empty list when "
+            "``judge_skip_reason`` is set — the judge short-circuited "
+            "before the LLM call because the captured ``agent_output`` "
+            "was empty (e.g. sector_qual when upstream quant returned "
+            "empty top5). Downstream consumers (CloudWatch metric "
+            "emission, rolling-mean Lambda) already exclude empty "
+            "lists from aggregation, so skipped records don't drag "
+            "alarm thresholds toward the floor."
+        ),
+    )
+    overall_reasoning: str = Field(
+        default="",
+        description=(
+            "Cross-dimension summary from the judge LLM, or a short "
+            "skip-reason sentence when ``judge_skip_reason`` is set."
+        ),
+    )
+    judge_skip_reason: str | None = Field(
+        default=None,
+        description=(
+            "Set when the judge short-circuited before invoking the LLM. "
+            "Today's only value is ``'precluded_by_empty_upstream'`` — "
+            "the captured ``agent_output`` was empty (None or {}) "
+            "because the graph design bypassed the agent (e.g. "
+            "sector_qual loop is skipped when ``quant_top5`` is empty). "
+            "Distinct from the agent-ran-and-emitted-empty-output case "
+            "(e.g. quant returning ``ranked_picks: []`` after running "
+            "tools), which is a real agent failure to flag, not a "
+            "structural skip — that lives in a separate retry+gate "
+            "workstream. None when the judge actually ran the LLM."
+        ),
+    )

@@ -198,6 +198,7 @@ def evaluate_corpus(
     haiku_evaluated = 0
     sonnet_evaluated = 0
     skipped_unmapped = 0
+    skipped_empty_input = 0
     metric_emission_failures = 0
     failed: list[dict[str, str]] = []
     persisted_keys: list[str] = []
@@ -277,6 +278,15 @@ def evaluate_corpus(
             # there's no haiku_eval to inspect for the threshold gate.
             continue
 
+        # Empty-input structural skip — judge.evaluate_artifact already
+        # short-circuited (no LLM call), persisted a skip-marker eval
+        # with empty dimension_scores + judge_skip_reason set. Don't
+        # escalate to Sonnet (nothing to evaluate); count separately
+        # for ops visibility.
+        if haiku_eval.judge_skip_reason is not None:
+            skipped_empty_input += 1
+            continue
+
         # Sonnet tier — sampled subset.
         escalate = force_sonnet_pass or should_escalate_to_sonnet(
             haiku_eval, threshold=haiku_escalate_threshold,
@@ -306,9 +316,10 @@ def evaluate_corpus(
 
     logger.info(
         "[eval_orchestrator] done date=%s haiku=%d sonnet=%d "
-        "skipped_unmapped=%d failed=%d metric_emission_failures=%d",
+        "skipped_unmapped=%d skipped_empty_input=%d failed=%d "
+        "metric_emission_failures=%d",
         date, haiku_evaluated, sonnet_evaluated, skipped_unmapped,
-        len(failed), metric_emission_failures,
+        skipped_empty_input, len(failed), metric_emission_failures,
     )
 
     return {
@@ -317,6 +328,7 @@ def evaluate_corpus(
         "haiku_evaluated": haiku_evaluated,
         "sonnet_evaluated": sonnet_evaluated,
         "skipped_unmapped": skipped_unmapped,
+        "skipped_empty_input": skipped_empty_input,
         "metric_emission_failures": metric_emission_failures,
         "failed": failed,
         "persisted_keys": persisted_keys,

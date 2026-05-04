@@ -160,11 +160,12 @@ def handler(event, context):
     status = "PARTIAL" if summary["failed"] else "OK"
     logger.info(
         "[eval_judge_handler] done status=%s haiku=%d sonnet=%d "
-        "skipped=%d failed=%d",
+        "skipped=%d skipped_empty=%d failed=%d",
         status,
         summary["haiku_evaluated"],
         summary["sonnet_evaluated"],
         summary["skipped_unmapped"],
+        summary.get("skipped_empty_input", 0),
         len(summary["failed"]),
     )
     return {"status": status, "summary": summary}

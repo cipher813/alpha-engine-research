@@ -351,6 +351,56 @@ class TestEvaluateCorpus:
         assert result["skipped_unmapped"] == 1
         assert result["failed"] == []
 
+    def test_skipped_empty_input_counted_separately(
+        self, mocked_s3_with_captures,
+    ):
+        """When the judge short-circuits on empty agent_output, the
+        eval persists with judge_skip_reason set + dimension_scores=[].
+        The orchestrator must (a) count it under skipped_empty_input,
+        (b) NOT escalate to Sonnet, (c) NOT mark it as failed."""
+        from evals import orchestrator as orch
+
+        def fake_eval(artifact, *, judge_model, judged_artifact_s3_key, **kw):
+            # Simulate the empty-input short-circuit on sector_qual —
+            # judge.evaluate_artifact would return a skip-marker eval.
+            if artifact.agent_id.startswith("sector_qual"):
+                ev = _make_eval(
+                    artifact.agent_id,
+                    run_id=artifact.run_id,
+                    judge_model=judge_model,
+                    scores=[],  # empty dimensions on skip path
+                )
+                # Manually set the skip reason post-construction; the
+                # _make_eval helper doesn't expose it.
+                object.__setattr__(
+                    ev, "judge_skip_reason", "precluded_by_empty_upstream",
+                )
+                return ev
+            return _make_eval(
+                artifact.agent_id,
+                run_id=artifact.run_id,
+                judge_model=judge_model,
+                scores=[4, 4, 4, 4],
+            )
+
+        with patch.object(orch, "evaluate_artifact", side_effect=fake_eval):
+            result = orch.evaluate_corpus(
+                date="2026-05-09",
+                bucket="alpha-engine-research",
+                s3_client=mocked_s3_with_captures,
+            )
+
+        # Exactly 1 sector_qual capture in the fixture set → exactly
+        # 1 skipped_empty_input.
+        assert result["skipped_empty_input"] == 1
+        # The skipped eval still counts under haiku_evaluated (it WAS
+        # processed end-to-end, just without an LLM call). What we
+        # verify here is that Sonnet did NOT escalate on it — that
+        # would be wasted work scoring an empty artifact at Sonnet's
+        # cost tier.
+        assert result["sonnet_evaluated"] == 0
+        assert result["failed"] == []
+
     def test_emit_metrics_false_skips_cloudwatch(
         self, mocked_s3_with_captures,
     ):
