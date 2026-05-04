@@ -36,6 +36,30 @@ log = logging.getLogger(__name__)
 _QUANT_RECURSION_LIMIT = QUANT_MAX_ITERATIONS * 2 + 2
 
 
+# Retry preamble injected into the user message on the second attempt
+# when the first attempt produced zero picks despite running tools.
+# Lives in code (not config) because it's a small fixed string used
+# only when the retry path fires; flow-doctor surfaces retry events
+# from the WARNING log lines below so observability is preserved.
+# Kept literal-formattable: only one variable interpolated.
+_QUANT_RETRY_PREAMBLE = (
+    "RETRY NOTICE: Your previous attempt at this analysis produced ZERO "
+    "ranked picks despite running {n_tool_calls} tool calls. The "
+    "downstream pipeline (qualitative analyst, peer review, CIO) "
+    "REQUIRES at least 3 ranked picks per sector — emitting an empty "
+    "result silently degrades portfolio coverage and is not an "
+    "acceptable outcome.\n\n"
+    "On this retry, you MUST produce at least 3 ranked picks. If no "
+    "setup meets your prior conviction threshold, lower the threshold "
+    "and rank by relative strength among the available tickers. State "
+    "explicitly when conviction is low rather than emitting empty. If "
+    "data quality is the obstacle (tool calls returning sparse or "
+    "stale data), produce your best ranking from what's available and "
+    "flag the data-quality concern in the rationale.\n\n"
+    "ORIGINAL ANALYSIS REQUEST FOLLOWS:\n\n"
+)
+
+
 def run_quant_analyst(
     team_id: str,
     sector_tickers: list[str],
@@ -44,6 +68,7 @@ def run_quant_analyst(
     technical_scores: dict,
     run_date: str,
     api_key: Optional[str] = None,
+    _retry_preamble: Optional[str] = None,
 ) -> dict:
     """
     Run the quant analyst ReAct agent for a sector team.
@@ -114,6 +139,13 @@ def run_quant_analyst(
         ticker_list=ticker_list,
         quant_top_n=QUANT_TOP_N,
     )
+    # On retry, prepend the retry preamble so the LLM sees the "previous
+    # attempt produced zero picks" context before the original request.
+    # The preamble is a code-side constant (_QUANT_RETRY_PREAMBLE) — not
+    # versioned via the prompt registry because it's a fixed, bounded
+    # string fired only on the empty-output retry path.
+    if _retry_preamble:
+        user_message = _retry_preamble + user_message
     # System prompt's metadata anchors LangSmith trace attribution; the
     # user prompt's version + hash piggyback so a future drift in either
     # half of the prompt-pair is independently grep-able.
@@ -258,6 +290,138 @@ def run_quant_analyst(
             "error": f"{type(e).__name__}: {e}",
             "partial": False,
         }
+
+
+def _should_retry_on_empty_picks(quant_output: dict) -> bool:
+    """Detect the agent-gave-up failure mode that warrants a retry.
+
+    Trigger conditions (all four must hold):
+
+    1. ``ranked_picks`` is empty — the load-bearing symptom.
+    2. ``error`` is None — exceptions go to a separate hard-fail path
+       (retry won't recover from a missing API key or schema error).
+    3. ``partial`` is False — recursion exhaustion already gave the
+       agent its full budget; rerunning won't help.
+    4. ``iterations > 0`` — the agent actually invoked tools. Zero
+       iterations means the ReAct loop didn't run at all, and a retry
+       with the same input would repeat the same failure.
+
+    The combination is "the agent ran tools, finished cleanly, and
+    chose to emit nothing." That's the give-up case from the 2026-05-04
+    diagnosis: ``sector_quant:financials`` produced 22 tool calls and
+    zero ranked picks. A retry with augmented prompting forces the
+    agent to commit a ranking even at lower conviction.
+    """
+    return (
+        len(quant_output.get("ranked_picks", []) or []) == 0
+        and quant_output.get("error") is None
+        and not quant_output.get("partial", False)
+        and quant_output.get("iterations", 0) > 0
+    )
+
+
+def run_quant_analyst_with_retry(
+    team_id: str,
+    sector_tickers: list[str],
+    market_regime: str,
+    price_data: dict,
+    technical_scores: dict,
+    run_date: str,
+    api_key: Optional[str] = None,
+) -> dict:
+    """Wrap ``run_quant_analyst`` with one-shot retry on empty picks.
+
+    Empty ``ranked_picks`` despite ReAct iterations > 0 is the agent
+    silently giving up — the 2026-05-04 diagnosis showed
+    ``sector_quant:financials`` running 22 tool calls and emitting an
+    empty result. Retry once with an augmented prompt that requires at
+    least 3 picks. Recursion exhaustion and exceptions are NOT retried
+    (more iterations won't help; rerunning won't fix a missing API key).
+
+    Returns the same shape as ``run_quant_analyst`` plus three retry-
+    observability fields:
+
+      ``retry_attempted``: bool — true iff the second invocation fired.
+      ``retry_succeeded``: bool — true iff the retry produced ≥1 pick.
+      ``retry_first_iterations``: int | None — iteration count of the
+                                  first attempt; populated only when
+                                  retry fires.
+
+    Cost: bounded — retry only fires on the give-up path (~4-5 sectors
+    × Saturday × ~$0.10 retry = ~$0.50/week worst case). Latency: also
+    bounded (sector teams run in parallel via Send(), so only the
+    slowest retry blocks the SF).
+    """
+    first = run_quant_analyst(
+        team_id=team_id,
+        sector_tickers=sector_tickers,
+        market_regime=market_regime,
+        price_data=price_data,
+        technical_scores=technical_scores,
+        run_date=run_date,
+        api_key=api_key,
+    )
+
+    if not _should_retry_on_empty_picks(first):
+        first["retry_attempted"] = False
+        first["retry_succeeded"] = False
+        first["retry_first_iterations"] = None
+        return first
+
+    # Retry path. The WARNING log line is flow-doctor-detectable so
+    # the event surfaces in CW alarms without requiring an explicit
+    # emit call (mirrors the existing 0-picks log pattern).
+    log.warning(
+        "[quant:%s] retry-on-empty firing — first attempt produced 0 picks "
+        "after %d tool calls (error=None, partial=False). Retrying once "
+        "with augmented prompt (must produce ≥3 picks).",
+        team_id, first["iterations"],
+    )
+
+    retry_preamble = _QUANT_RETRY_PREAMBLE.format(
+        n_tool_calls=first["iterations"],
+    )
+    second = run_quant_analyst(
+        team_id=team_id,
+        sector_tickers=sector_tickers,
+        market_regime=market_regime,
+        price_data=price_data,
+        technical_scores=technical_scores,
+        run_date=run_date,
+        api_key=api_key,
+        _retry_preamble=retry_preamble,
+    )
+
+    second_picks = len(second.get("ranked_picks", []) or [])
+    second["retry_attempted"] = True
+    second["retry_succeeded"] = second_picks > 0
+    second["retry_first_iterations"] = first["iterations"]
+
+    if second_picks == 0:
+        # The retry also gave up — escalate via WARNING so flow-doctor
+        # surfaces it. Downstream behavior is unchanged (the team
+        # contributes 0 picks); the observability lets us track how
+        # often retries fail to recover, which informs whether
+        # workstream #3 (output_completeness rubric dimension) needs
+        # to fire harder, or whether the system prompt itself needs
+        # tightening.
+        log.warning(
+            "[quant:%s] retry produced 0 picks — agent failure persists "
+            "across both attempts (first iterations=%d, second iterations=%d). "
+            "Downstream qual loop will be bypassed for this sector. "
+            "Investigate whether the sector universe has degenerate "
+            "technical-score input, the prompt is too restrictive, or "
+            "the LLM is regressing.",
+            team_id, first["iterations"], second.get("iterations", 0),
+        )
+    else:
+        log.info(
+            "[quant:%s] retry SUCCEEDED — produced %d picks (first attempt: 0, "
+            "second iterations=%d). Augmented prompt forced commitment.",
+            team_id, second_picks, second.get("iterations", 0),
+        )
+
+    return second
 
 
 def _build_system_prompt(
