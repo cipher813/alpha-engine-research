@@ -19,7 +19,12 @@
       "dimension": "regime_awareness",
       "score": 3,
       "reasoning": "Caution regime is named once in the team-level commentary but doesn't visibly shape pick selection across the ranked list."
+    },
+    {
+      "dimension": "reasoning_complexity",
+      "score": 2,
+      "reasoning": "Rationales sum 2-3 indicator thresholds without cross-indicator synthesis; output is reproducible by a short scoring script."
     }
   ],
-  "overall_reasoning": "Strong on numerical grounding and ranking discipline; weakest signal is regime engagement — caution regime should have triggered visible filtering on the ranked picks."
+  "overall_reasoning": "Strong on numerical grounding and ranking discipline; weakest signals are regime engagement and reasoning complexity — picks track threshold-summing patterns rather than agent synthesis."
 }
