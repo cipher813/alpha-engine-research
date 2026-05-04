@@ -278,11 +278,23 @@ build_and_deploy_main() {
   echo "  Alias 'live' → version $VERSION"
 
   # Canary invocation
-  echo "  Running canary (dry_run=true)..."
+  #
+  # Use ``dry_run_llm: true`` — the flag the handler actually recognizes
+  # (lambda/handler.py:191). Earlier versions sent ``{"dry_run": true}``,
+  # which the handler silently ignored, leaving the canary running in
+  # full production mode (real LLM calls, real S3 writes, real email).
+  # That misfired on 2026-05-04 when a config-changed deploy landed
+  # inside the 5:40-5:55 PT weekday gate window in
+  # ``_is_scheduled_run_time()`` and produced a real ``signals.json`` +
+  # research email outside the intended Saturday cadence. The
+  # ``dry_run_llm`` path installs full stubs (no LLM, no S3, no email)
+  # before the graph runs, so a future deploy landing in the gate
+  # window stays a no-op.
+  echo "  Running canary (dry_run_llm=true)..."
   CANARY_OUT=$(mktemp)
   aws lambda invoke \
     --function-name "${FUNCTION_MAIN}:live" \
-    --payload '{"dry_run": true}' \
+    --payload '{"dry_run_llm": true}' \
     --cli-binary-format raw-in-base64-out \
     --region "$REGION" \
     "$CANARY_OUT" > /dev/null
