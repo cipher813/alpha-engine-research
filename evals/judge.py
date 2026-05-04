@@ -68,6 +68,26 @@ tool-use envelope. Bumped from 1500 hardcoded on 2026-05-03 after
 judge_only smoke against Sat 5/3 captures showed ~5/32 evals failed
 with truncated/stringified dimension_scores at the prior 1500 cap."""
 
+MAX_JUDGE_RETRIES = 3
+"""Max attempts to parse a judge LLM response into ``RubricEvalLLMOutput``.
+
+LLM tool-use is stochastically non-conformant — Haiku occasionally
+produces malformed JSON-as-string for ``dimension_scores`` even with
+the schema's Field description + ``mode='before'`` validator (PR
+#104). Retrying gets a fresh decoder sample; ~20% per-call failure
+→ ~0.8% after 3 attempts. Token cost is bounded: only failed attempts
+retry, so the premium is paid only on the failing tail.
+
+Caps at 3 to bound worst-case latency (each retry is a full Haiku
+call ≈ 3-8s). Beyond 3 attempts the underlying issue is structural
+(rubric prompt too dense, model regressed, etc.) and surfaces as a
+loud failure for the operator to diagnose."""
+
+_RETRY_BACKOFF_BASE_SEC = 0.2
+"""Initial backoff between retry attempts. 200ms × 2^attempt =
+200ms / 400ms / 800ms — short enough to not blow Lambda budgets,
+long enough to ride out transient API hiccups."""
+
 
 # ── Agent → rubric mapping ────────────────────────────────────────────────
 
@@ -114,23 +134,37 @@ def evaluate_artifact(
     api_key: Optional[str] = None,
     max_tokens: int = DEFAULT_MAX_TOKENS,
     judged_artifact_s3_key: Optional[str] = None,
+    max_retries: int = MAX_JUDGE_RETRIES,
 ) -> RubricEvalArtifact:
     """Judge a single ``DecisionArtifact`` against its rubric.
 
     Resolves the rubric for ``artifact.agent_id``, renders the rubric
     prompt with the artifact's ``input_data_snapshot`` + ``agent_output``,
-    and invokes the judge LLM via ``with_structured_output``. The
-    returned ``RubricEvalArtifact`` carries the dimension scores plus
-    metadata (rubric_id+version, judge_model, judged_agent_id) so the
-    persisted eval can be re-aggregated later.
+    and invokes the judge LLM via ``with_structured_output(include_raw=True)``.
+    Retries up to ``max_retries`` times on parse failures (LLM tool-use
+    is stochastically non-conformant — fresh decoder sample on retry
+    typically succeeds). The returned ``RubricEvalArtifact`` carries
+    the dimension scores plus metadata (rubric_id+version, judge_model,
+    judged_agent_id).
+
+    On every parse-failure attempt, the raw tool-use payload head is
+    logged at WARNING so production failures are diagnosable without
+    re-running the artifact.
 
     Cost telemetry: scoped under ``agent_id="eval_judge"`` so judging
-    cost is tracked separately from the agents being judged.
+    cost is tracked separately from the agents being judged. Retry
+    attempts accumulate into the same cost frame.
 
-    Raises ``ValueError`` if no rubric is mapped for the artifact's
-    agent_id — callers should pre-filter via ``resolve_rubric_for_agent``
-    when iterating over a mixed batch.
+    Raises:
+      - ``ValueError`` if no rubric is mapped for the artifact's
+        agent_id — callers should pre-filter via ``resolve_rubric_for_agent``
+        when iterating a mixed batch.
+      - ``RuntimeError`` if all ``max_retries`` parse attempts fail —
+        the underlying issue is structural (model regression, rubric
+        too dense, etc.) and surfaces as a loud failure for diagnosis.
     """
+    import time
+
     rubric_name = resolve_rubric_for_agent(artifact.agent_id)
     if rubric_name is None:
         raise ValueError(
@@ -159,7 +193,16 @@ def evaluate_artifact(
         max_tokens=max_tokens,
         callbacks=[get_cost_telemetry_callback()],
     )
-    structured_llm = llm.with_structured_output(RubricEvalLLMOutput)
+    # ``include_raw=True`` returns ``{"raw": AIMessage, "parsed":
+    # RubricEvalLLMOutput | None, "parsing_error": Exception | None}``
+    # so we can log the raw tool-use payload on parse failures and
+    # retry the call rather than letting the parse error escape.
+    structured_llm = llm.with_structured_output(
+        RubricEvalLLMOutput, include_raw=True,
+    )
+
+    llm_output: Optional[RubricEvalLLMOutput] = None
+    last_err: Optional[BaseException] = None
 
     with track_llm_cost(
         agent_id="eval_judge",
@@ -169,9 +212,43 @@ def evaluate_artifact(
         model_name_fallback=judge_model,
         run_id=artifact.run_id,
     ):
-        llm_output: RubricEvalLLMOutput = structured_llm.invoke(
-            [HumanMessage(content=rendered)],
-            config={"metadata": loaded_prompt.langsmith_metadata()},
+        for attempt in range(max_retries):
+            resp = structured_llm.invoke(
+                [HumanMessage(content=rendered)],
+                config={"metadata": loaded_prompt.langsmith_metadata()},
+            )
+            parsed = resp.get("parsed")
+            parsing_error = resp.get("parsing_error")
+            if parsed is not None and parsing_error is None:
+                llm_output = parsed
+                if attempt > 0:
+                    logger.info(
+                        "[eval_judge] parse succeeded on attempt %d/%d "
+                        "for agent_id=%s",
+                        attempt + 1, max_retries, artifact.agent_id,
+                    )
+                break
+
+            last_err = parsing_error
+            raw_head = str(resp.get("raw"))[:300] if resp.get("raw") else "(no raw)"
+            logger.warning(
+                "[eval_judge] parse attempt %d/%d failed for agent_id=%s "
+                "judge=%s: %s: %s; raw head=%r",
+                attempt + 1, max_retries, artifact.agent_id, judge_model,
+                type(parsing_error).__name__ if parsing_error else "Unknown",
+                str(parsing_error)[:200] if parsing_error else "(no error)",
+                raw_head,
+            )
+            if attempt + 1 < max_retries:
+                time.sleep(_RETRY_BACKOFF_BASE_SEC * (2 ** attempt))
+
+    if llm_output is None:
+        raise RuntimeError(
+            f"[eval_judge] {max_retries} parse attempts failed for "
+            f"agent_id={artifact.agent_id} judge={judge_model}. "
+            f"Last error: {type(last_err).__name__ if last_err else 'Unknown'}: "
+            f"{last_err}. Underlying issue is structural — inspect raw "
+            f"tool-use payloads in the WARNING logs above."
         )
 
     return RubricEvalArtifact(
