@@ -961,7 +961,14 @@ def score_aggregator(state: ResearchState) -> dict:
                 if thesis.get("final_score") is None:
                     quant_score = thesis.get("quant_score")
                     qual_score = thesis.get("qual_score")
-                    sector = thesis.get("sector") or sector_map.get(ticker, "Unknown")
+                    # sector_map is authoritative (loaded from constituents.json
+                    # with 903/903 coverage). Held-stock thesis updates default
+                    # `sector` to "Unknown" via the Pydantic schema when the LLM
+                    # output omits it (state_schemas.py InvestmentThesis), and
+                    # the literal string "Unknown" is truthy — `or` would short-
+                    # circuit on it and never consult sector_map. Always prefer
+                    # sector_map; thesis sector is the last-resort fallback.
+                    sector = sector_map.get(ticker) or thesis.get("sector") or "Unknown"
                     modifier = sector_modifiers.get(sector, 1.0)
 
                     if quant_score is None and qual_score is None:
@@ -995,8 +1002,12 @@ def score_aggregator(state: ResearchState) -> dict:
                     thesis.setdefault("weighted_base", recomputed["weighted_base"])
                     thesis.setdefault("macro_shift", recomputed["macro_shift"])
                     thesis.setdefault("score_failed", recomputed["score_failed"])
-                    if "sector" not in thesis:
-                        thesis["sector"] = sector
+                    # Always overwrite sector with the resolved value above
+                    # (sector_map first). The previous `if "sector" not in thesis`
+                    # guard let an LLM-emitted "Unknown" survive into state and
+                    # leak into signals.json, breaking sector attribution
+                    # downstream (executor + EOD reconcile + dashboard).
+                    thesis["sector"] = sector
                     if "rating" not in thesis:
                         thesis["rating"] = score_to_rating(
                             recomputed["final_score"],
@@ -1617,6 +1628,11 @@ def _build_signals_payload(state: ResearchState) -> dict:
         else:
             continue  # Not held, not CIO-advanced — drop
 
+        # sector_map is authoritative (loaded from constituents.json with full
+        # universe coverage). Held-stock thesis updates can leak sector="Unknown"
+        # via the Pydantic default when the LLM omits the field (see
+        # score_aggregator held-stock branch). Prefer sector_map; thesis sector
+        # is the fallback. Mirrors the carry-over branch below.
         signals[ticker] = {
             "ticker": ticker,
             "score": thesis.get("final_score"),
@@ -1624,7 +1640,7 @@ def _build_signals_payload(state: ResearchState) -> dict:
             "signal": signal,
             "conviction": normalize_conviction(thesis.get("conviction", "stable")),
             "thesis_summary": thesis.get("bull_case", ""),
-            "sector": thesis.get("sector", "Unknown"),
+            "sector": sector_map.get(ticker) or thesis.get("sector") or "Unknown",
             "team_id": thesis.get("team_id"),
             "quant_score": thesis.get("quant_score"),
             "qual_score": thesis.get("qual_score"),
