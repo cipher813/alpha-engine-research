@@ -85,6 +85,21 @@ jobs:
           CONFIG_REPO_DIR: ${{ github.workspace }}/alpha-engine-config
         run: bash infrastructure/deploy.sh main
 
+      # Eval-judge shares the main runner's ECR image (different CMD
+      # entrypoint — see deploy_eval_judge() in infrastructure/deploy.sh).
+      # Without this step every deploy left the eval-judge Lambda stuck
+      # on the previous image. Surfaced 2026-05-04 when the new
+      # reasoning_complexity rubric prompts shipped via alpha-engine-config
+      # but didn't reach the eval-judge runtime — the prior image stayed
+      # live until a manual `aws lambda update-function-code` repointed
+      # the function. Adding this step closes the gap so prompt updates
+      # propagate cleanly to both the main runner AND the eval-judge.
+      - name: Deploy eval-judge Lambda (alpha-engine-research-eval-judge)
+        working-directory: alpha-engine-research
+        env:
+          CONFIG_REPO_DIR: ${{ github.workspace }}/alpha-engine-config
+        run: bash infrastructure/deploy.sh eval_judge
+
       - name: Report deployed version
         run: |
           echo "Triggered by: ${{ github.event_name }}"
