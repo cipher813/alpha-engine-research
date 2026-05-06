@@ -24,7 +24,7 @@ Schema posture (matches the JSONL row shape):
 - All additive going forward — never rename or remove a column without a
   ``schema_version`` bump per CLAUDE.md S3 contract safety rules.
 
-Workstream design: ``alpha-engine-docs/private/ROADMAP.md`` line ~1708.
+Workstream design: ``alpha-engine-config/private-docs/ROADMAP.md`` line ~1708.
 """
 
 from __future__ import annotations

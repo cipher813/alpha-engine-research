@@ -84,7 +84,7 @@ Thread + async safety: state lives in ``ContextVar`` so it's per-task in
 asyncio, per-thread otherwise. ``contextvars.copy_context()`` semantics
 take care of LangGraph fan-out propagation.
 
-Workstream design: ``alpha-engine-docs/private/ROADMAP.md`` line ~1708.
+Workstream design: ``alpha-engine-config/private-docs/ROADMAP.md`` line ~1708.
 """
 
 from __future__ import annotations
