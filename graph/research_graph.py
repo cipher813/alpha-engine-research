@@ -1493,6 +1493,7 @@ def archive_writer(state: ResearchState) -> dict:
     # Write signals.json (backward compatible)
     try:
         signals_payload = _build_signals_payload(state)
+        _validate_signals_payload(signals_payload)
         am.write_signals_json(run_date, state.get("run_time", ""), signals_payload)
     except Exception as e:
         logger.error("Failed to write signals.json: %s", e)
@@ -1654,6 +1655,38 @@ def email_sender(state: ResearchState) -> dict:
             logger.error("Email send failed: %s", e)
 
     return {"email_sent": False}
+
+
+def _validate_signals_payload(payload: dict) -> None:
+    """Block emission of signals.json when any ENTER signal carries an
+    unresolved sector.
+
+    Surface for the 2026-05-04 EOG/NVT incident: research wrote the first
+    pass of signals.json with sector="Unknown" for tickers whose constituents
+    sector_map hadn't loaded yet, then re-ran 10 minutes later with correct
+    values. The morning planner had already consumed the v1 file, written
+    the order book with sector="Unknown", and the daemon's intraday fills
+    persisted "Unknown" into trades.db.
+
+    The builder defaults to "Unknown" as an honest last-resort label when
+    sector_map and thesis both lack the field; that's a valid runtime state.
+    Emitting it on an ENTER signal is not — ENTER propagates into the order
+    book and the durable trades record, and a stale-fallback to the prior
+    trading day's signals.json is the safer outcome.
+    """
+    bad: list[str] = []
+    for ticker, sig in (payload.get("signals") or {}).items():
+        if sig.get("signal") != "ENTER":
+            continue
+        sector = sig.get("sector")
+        if not sector or sector == "Unknown":
+            bad.append(ticker)
+    if bad:
+        raise RuntimeError(
+            f"[signals_validation] BLOCKED: {len(bad)} ENTER signals with "
+            f"unresolved sector: {sorted(bad)}. signals.json not written; "
+            "executor will fall back to prior trading day."
+        )
 
 
 def _build_signals_payload(state: ResearchState) -> dict:
