@@ -316,7 +316,12 @@ class InvestmentThesis(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     ticker: str
-    sector: str = "Unknown"
+    # `None` is the schema-level marker for "LLM omitted this field" so the
+    # downstream `or` chains in research_graph.py route to sector_map first.
+    # Prior default of "Unknown" was a truthy string that short-circuited
+    # those `or` chains and leaked through to signals.json + trades.db
+    # (2026-05-04 EOG/NVT incident; root-cause fix in 39c379f).
+    sector: str | None = None
     team_id: str = ""
     final_score: float = Field(ge=0, le=100)
     quant_score: float | None = Field(default=None, ge=0, le=100)
