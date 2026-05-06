@@ -1490,12 +1490,30 @@ def archive_writer(state: ResearchState) -> dict:
             n_theses_written, len(investment_theses),
         )
 
-    # Write signals.json (backward compatible)
+    # Write signals.json (backward compatible).
+    # Universe-membership check sourced from alpha_engine_lib.arcticdb so
+    # producer (research preflight) and consumer (executor's
+    # filter_buy_candidates_to_universe) compare ENTER tickers against the
+    # same authoritative ArcticDB universe library. Soft-skip if ArcticDB
+    # is unreachable — the executor's downstream filter is the second-line
+    # defense and will surface the gap there.
+    universe_symbols: set[str] | None = None
+    try:
+        from alpha_engine_lib.arcticdb import get_universe_symbols
+        universe_symbols = get_universe_symbols(am.bucket)
+    except Exception as e:
+        logger.warning(
+            "[signals_validation] could not load ArcticDB universe symbols: %s "
+            "— skipping universe-membership check. Executor's downstream "
+            "filter will still gate against the same source.",
+            e,
+        )
+
     try:
         signals_payload = _build_signals_payload(state)
         _validate_signals_payload(
             signals_payload,
-            scanner_universe=state.get("scanner_universe"),
+            scanner_universe=universe_symbols,
         )
         am.write_signals_json(run_date, state.get("run_time", ""), signals_payload)
     except Exception as e:
