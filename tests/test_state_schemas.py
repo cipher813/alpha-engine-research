@@ -332,7 +332,7 @@ class TestCIOOutput:
 class TestInvestmentThesis:
     def test_minimal_required(self):
         t = InvestmentThesis(ticker="AAPL", final_score=70.0, rating="BUY")
-        assert t.sector == "Unknown"
+        assert t.sector is None
         assert t.team_id == ""
         # Storage format from normalize_conviction (executor-compatible)
         assert t.conviction == "stable"
