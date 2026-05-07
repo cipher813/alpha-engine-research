@@ -19,6 +19,10 @@ set -euo pipefail
 FUNCTION_MAIN="alpha-engine-research-runner"
 FUNCTION_ALERTS="alpha-engine-research-alerts"
 FUNCTION_EVAL_JUDGE="alpha-engine-research-eval-judge"
+# Batch-API chain Lambdas (ROADMAP §1642 closure 2026-05-07).
+FUNCTION_EVAL_JUDGE_SUBMIT="alpha-engine-research-eval-judge-submit"
+FUNCTION_EVAL_JUDGE_POLL="alpha-engine-research-eval-judge-poll"
+FUNCTION_EVAL_JUDGE_PROCESS="alpha-engine-research-eval-judge-process"
 FUNCTION_EVAL_ROLLING_MEAN="alpha-engine-research-eval-rolling-mean"
 FUNCTION_RATIONALE_CLUSTERING="alpha-engine-research-rationale-clustering"
 REGION="${AWS_REGION:-us-east-1}"
@@ -610,17 +614,111 @@ deploy_rationale_clustering() {
   echo "  Alias 'live' → version $VERSION"
 }
 
+# ── Eval-judge batch chain: image-share + per-Lambda CMD override ───────────
+#
+# Three Lambdas share the main ECR image, each with a different CMD
+# pointing at one of the three batch-chain handlers
+# (eval_judge_{submit,poll,process}_handler.handler). Per-Lambda
+# memory + timeout chosen for the workload:
+#   * Submit  — plan-build + manifest write + one batch-create call.
+#               Network-bound, no LLM. 512MB / 300s.
+#   * Poll    — single retrieve API call. Trivial. 256MB / 60s.
+#   * Process — streams all batch results + parses + persists +
+#               sync Sonnet escalation tail. 1024MB / 900s
+#               (the legacy single-Lambda's spec — bounded only by
+#               the synchronous escalation tail for borderline Haiku
+#               results, which is the same workload the legacy
+#               single-Lambda ran).
+#
+# Prerequisite: build_and_deploy_main must have run at least once on
+# this branch so the ECR ${ECR_REPO}:latest image contains
+# /var/task/eval_judge_{submit,poll,process}_handler.py (Dockerfile
+# COPY of lambda/eval_judge_{...}_handler.py).
+
+_deploy_image_shared_lambda() {
+  local fn_name="$1"
+  local handler_module="$2"
+  local timeout_s="$3"
+  local memory_mb="$4"
+
+  echo "=== Deploying $fn_name (image-share with $FUNCTION_MAIN) ==="
+
+  local IMAGE_URI="$ECR_REPO:latest"
+  local IMAGE_CONFIG
+  IMAGE_CONFIG="{\"Command\":[\"${handler_module}.handler\"]}"
+
+  local ENV_ARGS=()
+  if [ -n "$LAMBDA_ENV_JSON" ]; then
+    ENV_ARGS=(--environment "$LAMBDA_ENV_JSON")
+  fi
+
+  if aws lambda get-function --function-name "$fn_name" --region "$REGION" &>/dev/null; then
+    aws lambda update-function-code \
+      --function-name "$fn_name" \
+      --image-uri "$IMAGE_URI" \
+      --region "$REGION" > /dev/null
+    echo "  Waiting for code update to complete..."
+    aws lambda wait function-updated --function-name "$fn_name" --region "$REGION" 2>/dev/null || sleep 5
+    aws lambda update-function-configuration \
+      --function-name "$fn_name" \
+      --image-config "$IMAGE_CONFIG" \
+      --timeout "$timeout_s" \
+      --memory-size "$memory_mb" \
+      "${ENV_ARGS[@]}" \
+      --region "$REGION" > /dev/null
+  else
+    aws lambda create-function \
+      --function-name "$fn_name" \
+      --package-type Image \
+      --code "ImageUri=$IMAGE_URI" \
+      --image-config "$IMAGE_CONFIG" \
+      --role "$ROLE_ARN" \
+      --timeout "$timeout_s" \
+      --memory-size "$memory_mb" \
+      "${ENV_ARGS[@]}" \
+      --region "$REGION" > /dev/null
+  fi
+  echo "  $fn_name deployed (CMD=${handler_module}.handler timeout=${timeout_s}s memory=${memory_mb}MB)."
+
+  echo "  Publishing Lambda version..."
+  aws lambda wait function-updated --function-name "$fn_name" --region "$REGION" 2>/dev/null || sleep 5
+  local VERSION
+  VERSION=$(aws lambda publish-version \
+    --function-name "$fn_name" \
+    --query "Version" --output text \
+    --region "$REGION")
+  echo "  Published version: $VERSION"
+  aws lambda update-alias \
+    --function-name "$fn_name" \
+    --name live \
+    --function-version "$VERSION" \
+    --region "$REGION" 2>/dev/null || \
+  aws lambda create-alias \
+    --function-name "$fn_name" \
+    --name live \
+    --function-version "$VERSION" \
+    --region "$REGION"
+  echo "  Alias 'live' → version $VERSION"
+}
+
+deploy_eval_judge_batch() {
+  _deploy_image_shared_lambda "$FUNCTION_EVAL_JUDGE_SUBMIT"  "eval_judge_submit_handler"  300 512
+  _deploy_image_shared_lambda "$FUNCTION_EVAL_JUDGE_POLL"    "eval_judge_poll_handler"     60 256
+  _deploy_image_shared_lambda "$FUNCTION_EVAL_JUDGE_PROCESS" "eval_judge_process_handler" 900 1024
+}
+
 # ── Dispatch ─────────────────────────────────────────────────────────────────
 
 case "$TARGET" in
   main)                  build_and_deploy_main ;;
   alerts)                build_and_deploy_alerts ;;
   eval_judge)            deploy_eval_judge ;;
+  eval_judge_batch)      deploy_eval_judge_batch ;;
   eval_rolling_mean)     deploy_eval_rolling_mean ;;
   rationale_clustering)  deploy_rationale_clustering ;;
   both)                  build_and_deploy_main; build_and_deploy_alerts ;;
-  all)                   build_and_deploy_main; build_and_deploy_alerts; deploy_eval_judge; deploy_eval_rolling_mean; deploy_rationale_clustering ;;
-  *)                     echo "Usage: $0 [main|alerts|eval_judge|eval_rolling_mean|rationale_clustering|both|all]"; exit 1 ;;
+  all)                   build_and_deploy_main; build_and_deploy_alerts; deploy_eval_judge; deploy_eval_judge_batch; deploy_eval_rolling_mean; deploy_rationale_clustering ;;
+  *)                     echo "Usage: $0 [main|alerts|eval_judge|eval_judge_batch|eval_rolling_mean|rationale_clustering|both|all]"; exit 1 ;;
 esac
 
 echo ""

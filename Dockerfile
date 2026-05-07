@@ -63,12 +63,25 @@ COPY strict_mode.py ${LAMBDA_TASK_ROOT}/
 # Main Lambda handler
 COPY lambda/handler.py ${LAMBDA_TASK_ROOT}/handler.py
 
-# Eval-judge Lambda handler — same image, separate Lambda function in
-# AWS that overrides CMD to ["eval_judge_handler.handler"] via
-# --image-config at deploy time. Sharing the image with the main
-# function avoids a parallel ECR repo + duplicate Docker build for a
-# handler that needs the exact same dependency set.
+# Eval-judge Lambda handlers — same image, separate Lambda functions
+# in AWS that override CMD via --image-config at deploy time. Sharing
+# the image avoids a parallel ECR repo + duplicate Docker build for
+# handlers that need the exact same dependency set.
+#
+# Legacy single-Lambda handler. Retained for ad-hoc invocations,
+# ``dry_run`` smoke, and the ``judge_only`` test track. The Saturday
+# SF runs the batch chain (submit/poll/process) below.
 COPY lambda/eval_judge_handler.py ${LAMBDA_TASK_ROOT}/eval_judge_handler.py
+
+# Eval-judge Anthropic Message Batches API chain (ROADMAP §1642
+# closure 2026-05-07). Three Lambdas share this image, each with a
+# CMD override:
+#   * eval_judge_submit_handler.handler   — builds + submits batch
+#   * eval_judge_poll_handler.handler     — retrieves processing_status
+#   * eval_judge_process_handler.handler  — streams + persists results
+COPY lambda/eval_judge_submit_handler.py ${LAMBDA_TASK_ROOT}/eval_judge_submit_handler.py
+COPY lambda/eval_judge_poll_handler.py ${LAMBDA_TASK_ROOT}/eval_judge_poll_handler.py
+COPY lambda/eval_judge_process_handler.py ${LAMBDA_TASK_ROOT}/eval_judge_process_handler.py
 
 # Rolling-4-week-mean Lambda handler (PR 4b) — same image, separate
 # Lambda overriding CMD to ["eval_rolling_mean_handler.handler"].
