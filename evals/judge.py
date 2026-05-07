@@ -1,5 +1,5 @@
 """
-LLM-as-judge evaluation pipeline (workstream closed 2026-05-03).
+LLM-as-judge evaluation pipeline.
 
 Reads a captured ``DecisionArtifact``, looks up the matching rubric
 prompt, sends ``(rubric, artifact_input, artifact_output)`` to a judge
@@ -10,18 +10,34 @@ Eval is observability, NOT a gate. Runs proceed regardless of eval
 score; the eval corpus + dashboard surface quality regressions weeks
 before they show up in alpha-vs-SPY.
 
+Two execution paths share the rubric-rendering + parsing core:
+
+* ``evaluate_artifact`` — synchronous single-artifact path. Used by
+  ad-hoc replays, the judge_only test track, dry_run smoke, and the
+  Sonnet-escalation tail in the batch Process Lambda.
+
+* ``build_batch_request`` + ``parse_batch_message`` — Anthropic
+  Message Batches API path. Used by the Saturday SF Submit/Poll/
+  Process chain to fan a single batch over every (artifact × judge_model)
+  pair, then stream and persist results. 50% cost discount per the
+  Batches API contract; structurally bypasses the Lambda 15-min timeout
+  class that nearly fired on the 2026-05-06 manual midweek SF run.
+
 Composes with:
 - Decision-artifact capture (alpha_engine_lib.decision_capture).
 - Rubric prompts in alpha-engine-config (eval_rubric_*.txt at
   version 1.0.0+, loaded via ``agents.prompt_loader.load_prompt``).
-- Cost telemetry — eval LLM calls are tagged ``agent_id="eval_judge"``
-  via ``track_llm_cost`` so judging cost is observable + bounded.
+- Cost telemetry — sync eval LLM calls are tagged
+  ``agent_id="eval_judge"`` via ``track_llm_cost``. Batch results emit
+  the same telemetry from the Process Lambda using the per-result usage
+  block returned by Anthropic's batch results stream.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -32,7 +48,7 @@ from langchain_core.messages import HumanMessage
 from alpha_engine_lib.decision_capture import DecisionArtifact
 
 from config import ANTHROPIC_API_KEY, MAX_TOKENS_STRATEGIC, S3_BUCKET
-from agents.prompt_loader import load_prompt
+from agents.prompt_loader import LoadedPrompt, load_prompt
 from graph.llm_cost_tracker import get_cost_telemetry_callback, track_llm_cost
 from graph.state_schemas import (
     RubricEvalArtifact,
@@ -124,6 +140,287 @@ def resolve_rubric_for_agent(agent_id: str) -> Optional[str]:
     return None
 
 
+# ── Custom-id codec ───────────────────────────────────────────────────────
+#
+# The Anthropic Batches API returns results keyed by an opaque
+# ``custom_id`` (1-64 chars, ``^[a-zA-Z0-9_-]{1,64}$``). The Submit
+# Lambda encodes the (judged_agent_id, run_id, judge_model) tuple into
+# the custom_id; the Process Lambda decodes it on the way out so the
+# eval artifact can be persisted under the same path the sync path
+# would have written. Encoding is round-trippable so we don't depend
+# on the in-flight plan manifest for correctness — the manifest is a
+# convenience for ops visibility, not a load-bearing dependency.
+
+
+_CUSTOM_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
+"""Anthropic batch custom_id regex (per Message Batches API docs)."""
+
+_JUDGE_MODEL_TAG = {
+    "claude-haiku-4-5": "h45",
+    "claude-sonnet-4-6": "s46",
+}
+"""Compact tags for the two judge models. Keeps custom_id under the
+64-char limit even when judged_agent_id is long
+(e.g. ``thesis_update:technology:AAPL``)."""
+
+_JUDGE_MODEL_TAG_REVERSE = {v: k for k, v in _JUDGE_MODEL_TAG.items()}
+
+
+def encode_custom_id(
+    *, judged_agent_id: str, run_id: str, judge_model: str,
+) -> str:
+    """Encode (judged_agent_id, run_id, judge_model) → batch custom_id.
+
+    Replaces ``:`` and ``/`` separators with ``-`` since the Anthropic
+    custom_id charset only allows alphanumerics, ``-``, and ``_``.
+    Truncates the agent_id segment if needed so the final string fits
+    the 64-char ceiling. Round-trippable via ``decode_custom_id``.
+    """
+    tag = _JUDGE_MODEL_TAG.get(judge_model)
+    if tag is None:
+        # Unknown judge model — fall back to a hash-stable suffix.
+        tag = f"x{abs(hash(judge_model)) % 10_000:04d}"
+    safe_agent = re.sub(r"[^a-zA-Z0-9_-]", "-", judged_agent_id)
+    safe_run = re.sub(r"[^a-zA-Z0-9_-]", "-", run_id)
+    # Reserve 4 chars for "__" separators + 3-char model tag.
+    fixed_overhead = len(safe_run) + len(tag) + 4
+    max_agent = max(8, 64 - fixed_overhead)
+    if len(safe_agent) > max_agent:
+        safe_agent = safe_agent[:max_agent]
+    cid = f"{safe_agent}__{safe_run}__{tag}"
+    if not _CUSTOM_ID_PATTERN.match(cid):
+        # Last-ditch sanitize — strip anything that snuck through and
+        # trim to the cap. The decode side just needs the model tag at
+        # the tail; agent_id round-trip is best-effort once truncated.
+        cid = re.sub(r"[^a-zA-Z0-9_-]", "-", cid)[:64]
+    return cid
+
+
+def decode_custom_id(custom_id: str) -> tuple[str, str, str]:
+    """Inverse of ``encode_custom_id``.
+
+    Returns ``(judged_agent_id, run_id, judge_model)``. The agent_id
+    reconstruction maps ``-`` back to ``:`` for the prefixed-team
+    pattern (``sector_quant:tech``); other ``-`` characters in the
+    original would be lost (acceptable — the batch plan manifest carries
+    the canonical agent_id and the eval artifact stamps it from there).
+
+    Raises ``ValueError`` if the custom_id doesn't match the expected
+    triple-segment shape (defensive — should not happen in production
+    since we control both sides of the codec).
+    """
+    parts = custom_id.split("__")
+    if len(parts) != 3:
+        raise ValueError(
+            f"Cannot decode batch custom_id={custom_id!r}: expected "
+            f"three '__'-separated segments, got {len(parts)}."
+        )
+    safe_agent, safe_run, tag = parts
+    judge_model = _JUDGE_MODEL_TAG_REVERSE.get(tag, tag)
+    return safe_agent, safe_run, judge_model
+
+
+# ── Render + parse helpers ────────────────────────────────────────────────
+
+
+def _render_rubric(
+    artifact: DecisionArtifact, loaded_prompt: LoadedPrompt,
+) -> str:
+    """Render the rubric template against the artifact's payload.
+
+    ``json.dumps(..., default=str)`` handles any stray types
+    (datetimes, Decimals) that snuck into the captured snapshot.
+    Shared by the sync and batch paths so rubric rendering is
+    semantically identical regardless of which transport delivers
+    the call.
+    """
+    return loaded_prompt.format(
+        agent_input=json.dumps(
+            artifact.input_data_snapshot, indent=2, default=str,
+        ),
+        agent_output=json.dumps(
+            artifact.agent_output, indent=2, default=str,
+        ),
+    )
+
+
+def _make_skip_eval_artifact(
+    artifact: DecisionArtifact,
+    *,
+    rubric_name: str,
+    rubric_version: str,
+    judge_model: str,
+    judged_artifact_s3_key: Optional[str],
+) -> RubricEvalArtifact:
+    """Build the skip-marker eval for an artifact whose ``agent_output``
+    is empty (graph bypassed the agent — see comment in
+    ``evaluate_artifact``). Shared by the sync + batch paths.
+
+    Asking the judge to score "no rationale, no citations, no
+    synthesis" produces uniform 1/1/1/1 outputs that drag the
+    rolling-mean alarm threshold toward the floor without any real
+    quality regression. Short-circuit BEFORE the LLM call so we pay
+    no token cost and emit no spurious low scores.
+    """
+    return RubricEvalArtifact(
+        run_id=artifact.run_id,
+        timestamp=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        judged_agent_id=artifact.agent_id,
+        judged_artifact_s3_key=judged_artifact_s3_key,
+        rubric_id=rubric_name,
+        rubric_version=rubric_version,
+        judge_model=judge_model,
+        dimension_scores=[],
+        overall_reasoning=(
+            "Judge short-circuited: captured agent_output is empty "
+            "(graph bypassed the agent — typically sector_qual or "
+            "sector_peer_review when upstream quant_top5 is empty). "
+            "No work to evaluate; not a quality regression."
+        ),
+        judge_skip_reason="precluded_by_empty_upstream",
+    )
+
+
+# ── Tool-use spec for the batch path ──────────────────────────────────────
+#
+# The sync path uses LangChain's ``with_structured_output(...)`` which
+# automatically derives a tool spec from ``RubricEvalLLMOutput``. The
+# batch path uses the raw Anthropic SDK (LangChain doesn't wrap the
+# Batches endpoint), so we synthesize the same tool spec here from the
+# Pydantic model's JSON schema. Pinning the spec via the live model
+# means a schema bump (e.g. adding a new dimension field) automatically
+# flows into the batch tool — no second source of truth.
+
+
+_RUBRIC_TOOL_NAME = "RubricEvalLLMOutput"
+"""Tool name in the batch tool-use spec. Mirrors the LangChain default
+(class name) so any callsite that grep-greps for the tool name finds
+both paths."""
+
+_RUBRIC_TOOL_DESCRIPTION = (
+    "Emit the rubric eval as a structured tool call. Each rubric "
+    "dimension produces one entry in dimension_scores with an integer "
+    "score and short reasoning. overall_reasoning is a 1-2 sentence "
+    "cross-dimension summary."
+)
+
+
+def _build_rubric_tool_spec() -> dict[str, Any]:
+    """Synthesize the Anthropic tool-use spec for the rubric eval call.
+
+    Pinning the input_schema to ``RubricEvalLLMOutput.model_json_schema()``
+    means the schema-bump path is single-source-of-truth: edit the
+    Pydantic model and both transports pick it up.
+    """
+    schema = RubricEvalLLMOutput.model_json_schema()
+    return {
+        "name": _RUBRIC_TOOL_NAME,
+        "description": _RUBRIC_TOOL_DESCRIPTION,
+        "input_schema": schema,
+    }
+
+
+def build_batch_request(
+    artifact: DecisionArtifact,
+    *,
+    judge_model: str,
+    custom_id: str,
+    max_tokens: int = MAX_TOKENS_STRATEGIC,
+) -> dict[str, Any]:
+    """Build one entry of the ``messages.batches.create`` ``requests``
+    array for an artifact under a given judge model.
+
+    Uses the same rubric resolution + rendering as the sync path. Tool
+    use is set up so the LLM is forced to emit the eval via
+    ``RubricEvalLLMOutput``'s schema (matches the sync
+    ``with_structured_output`` call shape — same structured-output
+    semantics, just transported via the Batches API).
+
+    Raises ``ValueError`` if ``artifact.agent_id`` has no rubric
+    mapped — callers must pre-filter via ``resolve_rubric_for_agent``.
+
+    Empty-input short-circuit is handled by the orchestrator BEFORE
+    this function is invoked (the skip artifact is persisted
+    client-side without spending a batch slot).
+    """
+    rubric_name = resolve_rubric_for_agent(artifact.agent_id)
+    if rubric_name is None:
+        raise ValueError(
+            f"No rubric mapped for agent_id={artifact.agent_id!r}. "
+            f"Pre-filter with resolve_rubric_for_agent() before building "
+            f"a batch request."
+        )
+
+    loaded_prompt = load_prompt(rubric_name)
+    rendered = _render_rubric(artifact, loaded_prompt)
+    tool_spec = _build_rubric_tool_spec()
+
+    return {
+        "custom_id": custom_id,
+        "params": {
+            "model": judge_model,
+            "max_tokens": max_tokens,
+            "tools": [tool_spec],
+            # Force the model to call the rubric tool — equivalent to
+            # ``with_structured_output(...)``'s ``tool_choice`` posture.
+            # Without this the model can decide to emit prose, which
+            # would fall through every parser in this module.
+            "tool_choice": {"type": "tool", "name": _RUBRIC_TOOL_NAME},
+            "messages": [
+                {"role": "user", "content": rendered},
+            ],
+            # ``metadata.user_id`` is reserved for end-user identification
+            # in Anthropic's contract; we pass the rubric+version pair
+            # via ``metadata`` for batch-side observability without
+            # putting it on a schema-validated field.
+        },
+    }
+
+
+def parse_batch_message(
+    message_payload: Any,
+) -> RubricEvalLLMOutput:
+    """Parse one batch result's ``message`` block into ``RubricEvalLLMOutput``.
+
+    Accepts either an SDK Message object or its dict equivalent (the
+    Process Lambda streams the raw dict to keep dependencies minimal).
+    Locates the tool_use block named ``RubricEvalLLMOutput`` and
+    validates its ``input`` against the Pydantic schema.
+
+    Raises ``ValueError`` if no matching tool_use block is found, or
+    ``pydantic.ValidationError`` if the input fails schema validation.
+    Both are caught by the orchestrator and recorded in the run's
+    ``failed`` list — the batch result is preserved on Anthropic's
+    side (29-day retention) so the operator can re-pull and diagnose
+    without re-paying for the call.
+    """
+    content = (
+        message_payload["content"]
+        if isinstance(message_payload, dict)
+        else message_payload.content
+    )
+    for block in content:
+        block_type = (
+            block.get("type") if isinstance(block, dict) else block.type
+        )
+        block_name = (
+            block.get("name") if isinstance(block, dict)
+            else getattr(block, "name", None)
+        )
+        if block_type == "tool_use" and block_name == _RUBRIC_TOOL_NAME:
+            tool_input = (
+                block["input"] if isinstance(block, dict) else block.input
+            )
+            return RubricEvalLLMOutput.model_validate(tool_input)
+    raise ValueError(
+        "No tool_use block named "
+        f"{_RUBRIC_TOOL_NAME!r} found in batch result message; the "
+        "judge LLM did not emit the rubric eval via the structured "
+        "tool — inspect the raw batch result on Anthropic's side "
+        "(retained 29 days)."
+    )
+
+
 # ── Judge call ────────────────────────────────────────────────────────────
 
 
@@ -190,39 +487,18 @@ def evaluate_artifact(
     # surface, not skip. We detect structural-skip via the broader
     # ``not agent_output`` check (catches None + {} but lets through
     # any non-empty payload).
-    if not artifact.agent_output:
-        loaded_prompt = load_prompt(rubric_name)
-        return RubricEvalArtifact(
-            run_id=artifact.run_id,
-            timestamp=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-            judged_agent_id=artifact.agent_id,
-            judged_artifact_s3_key=judged_artifact_s3_key,
-            rubric_id=rubric_name,
-            rubric_version=loaded_prompt.version,
-            judge_model=judge_model,
-            dimension_scores=[],
-            overall_reasoning=(
-                "Judge short-circuited: captured agent_output is empty "
-                "(graph bypassed the agent — typically sector_qual or "
-                "sector_peer_review when upstream quant_top5 is empty). "
-                "No work to evaluate; not a quality regression."
-            ),
-            judge_skip_reason="precluded_by_empty_upstream",
-        )
-
     loaded_prompt = load_prompt(rubric_name)
 
-    # Render with the artifact's payload. ``json.dumps(..., default=str)``
-    # handles any stray types (datetimes, Decimals) that snuck into the
-    # captured snapshot.
-    rendered = loaded_prompt.format(
-        agent_input=json.dumps(
-            artifact.input_data_snapshot, indent=2, default=str,
-        ),
-        agent_output=json.dumps(
-            artifact.agent_output, indent=2, default=str,
-        ),
-    )
+    if not artifact.agent_output:
+        return _make_skip_eval_artifact(
+            artifact,
+            rubric_name=rubric_name,
+            rubric_version=loaded_prompt.version,
+            judge_model=judge_model,
+            judged_artifact_s3_key=judged_artifact_s3_key,
+        )
+
+    rendered = _render_rubric(artifact, loaded_prompt)
 
     llm = ChatAnthropic(
         model=judge_model,
