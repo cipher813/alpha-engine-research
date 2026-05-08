@@ -81,6 +81,39 @@ else:
 
 LAMBDA_ENV_JSON=$(build_lambda_env_json)
 
+# ── Lambda existence check (fail-loud on non-NotFound errors) ────────────────
+#
+# Antipattern this replaces: ``if aws lambda get-function ... &>/dev/null``
+# combined stdout+stderr redirect, so AccessDenied / 504 / throttle errors
+# were silently swallowed and the script fell through to the create-function
+# branch — surfacing as a confusing "Function already exist" downstream
+# (alpha-engine-data#149 incident triage 2026-05-04 + eval-judge deploy
+# transient AWS 504 on 2026-05-08). Closes ROADMAP P3 line ~133.
+#
+# Returns 0 if the function exists (caller proceeds to update path).
+# Returns 1 if the function doesn't exist (caller proceeds to create path).
+# Exits the script (non-zero) on any other error — AccessDenied / 504 /
+# throttle / network — so the operator sees the real cause instead of the
+# misleading downstream error. AWS 504 is intermittent; operator retries.
+
+_lambda_function_exists() {
+  local fn_name="$1"
+  local err
+  if err=$(aws lambda get-function \
+        --function-name "$fn_name" \
+        --region "$REGION" 2>&1 >/dev/null); then
+    return 0
+  fi
+  if echo "$err" | grep -q -E "ResourceNotFoundException|Function not found"; then
+    return 1
+  fi
+  echo "ERROR: aws lambda get-function failed for '$fn_name' with non-NotFound error:" >&2
+  echo "$err" >&2
+  echo "Hint: AccessDenied → check IAM policy on the calling principal." >&2
+  echo "Hint: 504/throttle → transient AWS issue; retry the deploy." >&2
+  exit 1
+}
+
 # ── Main function: container image deployment ────────────────────────────────
 
 build_and_deploy_main() {
@@ -208,7 +241,7 @@ build_and_deploy_main() {
     echo "  Env vars from lambda.env: $(echo "$LAMBDA_ENV_JSON" | python3 -c "import sys,json; print(', '.join(json.load(sys.stdin).get('Variables',{}).keys()))")"
   fi
 
-  if aws lambda get-function --function-name "$FUNCTION_MAIN" --region "$REGION" &>/dev/null; then
+  if _lambda_function_exists "$FUNCTION_MAIN"; then
     # Check if existing function is zip-based (can't switch to image in-place)
     EXISTING_PKG=$(aws lambda get-function-configuration \
       --function-name "$FUNCTION_MAIN" --region "$REGION" \
@@ -367,7 +400,7 @@ build_and_deploy_alerts() {
     ENV_ARGS=(--environment "$LAMBDA_ENV_JSON")
   fi
 
-  if aws lambda get-function --function-name "$FUNCTION_ALERTS" --region "$REGION" &>/dev/null; then
+  if _lambda_function_exists "$FUNCTION_ALERTS"; then
     EXISTING_PKG=$(aws lambda get-function-configuration \
       --function-name "$FUNCTION_ALERTS" --region "$REGION" \
       --query "PackageType" --output text 2>/dev/null || echo "Zip")
@@ -439,7 +472,7 @@ deploy_eval_judge() {
     ENV_ARGS=(--environment "$LAMBDA_ENV_JSON")
   fi
 
-  if aws lambda get-function --function-name "$FUNCTION_EVAL_JUDGE" --region "$REGION" &>/dev/null; then
+  if _lambda_function_exists "$FUNCTION_EVAL_JUDGE"; then
     aws lambda update-function-code \
       --function-name "$FUNCTION_EVAL_JUDGE" \
       --image-uri "$IMAGE_URI" \
@@ -504,7 +537,7 @@ deploy_eval_rolling_mean() {
     ENV_ARGS=(--environment "$LAMBDA_ENV_JSON")
   fi
 
-  if aws lambda get-function --function-name "$FUNCTION_EVAL_ROLLING_MEAN" --region "$REGION" &>/dev/null; then
+  if _lambda_function_exists "$FUNCTION_EVAL_ROLLING_MEAN"; then
     aws lambda update-function-code \
       --function-name "$FUNCTION_EVAL_ROLLING_MEAN" \
       --image-uri "$IMAGE_URI" \
@@ -568,7 +601,7 @@ deploy_rationale_clustering() {
     ENV_ARGS=(--environment "$LAMBDA_ENV_JSON")
   fi
 
-  if aws lambda get-function --function-name "$FUNCTION_RATIONALE_CLUSTERING" --region "$REGION" &>/dev/null; then
+  if _lambda_function_exists "$FUNCTION_RATIONALE_CLUSTERING"; then
     aws lambda update-function-code \
       --function-name "$FUNCTION_RATIONALE_CLUSTERING" \
       --image-uri "$IMAGE_URI" \
@@ -652,7 +685,7 @@ _deploy_image_shared_lambda() {
     ENV_ARGS=(--environment "$LAMBDA_ENV_JSON")
   fi
 
-  if aws lambda get-function --function-name "$fn_name" --region "$REGION" &>/dev/null; then
+  if _lambda_function_exists "$fn_name"; then
     aws lambda update-function-code \
       --function-name "$fn_name" \
       --image-uri "$IMAGE_URI" \
