@@ -209,6 +209,77 @@ class TestBuildEvalS3Key:
         assert test_key.startswith("decision_artifacts/_eval_judge_only/")
         assert prod_key != test_key
 
+    def test_capture_date_from_s3_key_overrides_judge_timestamp(self):
+        """ROADMAP P1 line ~83 closure (2026-05-08).
+
+        Pre-fix: ``timestamp`` was the partition source — judge
+        wall-clock falling across UTC midnight bucketed same-day
+        captures into different prefixes (5/6 thesis_update evals
+        landed at ``_eval/2026-05-07/`` instead of ``_eval/2026-05-06/``
+        because their judge runs straddled 17:00 PT 5/6 = 00:00 UTC 5/7).
+
+        Post-fix: ``judged_artifact_s3_key`` is the canonical capture-
+        date source. Judge wall-clock is fallback for in-memory /
+        synthetic artifacts only."""
+        from evals.judge import build_eval_s3_key
+        # Judge stamp says 2026-05-07 (UTC after midnight) but the
+        # capture S3 key says 2026-05-06 (the actual capture date).
+        judge_ts = datetime(2026, 5, 7, 0, 30, tzinfo=timezone.utc)
+        capture_key = "decision_artifacts/2026/05/06/thesis_update:financials:CBOE/run-xyz.json"
+        key = build_eval_s3_key(
+            judged_agent_id="thesis_update:financials:CBOE",
+            run_id="run-xyz",
+            judge_model="claude-haiku-4-5",
+            timestamp=judge_ts,
+            judged_artifact_s3_key=capture_key,
+        )
+        # Partition tracks capture (2026-05-06), NOT judge (2026-05-07).
+        assert "/2026-05-06/" in key
+        assert "/2026-05-07/" not in key
+
+    def test_falls_back_to_timestamp_when_no_s3_key(self):
+        """In-memory / synthetic artifacts that don't carry a capture
+        S3 backref keep using the judge timestamp — preserves behavior
+        for replay paths."""
+        from evals.judge import build_eval_s3_key
+        ts = datetime(2026, 5, 9, 22, 30, tzinfo=timezone.utc)
+        key = build_eval_s3_key(
+            judged_agent_id="ic_cio", run_id="r1",
+            judge_model="claude-haiku-4-5", timestamp=ts,
+            judged_artifact_s3_key=None,
+        )
+        assert "/2026-05-09/" in key
+
+    def test_falls_back_to_timestamp_when_s3_key_does_not_match_pattern(self):
+        """A non-canonical S3 key (e.g. legacy decision_artifacts under
+        a different prefix shape) falls back to judge timestamp without
+        crashing — never silently mispartition by guessing."""
+        from evals.judge import build_eval_s3_key
+        ts = datetime(2026, 5, 9, 22, 30, tzinfo=timezone.utc)
+        key = build_eval_s3_key(
+            judged_agent_id="ic_cio", run_id="r1",
+            judge_model="claude-haiku-4-5", timestamp=ts,
+            judged_artifact_s3_key="some/legacy/path/r1.json",
+        )
+        assert "/2026-05-09/" in key
+
+    def test_invalid_date_components_in_s3_key_fall_back(self):
+        """Defensive: malformed date parts (Feb 31, month 13, etc.)
+        fail the strict parse and fall back to judge timestamp instead
+        of producing an invalid date partition."""
+        from evals.judge import build_eval_s3_key
+        ts = datetime(2026, 5, 9, 22, 30, tzinfo=timezone.utc)
+        # February 31 is invalid; date(2026, 2, 31) raises ValueError.
+        bad_key = "decision_artifacts/2026/02/31/sector_quant:tech/r1.json"
+        key = build_eval_s3_key(
+            judged_agent_id="sector_quant:tech", run_id="r1",
+            judge_model="claude-haiku-4-5", timestamp=ts,
+            judged_artifact_s3_key=bad_key,
+        )
+        # Falls back to judge timestamp; never produces /2026-02-31/.
+        assert "/2026-05-09/" in key
+        assert "/2026-02-31/" not in key
+
 
 # ── evaluate_artifact end-to-end ──────────────────────────────────────────
 
@@ -574,6 +645,10 @@ class TestPersistEvalArtifact:
     def test_partition_date_matches_artifact_timestamp(self, mocked_s3):
         # Re-derives partition from the artifact's stamped timestamp so
         # replays land at the same key regardless of write-time clock.
+        # Note: when ``judged_artifact_s3_key`` is None, the partition
+        # falls back to ``timestamp`` (this test). When the S3 key is
+        # populated with a canonical capture-date prefix, that takes
+        # precedence — see test_partition_uses_capture_date_when_available.
         from evals.judge import persist_eval_artifact
 
         artifact = RubricEvalArtifact(
@@ -590,6 +665,38 @@ class TestPersistEvalArtifact:
             artifact, s3_client=mocked_s3, bucket="alpha-engine-research",
         )
         assert "/2026-04-25/" in key
+
+    def test_partition_uses_capture_date_when_available(self, mocked_s3):
+        """ROADMAP P1 line ~83 closure (2026-05-08): the canonical
+        partition source is the judged artifact's capture date, NOT the
+        eval-judge wall-clock timestamp.
+
+        Pre-fix the 2026-05-06 thesis_update evals landed at
+        ``_eval/2026-05-07/`` because the judge runs straddled UTC
+        midnight (17:00 PT 5/6 = 00:00 UTC 5/7) and the partition
+        tracked judge wall-clock. Post-fix the partition tracks the
+        capture date encoded in ``judged_artifact_s3_key``."""
+        from evals.judge import persist_eval_artifact
+
+        # Judge timestamp says 2026-05-07 (after UTC midnight),
+        # but the capture S3 key is dated 2026-05-06.
+        artifact = RubricEvalArtifact(
+            run_id="run-thesis-1",
+            timestamp="2026-05-07T00:30:00.000Z",
+            judged_agent_id="thesis_update:financials:CBOE",
+            judged_artifact_s3_key="decision_artifacts/2026/05/06/thesis_update:financials:CBOE/run-thesis-1.json",
+            rubric_id="eval_rubric_thesis_update",
+            rubric_version="1.0.0",
+            judge_model="claude-haiku-4-5",
+            dimension_scores=_make_llm_output().dimension_scores,
+            overall_reasoning="x",
+        )
+        key = persist_eval_artifact(
+            artifact, s3_client=mocked_s3, bucket="alpha-engine-research",
+        )
+        # Partition tracks capture (2026-05-06), not judge (2026-05-07).
+        assert "/2026-05-06/" in key
+        assert "/2026-05-07/" not in key
 
 
 # ── RubricEvalLLMOutput stringify defense ─────────────────────────────────
