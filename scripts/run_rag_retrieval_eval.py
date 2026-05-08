@@ -55,9 +55,17 @@ log = logging.getLogger(__name__)
 
 
 def load_queries(path: Path) -> list[EvalQuery]:
-    """Read the YAML test set + validate schema. Raises on malformed
-    entries so the operator fixes curation rather than getting a
-    silently-empty report.
+    """Read the YAML test set + validate schema.
+
+    Skipped entries (``expected_chunk_ids == ["TODO"]``) are silently
+    dropped from the eval — the curate workflow uses TODO as the
+    "skip this query" sentinel when no candidate in top-10 was
+    relevant. Skipping is signal: it means neither retrieval method
+    surfaced the right chunk, OR the corpus doesn't contain it. The
+    eval just doesn't include those queries in the recall numbers.
+
+    Other malformed entries raise loudly so the operator fixes
+    curation rather than getting a silently-empty report.
     """
     if not path.exists():
         raise FileNotFoundError(f"queries file not found: {path}")
@@ -68,6 +76,7 @@ def load_queries(path: Path) -> list[EvalQuery]:
         raise ValueError(f"queries must be a list, got {type(raw_queries).__name__}")
 
     out: list[EvalQuery] = []
+    skipped_todo = 0
     for i, entry in enumerate(raw_queries):
         if not isinstance(entry, dict):
             raise ValueError(f"queries[{i}] must be a dict, got {type(entry).__name__}")
@@ -84,10 +93,15 @@ def load_queries(path: Path) -> list[EvalQuery]:
             raise ValueError(
                 f"queries[{i}] category={category!r} not in {CATEGORIES}"
             )
+        # TODO sentinel = skip; drop from eval silently.
+        if expected_ids == ("TODO",):
+            skipped_todo += 1
+            continue
         if not expected_ids:
             raise ValueError(
                 f"queries[{i}] expected_chunk_ids must be non-empty — "
-                f"a query with no expected chunks is a curation error"
+                f"a query with no expected chunks is a curation error "
+                f"(use [\"TODO\"] sentinel to skip on purpose)"
             )
         out.append(
             EvalQuery(
@@ -96,6 +110,12 @@ def load_queries(path: Path) -> list[EvalQuery]:
                 category=category,
                 note=entry.get("note", ""),
             )
+        )
+    if skipped_todo:
+        log.info(
+            "Skipped %d query/queries with TODO chunk_ids — these stay "
+            "uncurated and don't contribute to the recall numbers.",
+            skipped_todo,
         )
     return out
 

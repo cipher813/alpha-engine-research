@@ -366,3 +366,27 @@ queries:
 
         with pytest.raises(FileNotFoundError):
             load_queries(tmp_path / "nope.yaml")
+
+    def test_todo_sentinel_silently_skipped(self, tmp_path: Path) -> None:
+        """Curate workflow uses ['TODO'] to mean 'no candidate in top-10
+        was relevant — skip this query'. Eval drops them silently.
+        """
+        from scripts.run_rag_retrieval_eval import load_queries
+
+        yaml_text = """
+queries:
+  - query: "real query"
+    expected_chunk_ids: ["uuid-1"]
+    category: "abstract_thesis"
+  - query: "skipped query"
+    expected_chunk_ids: ["TODO"]
+    category: "filing_type"
+  - query: "another real"
+    expected_chunk_ids: ["uuid-2"]
+    category: "date_range"
+"""
+        path = tmp_path / "q.yaml"
+        path.write_text(yaml_text)
+        out = load_queries(path)
+        assert len(out) == 2  # TODO entry dropped
+        assert [q.query for q in out] == ["real query", "another real"]
