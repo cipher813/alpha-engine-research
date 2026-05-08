@@ -38,7 +38,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any, Optional
 
 import boto3
@@ -586,12 +586,44 @@ DEFAULT_EVAL_PREFIX = "decision_artifacts/_eval/"
 pollute the prod corpus the rolling-mean Lambda + dashboard read."""
 
 
+_CAPTURE_DATE_RE = re.compile(
+    r"^decision_artifacts/(\d{4})/(\d{2})/(\d{2})/",
+)
+"""Match the leading ``decision_artifacts/{Y}/{M}/{D}/`` segment of a
+DecisionArtifact S3 key. The capture date lives in this prefix and is
+the authoritative date for partitioning the eval artifact — judge
+wall-clock is not (the judge can run hours/days after capture)."""
+
+
+def _capture_date_from_s3_key(judged_artifact_s3_key: str | None) -> str | None:
+    """Extract ``YYYY-MM-DD`` from a DecisionArtifact S3 key.
+
+    Returns None when the key is None, doesn't match the canonical
+    ``decision_artifacts/{Y}/{M}/{D}/`` shape, or the date components
+    fail strict parse. None means "fall back to judge wall-clock" —
+    matches pre-2026-05-08 behavior for in-memory / synthetic artifacts.
+    """
+    if not judged_artifact_s3_key:
+        return None
+    match = _CAPTURE_DATE_RE.match(judged_artifact_s3_key)
+    if match is None:
+        return None
+    y, m, d = match.groups()
+    try:
+        # strict parse: rejects "2026-13-99" silently from passing through
+        date(int(y), int(m), int(d))
+    except (ValueError, TypeError):
+        return None
+    return f"{y}-{m}-{d}"
+
+
 def build_eval_s3_key(
     *,
     judged_agent_id: str,
     run_id: str,
     judge_model: str,
     timestamp: Optional[datetime] = None,
+    judged_artifact_s3_key: Optional[str] = None,
     prefix: str = DEFAULT_EVAL_PREFIX,
 ) -> str:
     """Build the canonical S3 key for an eval artifact.
@@ -599,20 +631,36 @@ def build_eval_s3_key(
     Path shape:
       ``{prefix}{YYYY-MM-DD}/{judged_agent_id}/{run_id}.{judge_model}.json``
 
+    The date partition is the **capture date** of the judged artifact
+    (extracted from ``judged_artifact_s3_key`` when present), NOT the
+    judge wall-clock. Judge wall-clock falls across UTC midnight when
+    eval-judge runs span the boundary (5/6 17:30 PT → 5/7 00:30 UTC),
+    causing same-day captures to land at different prefixes depending
+    on which side of midnight their evals finished. Pre-fix surface:
+    `thesis_update:*` evals on 5/6 captures landed at
+    ``_eval/2026-05-07/`` while `sector_quant:*` etc. landed at
+    ``_eval/2026-05-06/``. ROADMAP P1 line ~83 closure 2026-05-08.
+
+    Fallback to ``timestamp`` (defaults to now-UTC) when
+    ``judged_artifact_s3_key`` is None or doesn't match the canonical
+    capture-date shape — preserves behavior for in-memory / synthetic
+    artifacts that don't carry the S3 backref.
+
     The ``judge_model`` segment lets Haiku-tier and Sonnet-tier evals
     of the same artifact coexist without clobbering each other.
-
-    The date partition is taken from ``timestamp`` (defaults to
-    now-UTC) so multiple runs on the same calendar day cluster under
-    one prefix. ``run_id`` is the filename stem so retries with the
-    same run_id + judge_model idempotently overwrite.
+    ``run_id`` is the filename stem so retries with the same run_id +
+    judge_model idempotently overwrite.
 
     ``prefix`` lets ``judge_only`` mode redirect outputs to an isolated
     path so test runs don't pollute prod observability. Must end in
     ``/``.
     """
-    ts = timestamp or datetime.now(timezone.utc)
-    date_partition = ts.strftime("%Y-%m-%d")
+    capture_date = _capture_date_from_s3_key(judged_artifact_s3_key)
+    if capture_date is not None:
+        date_partition = capture_date
+    else:
+        ts = timestamp or datetime.now(timezone.utc)
+        date_partition = ts.strftime("%Y-%m-%d")
     return (
         f"{prefix}{date_partition}/"
         f"{judged_agent_id}/{run_id}.{judge_model}.json"
@@ -640,15 +688,21 @@ def persist_eval_artifact(
     production passes None and the helper builds the default client.
     """
     s3 = s3_client or boto3.client("s3")
-    # Re-derive timestamp from the artifact's stamped ISO-8601 so the
-    # partition matches what the artifact records — not "now at write
-    # time" — keeping replay paths stable.
+    # Partition by the judged artifact's capture date (extracted from
+    # ``judged_artifact_s3_key`` inside build_eval_s3_key), falling back
+    # to the artifact's stamped ISO-8601 timestamp when no S3 backref is
+    # available (in-memory / synthetic artifacts). The capture-date
+    # source closes ROADMAP P1 line ~83 — pre-fix the partition tracked
+    # judge wall-clock and fell across UTC midnight, so same-day
+    # captures landed at different prefixes depending on which side of
+    # midnight their evals finished.
     artifact_ts = datetime.fromisoformat(artifact.timestamp.replace("Z", "+00:00"))
     key = build_eval_s3_key(
         judged_agent_id=artifact.judged_agent_id,
         run_id=artifact.run_id,
         judge_model=artifact.judge_model,
         timestamp=artifact_ts,
+        judged_artifact_s3_key=artifact.judged_artifact_s3_key,
         prefix=prefix,
     )
     body = artifact.model_dump_json(indent=2).encode("utf-8")
