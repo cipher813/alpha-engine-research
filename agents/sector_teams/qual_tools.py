@@ -269,17 +269,45 @@ def create_qual_tools(context: dict) -> list:
             from datetime import date, timedelta
 
             _rag_stats["attempted"] += 1
+            # Hybrid retrieval (vector + BM25 blend) — pgvector cosine on
+            # ``embedding`` plus PostgreSQL Full-Text Search (FTS) on
+            # ``content_tsv`` blended at vector_weight=0.7. Strong on both
+            # conceptual queries (vector side) AND exact-term surfaces like
+            # ticker symbols, filing types, and quantitative line items
+            # (keyword side). vector_weight is the PR-4 calibration target;
+            # PR 5 will move it to config if findings call for tuning.
             results = retrieve(
                 query=query,
                 tickers=[ticker],
                 doc_types=[d.strip() for d in doc_types.split(",")],
                 min_date=date.today() - timedelta(days=730),
                 top_k=8,
+                method="hybrid",
+                vector_weight=0.7,
             )
             if not results:
                 return f"No filing data found for {ticker}."
 
             _rag_stats["succeeded"] += 1
+            # Structured INFO log for decision-artifact capture + LangSmith
+            # observability. Per-result component scores let the eval
+            # harness in PR 4 read calibration data straight from prod logs
+            # without needing a side-channel.
+            log.info(
+                "RAG_RETRIEVE ticker=%s method=hybrid vector_weight=0.7 "
+                "top_k=8 n_results=%d component_scores=%s",
+                ticker,
+                len(results),
+                [
+                    {
+                        "chunk_id": r.chunk_id,
+                        "vector_score": r.vector_score,
+                        "keyword_score": r.keyword_score,
+                        "combined_score": r.combined_score,
+                    }
+                    for r in results
+                ],
+            )
             formatted = []
             for r in results:
                 formatted.append(
