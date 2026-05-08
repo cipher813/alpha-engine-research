@@ -101,6 +101,21 @@ jobs:
           CONFIG_REPO_DIR: ${{ github.workspace }}/alpha-engine-config
         run: bash infrastructure/deploy.sh eval_judge
 
+      # Eval-judge Anthropic Message Batches API chain — three Lambdas
+      # (-submit / -poll / -process) that share the main runner's ECR
+      # image with per-Lambda CMD overrides. Same image-share rationale
+      # as eval_judge above. Without this step the Saturday SF batch
+      # chain (PR #136 + alpha-engine-data#189, ROADMAP §1642) would
+      # invoke stale or missing function versions on every code push —
+      # PR #136's initial deploy required a manual `bash deploy.sh
+      # eval_judge_batch` to publish the three functions because this
+      # step was missing.
+      - name: Deploy eval-judge batch chain (submit/poll/process)
+        working-directory: alpha-engine-research
+        env:
+          CONFIG_REPO_DIR: ${{ github.workspace }}/alpha-engine-config
+        run: bash infrastructure/deploy.sh eval_judge_batch
+
       # Cross-week rationale clustering Lambda — same image-share as
       # eval-judge, different CMD entrypoint. Created lazily on first
       # deploy; idempotent thereafter. Auto-deployed on every push to
