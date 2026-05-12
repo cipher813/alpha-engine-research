@@ -465,3 +465,69 @@ queries:
         out = load_queries(path)
         assert len(out) == 2  # TODO entry dropped
         assert [q.query for q in out] == ["real query", "another real"]
+
+
+# ── CLI condition filter ────────────────────────────────────────────────────
+
+
+class TestFilterConditions:
+    """``filter_conditions`` drives the ``--skip-rerank`` / ``--rerank-only``
+    flags. Pinned so the CE / LLM-judge split-process workflow (the
+    operator's local resource-bounded path) stays loadable from tests."""
+
+    def test_default_returns_full_sweep(self) -> None:
+        from scripts.run_rag_retrieval_eval import filter_conditions
+
+        out = filter_conditions(skip_rerank=False, rerank_only=None)
+        assert out == DEFAULT_CONDITIONS
+
+    def test_skip_rerank_drops_rerank_conditions(self) -> None:
+        from scripts.run_rag_retrieval_eval import filter_conditions
+
+        out = filter_conditions(skip_rerank=True, rerank_only=None)
+        assert all(c.rerank is None for c in out)
+        # The original 6 baselines remain.
+        assert len(out) == sum(1 for c in DEFAULT_CONDITIONS if c.rerank is None)
+
+    def test_rerank_only_cross_encoder_keeps_baselines_and_ce(self) -> None:
+        from scripts.run_rag_retrieval_eval import filter_conditions
+
+        out = filter_conditions(skip_rerank=False, rerank_only="cross_encoder")
+        rerank_kinds = sorted({c.rerank for c in out if c.rerank is not None})
+        assert rerank_kinds == ["cross_encoder"]
+        # Non-rerank baselines all preserved.
+        baseline_names_in = {c.name for c in DEFAULT_CONDITIONS if c.rerank is None}
+        baseline_names_out = {c.name for c in out if c.rerank is None}
+        assert baseline_names_in == baseline_names_out
+
+    def test_rerank_only_llm_judge_drops_cross_encoder(self) -> None:
+        from scripts.run_rag_retrieval_eval import filter_conditions
+
+        out = filter_conditions(skip_rerank=False, rerank_only="llm_judge")
+        rerank_kinds = sorted({c.rerank for c in out if c.rerank is not None})
+        assert rerank_kinds == ["llm_judge"]
+
+    def test_skip_rerank_and_rerank_only_mutually_exclusive(self) -> None:
+        from scripts.run_rag_retrieval_eval import filter_conditions
+
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            filter_conditions(skip_rerank=True, rerank_only="cross_encoder")
+
+    def test_unknown_rerank_only_raises(self) -> None:
+        from scripts.run_rag_retrieval_eval import filter_conditions
+
+        with pytest.raises(ValueError, match="not in"):
+            filter_conditions(skip_rerank=False, rerank_only="made_up")
+
+    def test_custom_source_threaded_through(self) -> None:
+        """The harness's ``source=`` kwarg lets tests pin a tiny fixture
+        instead of the full DEFAULT_CONDITIONS — proves filtering is
+        independent of the registered defaults."""
+        from scripts.run_rag_retrieval_eval import filter_conditions
+
+        fixture = (
+            Condition("vec", "vector", None),
+            Condition("ce", "hybrid", 0.7, rerank="cross_encoder", rerank_input_n=10),
+        )
+        out = filter_conditions(skip_rerank=True, rerank_only=None, source=fixture)
+        assert [c.name for c in out] == ["vec"]
