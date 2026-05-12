@@ -25,6 +25,7 @@ import logging
 from datetime import date, datetime
 from typing import Optional
 
+from alpha_engine_lib.universe import filter_to_universe
 from scoring.composite import normalize_conviction
 
 logger = logging.getLogger(__name__)
@@ -498,33 +499,34 @@ def compute_exits_and_open_slots(
     # both downstream prereqs. Drops here are separate from score-based
     # rotations and don't count toward ``max_rotations_per_run`` (they
     # aren't volitional trades, they're reconciliation).
+    # Membership predicate is delegated to ``alpha_engine_lib.universe`` so
+    # this Layer 1 filter and the executor's Layer 2 ``signal_reader`` filter
+    # share one canonical code path (no silent divergence on universe drift).
     if constituents is not None:
         constituents_set = (
             constituents
-            if isinstance(constituents, (set, frozenset))
-            else set(constituents)
+            if isinstance(constituents, frozenset)
+            else frozenset(constituents)
         )
-        surviving_incumbents: list[dict] = []
-        for incumbent in current_population:
+        current_population, dropped_incumbents = filter_to_universe(
+            current_population, constituents_set
+        )
+        for incumbent in dropped_incumbents:
             ticker = incumbent["ticker"]
-            if ticker not in constituents_set:
-                logger.warning(
-                    "[population_selector] dropping incumbent %s — not in current "
-                    "S&P 500+400 constituents. Sector=%s. Grandfathered outlier; "
-                    "executor will not be able to read ArcticDB universe for it.",
-                    ticker,
-                    incumbent.get("sector", "Unknown"),
-                )
-                exits.append({
-                    "type": "UNIVERSE_DROP",
-                    "ticker_out": ticker,
-                    "sector": incumbent.get("sector", "Unknown"),
-                    "reason": "not in current S&P 500+400 constituents",
-                    "score_out": incumbent.get("long_term_score", 0),
-                })
-                continue
-            surviving_incumbents.append(incumbent)
-        current_population = surviving_incumbents
+            logger.warning(
+                "[population_selector] dropping incumbent %s — not in current "
+                "S&P 500+400 constituents. Sector=%s. Grandfathered outlier; "
+                "executor will not be able to read ArcticDB universe for it.",
+                ticker,
+                incumbent.get("sector", "Unknown"),
+            )
+            exits.append({
+                "type": "UNIVERSE_DROP",
+                "ticker_out": ticker,
+                "sector": incumbent.get("sector", "Unknown"),
+                "reason": "not in current S&P 500+400 constituents",
+                "score_out": incumbent.get("long_term_score", 0),
+            })
 
     for incumbent in current_population:
         ticker = incumbent["ticker"]
