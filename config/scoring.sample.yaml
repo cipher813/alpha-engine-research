@@ -1,3 +1,18 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# DESCRIPTIVE / DOCUMENTATION ONLY
+#
+# Production reads the live config from alpha-engine-config/research/scoring.yaml
+# at runtime (bundled into the Research Lambda via deploy.sh). Edits to this
+# .sample file affect ONLY:
+#   1. New-environment bootstrap (copies this template to scoring.yaml), and
+#   2. Public-repo schema documentation for the research scoring surface.
+#
+# Edits here have ZERO effect on the live system. To change a runtime value
+# or weight, the change MUST land in alpha-engine-config (separate private
+# repo). The backtester also auto-writes weights to S3 — see s3://alpha-
+# engine-research/config/scoring_weights.json (consumed at Lambda cold-start).
+# ─────────────────────────────────────────────────────────────────────────────
+
 # Scoring parameters — controls how raw signals become attractiveness scores.
 # Copy to scoring.yaml and customise all values below.
 # These are intentionally naive defaults — tune them to your own research.

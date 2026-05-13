@@ -1,3 +1,16 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# DESCRIPTIVE / DOCUMENTATION ONLY
+#
+# Production reads the live universe from alpha-engine-config/research/universe.yaml
+# at runtime (bundled into the Research Lambda via deploy.sh). Edits to this
+# .sample file affect ONLY:
+#   1. New-environment bootstrap (copies this template to universe.yaml), and
+#   2. Public-repo schema documentation showing the universe.yaml shape.
+#
+# Edits here have ZERO effect on the live system. To add/remove a tracked
+# ticker, the change MUST land in alpha-engine-config (separate private repo).
+# ─────────────────────────────────────────────────────────────────────────────
+
 universe:
   - ticker: AAPL
     sector: Technology
