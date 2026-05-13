@@ -214,6 +214,7 @@ def evaluate_corpus(
     sonnet_evaluated = 0
     skipped_unmapped = 0
     skipped_empty_input = 0
+    skipped_degenerate_input = 0
     metric_emission_failures = 0
     failed: list[dict[str, str]] = []
     persisted_keys: list[str] = []
@@ -298,9 +299,15 @@ def evaluate_corpus(
         # short-circuited (no LLM call), persisted a skip-marker eval
         # with empty dimension_scores + judge_skip_reason set. Don't
         # escalate to Sonnet (nothing to evaluate); count separately
-        # for ops visibility.
+        # for ops visibility. Split between the two skip families:
+        # ``precluded_by_empty_upstream`` (agent never ran) vs
+        # ``degenerate_input`` (agent ran but inputs were degenerate;
+        # added 2026-05-13).
         if haiku_eval.judge_skip_reason is not None:
-            skipped_empty_input += 1
+            if haiku_eval.judge_skip_reason == "degenerate_input":
+                skipped_degenerate_input += 1
+            else:
+                skipped_empty_input += 1
             continue
 
         # Sonnet tier — sampled subset.
@@ -333,10 +340,12 @@ def evaluate_corpus(
 
     logger.info(
         "[eval_orchestrator] done date=%s haiku=%d sonnet=%d "
-        "skipped_unmapped=%d skipped_empty_input=%d failed=%d "
+        "skipped_unmapped=%d skipped_empty_input=%d "
+        "skipped_degenerate_input=%d failed=%d "
         "metric_emission_failures=%d",
         date, haiku_evaluated, sonnet_evaluated, skipped_unmapped,
-        skipped_empty_input, len(failed), metric_emission_failures,
+        skipped_empty_input, skipped_degenerate_input,
+        len(failed), metric_emission_failures,
     )
 
     return {
@@ -346,6 +355,7 @@ def evaluate_corpus(
         "sonnet_evaluated": sonnet_evaluated,
         "skipped_unmapped": skipped_unmapped,
         "skipped_empty_input": skipped_empty_input,
+        "skipped_degenerate_input": skipped_degenerate_input,
         "metric_emission_failures": metric_emission_failures,
         "failed": failed,
         "persisted_keys": persisted_keys,
@@ -464,6 +474,22 @@ def build_batch_plan(
             })
             continue
 
+        # Input-sufficiency gate (added 2026-05-13, ROADMAP P0). Same
+        # short-circuit shape as empty-input above, different rationale:
+        # the agent ran + produced an output, but its inputs were
+        # degenerate (per-rubric definition in evals/judge._is_degenerate_input).
+        # Scoring the structurally-complete-but-fabricated output would
+        # emit a misleading high score into the agent_quality_score CW
+        # stream. Route through client-side skip path so no batch slot
+        # is spent on a call we'd intentionally throw away.
+        from evals.judge import _is_degenerate_input
+        if _is_degenerate_input(artifact):
+            client_side_skips.append({
+                "key": key, "agent_id": artifact.agent_id,
+                "stage": "degenerate_input_skip",
+            })
+            continue
+
         models_for_artifact = (
             [haiku_model, sonnet_model] if force_sonnet_pass
             else [haiku_model]
@@ -537,12 +563,23 @@ def _persist_client_side_skips(
     force_sonnet_pass = plan["force_sonnet_pass"]
     judge_run_id = plan["judge_run_id"]
 
+    skipped_degenerate_input = 0
     for skip in plan["client_side_skips"]:
-        if skip.get("stage") != "empty_input_skip":
+        stage = skip.get("stage")
+        if stage not in ("empty_input_skip", "degenerate_input_skip"):
             # ``load`` failures stay in ``failed`` — propagated by the
             # caller into the SF result.
             failed.append(skip)
             continue
+        # Map stage → judge_skip_reason. Same skip-eval emit shape;
+        # different reason recorded so operators can distinguish
+        # "agent never ran" from "agent ran but inputs were degenerate"
+        # in the persisted eval payload + SF result counters.
+        skip_reason = (
+            "precluded_by_empty_upstream"
+            if stage == "empty_input_skip"
+            else "degenerate_input"
+        )
         agent_id = skip["agent_id"]
         capture_key = skip["key"]
         try:
@@ -580,6 +617,7 @@ def _persist_client_side_skips(
                 judge_model=jm,
                 judge_run_id=judge_run_id,
                 judged_artifact_s3_key=capture_key,
+                skip_reason=skip_reason,
             )
             try:
                 persisted_key = persist_eval_artifact(
@@ -589,7 +627,10 @@ def _persist_client_side_skips(
                     prefix=eval_prefix,
                 )
                 persisted.append(persisted_key)
-                skipped_empty_input += 1
+                if skip_reason == "degenerate_input":
+                    skipped_degenerate_input += 1
+                else:
+                    skipped_empty_input += 1
             except Exception as exc:  # noqa: BLE001
                 logger.exception(
                     "[batch_skip_persist] persist failed for "
@@ -603,7 +644,7 @@ def _persist_client_side_skips(
                     "error": str(exc),
                 })
 
-    return skipped_empty_input, persisted, failed
+    return skipped_empty_input, skipped_degenerate_input, persisted, failed
 
 
 def submit_batch(

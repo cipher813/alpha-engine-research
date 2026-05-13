@@ -267,17 +267,47 @@ def _make_skip_eval_artifact(
     judge_model: str,
     judge_run_id: str,
     judged_artifact_s3_key: Optional[str],
+    skip_reason: str = "precluded_by_empty_upstream",
+    overall_reasoning: Optional[str] = None,
 ) -> RubricEvalArtifact:
-    """Build the skip-marker eval for an artifact whose ``agent_output``
-    is empty (graph bypassed the agent — see comment in
-    ``evaluate_artifact``). Shared by the sync + batch paths.
+    """Build the skip-marker eval for an artifact that should not be
+    scored by the rubric. Shared by the sync + batch paths.
 
-    Asking the judge to score "no rationale, no citations, no
-    synthesis" produces uniform 1/1/1/1 outputs that drag the
-    rolling-mean alarm threshold toward the floor without any real
-    quality regression. Short-circuit BEFORE the LLM call so we pay
-    no token cost and emit no spurious low scores.
+    Two skip reasons supported:
+
+    * ``precluded_by_empty_upstream`` (existing) — ``agent_output`` is
+      empty because the graph bypassed the agent (typically sector_qual
+      or sector_peer_review when upstream quant_top5 is empty).
+
+    * ``degenerate_input`` (added 2026-05-13) — the agent ran and
+      produced an output, but its inputs were degenerate (e.g.
+      thesis_update fired on a held ticker with empty prior summary,
+      zero news, null analyst data). Scoring "thesis_completeness=5"
+      on such a run is misleading: the output IS complete-looking but
+      it's fabrication from nothing, not a substantive update. See
+      :func:`_is_degenerate_input` for per-rubric definitions.
+
+    In both cases, short-circuiting BEFORE the LLM call means we pay
+    no token cost and emit no spurious scores into the CW
+    ``agent_quality_score`` metric stream that drives the
+    rolling-4-week alarm.
     """
+    default_reasoning = {
+        "precluded_by_empty_upstream": (
+            "Judge short-circuited: captured agent_output is empty "
+            "(graph bypassed the agent — typically sector_qual or "
+            "sector_peer_review when upstream quant_top5 is empty). "
+            "No work to evaluate; not a quality regression."
+        ),
+        "degenerate_input": (
+            "Judge short-circuited: input_data_snapshot is degenerate "
+            "for this rubric (see evals/judge._is_degenerate_input for "
+            "per-rubric definitions). Scoring the output would conflate "
+            "structural completeness with substantive content — emitting "
+            "a high score into the CW metric stream would mask the "
+            "upstream substrate gap that produced the degenerate input."
+        ),
+    }
     return RubricEvalArtifact(
         run_id=artifact.run_id,
         judge_run_id=judge_run_id,
@@ -288,14 +318,103 @@ def _make_skip_eval_artifact(
         rubric_version=rubric_version,
         judge_model=judge_model,
         dimension_scores=[],
-        overall_reasoning=(
-            "Judge short-circuited: captured agent_output is empty "
-            "(graph bypassed the agent — typically sector_qual or "
-            "sector_peer_review when upstream quant_top5 is empty). "
-            "No work to evaluate; not a quality regression."
+        overall_reasoning=overall_reasoning or default_reasoning.get(
+            skip_reason,
+            f"Judge short-circuited: {skip_reason}.",
         ),
-        judge_skip_reason="precluded_by_empty_upstream",
+        judge_skip_reason=skip_reason,
     )
+
+
+def _is_degenerate_input(artifact: DecisionArtifact) -> bool:
+    """Return True if the artifact's ``input_data_snapshot`` is
+    degenerate for its rubric type — i.e. the inputs are so empty that
+    scoring the output measures nothing real.
+
+    Per-rubric definitions (added 2026-05-13 alongside the L83
+    spot-check P0 — substrate-side fix in
+    ``graph.research_graph._pre_fetch_held_enrichment`` for thesis_update):
+
+    * **thesis_update:** prior_thesis.thesis_summary empty AND
+      news_data.articles empty AND analyst_data null. The agent has
+      nothing to update against and is fabricating bull/bear cases on
+      the trigger alone.
+
+    * **sector_quant / sector_qual:** sector_tickers_count == 0 OR
+      technical_scores_team empty (sector_quant) /
+      sector_population empty (sector_qual). No candidates to screen.
+
+    * **sector_peer_review:** quant_picks empty AND qual_picks empty.
+      Nothing to merge.
+
+    * **macro_economist / ic_cio:** never degenerate. macro always has
+      a regime call; ic_cio always has a candidate slate of some
+      shape — return False unconditionally. Explicit pass-through so
+      a future rubric author can't accidentally widen the gate.
+
+    Unknown agent types: return False (don't skip — fall through to
+    the normal rubric path).
+    """
+    snap = artifact.input_data_snapshot or {}
+    agent_id = artifact.agent_id
+
+    if agent_id.startswith("thesis_update:"):
+        prior = snap.get("prior_thesis") or {}
+        if not isinstance(prior, dict):
+            prior = {}
+        prior_summary = (prior.get("thesis_summary") or "").strip()
+        news = snap.get("news_data") or {}
+        if not isinstance(news, dict):
+            news = {}
+        news_articles = news.get("articles") or []
+        analyst = snap.get("analyst_data")
+        # Treat a skeleton analyst dict (all None / all empty lists) as
+        # degenerate — ``fetch_analyst_consensus`` returns the skeleton
+        # when FMP is unavailable. ``bool(value)`` short-circuits both
+        # ``None`` and empty containers; we want at least one field with
+        # actual content.
+        analyst_is_substantive = (
+            isinstance(analyst, dict)
+            and any(
+                bool(analyst.get(k))
+                for k in (
+                    "consensus_rating",
+                    "mean_target",
+                    "num_analysts",
+                    "rating_changes",
+                    "earnings_surprises",
+                )
+            )
+        )
+        return not prior_summary and not news_articles and not analyst_is_substantive
+
+    if agent_id.startswith("sector_quant:"):
+        # Degenerate iff sector is empty AND technical_scores are
+        # empty. Use ``sector_tickers`` list length as the authoritative
+        # signal — older snapshots may not have ``sector_tickers_count``.
+        has_tickers = bool(
+            snap.get("sector_tickers")
+            or int(snap.get("sector_tickers_count") or 0) > 0
+        )
+        has_scores = bool(snap.get("technical_scores_team"))
+        return not (has_tickers or has_scores)
+
+    if agent_id.startswith("sector_qual:"):
+        has_tickers = bool(
+            snap.get("sector_tickers")
+            or snap.get("sector_population")
+            or int(snap.get("sector_tickers_count") or 0) > 0
+        )
+        return not has_tickers
+
+    if agent_id.startswith("sector_peer_review:"):
+        return (
+            not (snap.get("quant_picks") or [])
+            and not (snap.get("qual_picks") or [])
+        )
+
+    # macro_economist + ic_cio + anything else: never degenerate.
+    return False
 
 
 # ── Tool-use spec for the batch path ──────────────────────────────────────
@@ -523,6 +642,28 @@ def evaluate_artifact(
             judge_model=judge_model,
             judge_run_id=judge_run_id,
             judged_artifact_s3_key=judged_artifact_s3_key,
+            skip_reason="precluded_by_empty_upstream",
+        )
+
+    # Input-sufficiency gate (added 2026-05-13, ROADMAP P0).
+    # If the inputs are degenerate (per-rubric definition), scoring the
+    # structurally-complete-but-fabricated output would emit a
+    # misleading high score into the CW metric stream that drives the
+    # quality-regression alarm. Skip BEFORE the LLM call.
+    if _is_degenerate_input(artifact):
+        logger.info(
+            "[eval_judge] degenerate_input skip — agent_id=%s "
+            "(see evals/judge._is_degenerate_input for per-rubric definition)",
+            artifact.agent_id,
+        )
+        return _make_skip_eval_artifact(
+            artifact,
+            rubric_name=rubric_name,
+            rubric_version=loaded_prompt.version,
+            judge_model=judge_model,
+            judge_run_id=judge_run_id,
+            judged_artifact_s3_key=judged_artifact_s3_key,
+            skip_reason="degenerate_input",
         )
 
     rendered = _render_rubric(artifact, loaded_prompt)
