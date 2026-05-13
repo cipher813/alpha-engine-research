@@ -13,6 +13,7 @@ All 6 teams run in parallel via LangGraph Send().
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -306,6 +307,89 @@ def _check_regime_change(
     return False
 
 
+def _augment_news_summary_with_rag(
+    *,
+    ticker: str,
+    triggers: list[str],
+    base_news_summary: str,
+) -> str:
+    """Augment the headline-only news_summary with RAG-retrieved news +
+    filings excerpts. Returns the combined string.
+
+    Wave 1 PR E (data-revamp-260513.md): the thesis_update agent
+    historically saw only 5 bullet headlines from the snapshot's
+    news_data. With the news → RAG ingest pipeline live (data PR A.3
+    #229), we can pull semantically-relevant excerpts for the ticker
+    over the last 14 days — the LLM gets narrative depth, not just
+    headlines.
+
+    Gated behind ``THESIS_UPDATE_RAG_CONTEXT_ENABLED=true`` (default
+    off) so production behavior is unchanged until parallel
+    observation validates the augmented prompt's effect on output
+    quality. Failure of either RAG retrieval call degrades gracefully
+    to the base headline summary — never crashes the thesis update.
+
+    Query strategy: build a per-trigger natural-language query so the
+    retriever surfaces the most relevant context for what materially
+    changed today.
+    """
+    try:
+        from agents.sector_teams.rag_retrieval_tools import (
+            search_filings_impl,
+            search_news_impl,
+        )
+    except ImportError as e:
+        log.warning(
+            "[thesis_update:%s] RAG augment skipped — import error: %s",
+            ticker, e,
+        )
+        return base_news_summary
+
+    # Build a context-rich query from the material triggers. E.g.
+    # ['price_move_gt_2atr', 'earnings_beat'] → 'price move earnings
+    # beat'. Falls back to ticker name when triggers absent.
+    trigger_terms = " ".join(t.replace("_", " ") for t in triggers)
+    rag_query = (
+        f"{ticker} {trigger_terms}".strip() if trigger_terms else ticker
+    )
+
+    pieces: list[str] = []
+    if base_news_summary:
+        pieces.append(base_news_summary)
+
+    try:
+        news_excerpts = search_news_impl(
+            ticker, rag_query, days_back=14, top_k=5,
+        )
+        # search_news_impl returns a "No recent news found" string on
+        # empty; skip those.
+        if news_excerpts and not news_excerpts.startswith("No recent news"):
+            pieces.append(
+                "Recent news context (from RAG, last 14 days):\n"
+                + news_excerpts
+            )
+    except Exception as e:
+        log.warning(
+            "[thesis_update:%s] RAG news augment failed: %s", ticker, e,
+        )
+
+    try:
+        filings_excerpts = search_filings_impl(
+            ticker, rag_query, days_back=90, top_k=3,
+        )
+        if filings_excerpts and not filings_excerpts.startswith("No filings"):
+            pieces.append(
+                "Recent filings context (from RAG, last 90 days):\n"
+                + filings_excerpts
+            )
+    except Exception as e:
+        log.warning(
+            "[thesis_update:%s] RAG filings augment failed: %s", ticker, e,
+        )
+
+    return "\n\n".join(pieces) if pieces else base_news_summary
+
+
 def _update_thesis_for_held_stock(
     ticker: str,
     triggers: list[str],
@@ -344,6 +428,21 @@ def _update_thesis_for_held_stock(
             news_summary = "\n".join(
                 f"- {a.get('headline', '')}" for a in articles[:5]
             )
+
+    # Wave 1 PR E (data-revamp-260513.md): optional RAG-context injection.
+    # When THESIS_UPDATE_RAG_CONTEXT_ENABLED=true (default OFF for
+    # parallel-observation cutover), augment news_summary with RAG-
+    # retrieved news + filings excerpts so the LLM has narrative depth
+    # beyond the headline-only snapshot.
+    #
+    # Default OFF preserves current production behavior — flip ON in
+    # Lambda env to A/B against the headline-only baseline.
+    if os.environ.get("THESIS_UPDATE_RAG_CONTEXT_ENABLED", "").lower() == "true":
+        news_summary = _augment_news_summary_with_rag(
+            ticker=ticker,
+            triggers=triggers,
+            base_news_summary=news_summary,
+        )
 
     analyst_summary = ""
     if analyst_data:

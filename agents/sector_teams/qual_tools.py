@@ -377,6 +377,17 @@ def create_qual_tools(context: dict) -> list:
             })
         return json.dumps({"sector": sector, "insights": items})
 
+    # Wave 1 PR E (data-revamp-260513.md): RAG retrieval tools that
+    # consume the producer-side substrate (news → RAG via PR A.3,
+    # filings via existing 8-K/10-K/Q pipelines + PR B Form 4
+    # parquet). search_news/filings/transcripts wrap
+    # alpha_engine_lib.rag.retrieve with doc_type-scoped queries +
+    # shared stats + structured INFO logging.
+    from agents.sector_teams.rag_retrieval_tools import (
+        build_rag_retrieval_tools,
+    )
+    rag_tools = build_rag_retrieval_tools()
+
     return [
         get_news_articles,
         get_analyst_reports,
@@ -388,4 +399,5 @@ def create_qual_tools(context: dict) -> list:
         query_filings,
         get_lessons,
         get_sector_insights,
+        *rag_tools,  # search_news, search_filings, search_transcripts
     ]
