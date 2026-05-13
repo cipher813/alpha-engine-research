@@ -181,6 +181,16 @@ def create_quant_tools(context: dict) -> list:
                 results[t] = {"error": str(e)}
         return json.dumps(results)
 
+    # Wave 1 PR E (data-revamp-260513.md): RAG retrieval tools so the
+    # quant agent can read news context that contextualizes a technical
+    # setup (e.g. "RSI oversold — but what news happened in the last
+    # week?"). Filings + transcripts available too for cross-check on
+    # fundamental triggers behind technical patterns.
+    from agents.sector_teams.rag_retrieval_tools import (
+        build_rag_retrieval_tools,
+    )
+    rag_tools = build_rag_retrieval_tools()
+
     return [
         screen_by_volume,
         get_technical_indicators,
@@ -188,4 +198,5 @@ def create_quant_tools(context: dict) -> list:
         get_balance_sheet,
         get_price_performance,
         get_options_flow,
+        *rag_tools,
     ]
