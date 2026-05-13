@@ -33,7 +33,42 @@ def _make_capture_dict(
     *,
     run_id: str = "run-1",
     agent_output: dict | None = None,
+    input_data_snapshot: dict | None = None,
 ) -> dict:
+    """Builds a DecisionArtifact dict for test fixtures.
+
+    The ``input_data_snapshot`` defaults to a per-rubric "non-degenerate"
+    shape (post-2026-05-13 input-sufficiency gate) so the existing
+    batch-plan tests' shape contracts (n mapped → n requests) still
+    hold. Tests that want to exercise the degenerate-input skip path
+    pass an explicit empty/sparse snapshot.
+    """
+    if input_data_snapshot is None:
+        if agent_id.startswith("sector_quant:"):
+            input_data_snapshot = {
+                "sector_tickers": ["AAPL"],
+                "sector_tickers_count": 1,
+                "technical_scores_team": {"AAPL": {"rsi_14": 55}},
+            }
+        elif agent_id.startswith("sector_qual:"):
+            input_data_snapshot = {
+                "sector_tickers": ["AAPL"],
+                "sector_tickers_count": 1,
+                "sector_population": ["AAPL"],
+            }
+        elif agent_id.startswith("sector_peer_review:"):
+            input_data_snapshot = {
+                "quant_picks": [{"ticker": "AAPL"}],
+                "qual_picks": [{"ticker": "AAPL"}],
+            }
+        elif agent_id.startswith("thesis_update:"):
+            input_data_snapshot = {
+                "prior_thesis": {"thesis_summary": "real thesis text"},
+                "news_data": {"articles": [{"headline": "h"}]},
+                "analyst_data": {"consensus_rating": "buy"},
+            }
+        else:
+            input_data_snapshot = {"k": "v"}
     return DecisionArtifact(
         run_id=run_id,
         timestamp="2026-05-09T22:30:00.000Z",
@@ -43,7 +78,7 @@ def _make_capture_dict(
             system_prompt="<see config/prompts>",
             user_prompt="<rendered>",
         ),
-        input_data_snapshot={"k": "v"},
+        input_data_snapshot=input_data_snapshot,
         input_data_summary="k=v",
         agent_output=agent_output if agent_output is not None else {"out": "ok"},
     ).model_dump()
@@ -566,10 +601,11 @@ class TestProcessBatchResults:
             date="2026-05-09", bucket="alpha-engine-research",
             s3_client=mocked_s3,
         )
-        skip_count, persisted, failed = _persist_client_side_skips(
+        skip_count, degenerate_count, persisted, failed = _persist_client_side_skips(
             plan, s3=mocked_s3, bucket="alpha-engine-research",
         )
         assert skip_count == 1
+        assert degenerate_count == 0
         assert len(failed) == 0
         # The skip-marker eval is at decision_artifacts/_eval/{date}/
         # {agent_id}/{run_id}.{judge_model}.json. Date partition is

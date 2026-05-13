@@ -126,7 +126,7 @@ def handler(event, context):
 
     import boto3
     s3 = boto3.client("s3")
-    skip_count, _, skip_failed = _persist_client_side_skips(
+    skip_count, degenerate_skip_count, _, skip_failed = _persist_client_side_skips(
         plan, s3=s3, bucket=bucket,
     )
 
@@ -142,9 +142,10 @@ def handler(event, context):
 
     logger.info(
         "[eval_judge_submit_handler] done status=%s batch_id=%s "
-        "request_count=%d empty_input_skips=%d skip_failed=%d",
+        "request_count=%d empty_input_skips=%d degenerate_input_skips=%d "
+        "skip_failed=%d",
         status, submit_result["batch_id"], submit_result["request_count"],
-        skip_count, len(skip_failed),
+        skip_count, degenerate_skip_count, len(skip_failed),
     )
 
     return {
@@ -158,6 +159,7 @@ def handler(event, context):
             "capture_keys_total": plan["capture_keys_total"],
             "skipped_unmapped": plan["skipped_unmapped"],
             "skipped_empty_input_persisted": skip_count,
+            "skipped_degenerate_input_persisted": degenerate_skip_count,
             "skip_failed": skip_failed,
             "force_sonnet_pass": force_sonnet_pass,
             "judge_only": judge_only,
