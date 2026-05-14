@@ -1,21 +1,34 @@
 """
-Research Graph — Sector-Team Architecture with LangGraph Send() fan-out.
+Research Graph — Sector-Team Architecture with serial macro + LangGraph
+Send() fan-out to sectors.
 
-Topology:
+Topology (regime-v3 Stage B, 2026-05-14):
   fetch_data
-  → dispatch_all        (Send: 6 sector teams + macro + exit evaluator — all parallel)
-  → merge_results       (fan-in: team picks + macro + exits → compute open slots)
-  → score_aggregator    (composite scores for team recommendations)
-  → cio_node            (single Sonnet batch: evaluate all picks, select top N)
+  → macro_economist_node       (serial — writes market_regime, sector_modifiers,
+                                sector_ratings to state for sectors to read)
+  → dispatch_sectors_and_exit  (Send: 6 sector teams + exit evaluator — parallel)
+  → merge_results              (fan-in: team picks + exits → compute open slots)
+  → score_aggregator           (composite scores for team recommendations)
+  → cio_node                   (single Sonnet batch: evaluate all picks, select top N)
   → population_entry_handler
   → consolidator_node
   → archive_writer
   → email_sender_node
   → END
 
+Why macro is serial (was: parallel with sectors + exit):
+  Send() snapshots state at dispatch time. Pre-Stage-B sector teams
+  received ``market_regime="neutral"`` regardless of what macro
+  eventually classified — macro hadn't yet written to state when
+  Send() captured it. Serializing macro upstream means sector teams
+  see the real regime + sector_modifiers + sector_ratings in their
+  ReAct context. Trade-off: +1-2 min Saturday SF wall-clock for
+  structurally-guaranteed regime awareness across all sector LLM
+  analyses.
+
 Multi-agent patterns:
   - 6 sector teams: quant (ReAct) → qual (ReAct) → peer review → 2-3 recommendations
-  - Macro economist: regime + sector ratings with reflection loop
+  - Macro economist: regime + sector ratings with reflection loop, runs SERIALLY before sectors
   - CIO: batch evaluation on 4 dimensions (team conviction, macro alignment, portfolio fit, catalyst specificity)
   - Thesis maintenance: triggered by material events only
 """
@@ -762,31 +775,40 @@ def fetch_data(state: ResearchState) -> dict:
     }
 
 
-def dispatch_all(state: ResearchState) -> list:
+def dispatch_sectors_and_exit(state: ResearchState) -> list:
     """
-    Fan-out via Send(): launch 6 sector teams + macro + exit evaluator in parallel.
-    Each receives a subset of shared state.
+    Fan-out via Send(): launch 6 sector teams + exit evaluator in parallel.
+
+    Macro economist no longer dispatched here — it runs SERIALLY upstream
+    of this dispatcher per regime-v3 Stage B. The serialization ensures
+    sector teams see the actual ``market_regime`` + ``sector_modifiers``
+    + ``sector_ratings`` macro computed, rather than the default
+    ``"neutral"`` they would receive if macro ran in parallel and
+    finished after Send() snapshotted state. Pre-Stage-B, sector team
+    prompts received ``{market_regime}=neutral`` regardless of what
+    macro eventually classified — Send() captures state at dispatch.
+
+    Each Send receives a subset of shared state including the macro-
+    computed regime context.
     """
     sends = []
 
-    # 6 sector teams
+    # 6 sector teams — now see macro's actual outputs via state
     for team_id in ALL_TEAM_IDS:
         sends.append(Send("sector_team_node", {
             **state,
             "team_id": team_id,
         }))
 
-    # Macro economist
-    sends.append(Send("macro_economist_node", {
-        **state,
-    }))
-
-    # Exit evaluator
+    # Exit evaluator — parallel with sectors; independent of regime
     sends.append(Send("exit_evaluator_node", {
         **state,
     }))
 
-    logger.info("[dispatch] sending %d parallel tasks (6 teams + macro + exits)", len(sends))
+    logger.info(
+        "[dispatch] sending %d parallel tasks (6 teams + exits) — regime=%s",
+        len(sends), state.get("market_regime", "neutral"),
+    )
     return sends
 
 
@@ -2442,19 +2464,44 @@ def _build_signals_payload(state: ResearchState) -> dict:
 
 def build_graph() -> StateGraph:
     """
-    Sector-team graph with Send() fan-out.
+    Sector-team graph with serial macro upstream + Send() fan-out to sectors.
 
-    Topology:
-      fetch_data → dispatch_all (Send: 6 teams + macro + exit)
-      → merge_results → score_aggregator → cio_node
-      → population_entry_handler → consolidator → archive → email → END
+    Topology (regime-v3 Stage B, 2026-05-14):
+      fetch_data
+        → macro_economist_node                (serial — runs alone)
+        → dispatch_sectors_and_exit           (Send: 6 teams + exit)
+        → merge_results
+        → score_aggregator → cio_node → population_entry_handler
+        → consolidator → archive → email → END
+
+    Why macro is serial (was: parallel with sectors + exit):
+      Send() snapshots state at dispatch time. Before Stage B, sector
+      teams received ``market_regime="neutral"`` regardless of what
+      macro_economist eventually classified, because macro hadn't yet
+      written to state when Send() captured it. Making macro serial
+      upstream means sector teams see the real regime call +
+      sector_modifiers + sector_ratings in their ReAct context. The
+      4-class regime taxonomy (bull/neutral/caution/bear) now flows
+      into every per-stock pick decision.
+
+    Trade-off: +1 macro-agent runtime (~1-2 min with reflection loop)
+    on Saturday SF wall-clock vs. structurally-guaranteed regime
+    awareness across all sector LLM analyses. Saturday is not latency-
+    critical; the trade is correct.
+
+    Macro fallback:
+      run_macro_agent_with_reflection's LLM-failure path returns the
+      default-neutral payload, so a macro crash degrades to "no regime
+      tilt" rather than halting the graph. This was acceptable when
+      macro ran in parallel; now structurally critical because the
+      whole pipeline waits on it.
     """
     graph = StateGraph(ResearchState)
 
     # Nodes
     graph.add_node("fetch_data", fetch_data)
-    graph.add_node("sector_team_node", sector_team_node)
     graph.add_node("macro_economist_node", macro_economist_node)
+    graph.add_node("sector_team_node", sector_team_node)
     graph.add_node("exit_evaluator_node", exit_evaluator_node)
     graph.add_node("merge_results", merge_results_node)
     graph.add_node("score_aggregator", score_aggregator)
@@ -2467,12 +2514,15 @@ def build_graph() -> StateGraph:
     # Entry point
     graph.set_entry_point("fetch_data")
 
-    # Fan-out: fetch_data → dispatch (sends to teams + macro + exit evaluator)
-    graph.add_conditional_edges("fetch_data", dispatch_all)
+    # Serial: fetch_data → macro_economist_node (writes market_regime,
+    # sector_modifiers, sector_ratings into state for sectors to read).
+    graph.add_edge("fetch_data", "macro_economist_node")
 
-    # Fan-in: all three Send targets converge to merge_results
+    # Fan-out AFTER macro: dispatch to 6 sector teams + exit evaluator.
+    graph.add_conditional_edges("macro_economist_node", dispatch_sectors_and_exit)
+
+    # Fan-in: sector + exit Sends converge to merge_results.
     graph.add_edge("sector_team_node", "merge_results")
-    graph.add_edge("macro_economist_node", "merge_results")
     graph.add_edge("exit_evaluator_node", "merge_results")
 
     # Sequential post-merge
