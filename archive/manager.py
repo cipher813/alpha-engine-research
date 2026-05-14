@@ -292,6 +292,49 @@ class ArchiveManager:
         self._s3_put(f"signals/{trading_date}/signals.json", body)
         self._s3_put("signals/latest.json", body)
 
+    def load_regime_substrate(self) -> dict | None:
+        """Load the most recent regime substrate artifact via the
+        canonical ``regime/latest.json`` sidecar pointer.
+
+        Producer: ``alpha-engine-predictor-regime-substrate`` Lambda,
+        runs weekly in the Saturday SF ``RegimeSubstrate`` state
+        (between RAGIngestion and Research). Carries HMM posteriors +
+        composite intensity_z + BOCPD change_signal + guardrail flags
+        + raw macro features. The macro economist agent (Stage C)
+        consumes this as a strong prior; macro agent remains the final
+        regime authority.
+
+        Resolves the dated artifact via the latest.json sidecar to
+        handle same-day re-runs cleanly. Returns ``None`` if the
+        substrate has not been written yet (pre-deploy state, or the
+        SF state's Catch[States.ALL] tripped non-blocking and Research
+        ran without a fresh substrate).
+
+        Non-fatal — when the substrate is unavailable, the macro agent
+        falls back to its prior behavior (LLM + post-LLM guardrails
+        only). Stage C is observe-only at the substrate-influences-LLM
+        layer; the macro agent's final regime call is still
+        authoritative for downstream consumers.
+        """
+        try:
+            sidecar_raw = self._s3_get("regime/latest.json")
+            if not sidecar_raw:
+                log.info("regime substrate latest.json missing — macro agent runs without substrate prior")
+                return None
+            sidecar = json.loads(sidecar_raw)
+            artifact_key = sidecar.get("artifact_key")
+            if not artifact_key:
+                log.warning("regime substrate latest.json lacks artifact_key")
+                return None
+            artifact_raw = self._s3_get(artifact_key)
+            if not artifact_raw:
+                log.warning("regime substrate artifact %s missing despite latest.json reference", artifact_key)
+                return None
+            return json.loads(artifact_raw)
+        except Exception as e:
+            log.warning("regime substrate load failed: %s — macro agent runs without prior", e)
+            return None
+
     def load_predictions_json(self) -> dict[str, dict]:
         """
         Load predictor/predictions/latest.json from S3.
