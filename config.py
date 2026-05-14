@@ -113,20 +113,6 @@ _COHERENCE_GATE_CFG: dict = _AGGREGATOR_CFG.get("macro_sector_coherence_gate", {
 SECTOR_COHERENCE_GATE_ENABLED: bool = bool(_COHERENCE_GATE_CFG.get("enabled", False))
 SECTOR_COHERENCE_UW_MIN_SCORE: float = float(_COHERENCE_GATE_CFG.get("uw_min_score", 80.0))
 
-# ── Regime-conditional narrative penalty (2026-05-13) ────────────────────────
-# Scans qual analyst's bull_case text for defensive vs growth markers; in BULL
-# regime, defensive narratives get penalized and growth narratives bonused.
-# Inverted in BEAR. NEUTRAL applies no adjustment.
-_NARRATIVE_PENALTY_CFG: dict = _AGGREGATOR_CFG.get("narrative_regime_penalty", {})
-NARRATIVE_PENALTY_ENABLED: bool = bool(_NARRATIVE_PENALTY_CFG.get("enabled", False))
-NARRATIVE_BULL_DEFENSIVE_MARKERS: list[str] = list(_NARRATIVE_PENALTY_CFG.get("bull_defensive_markers", []))
-NARRATIVE_BULL_GROWTH_MARKERS: list[str] = list(_NARRATIVE_PENALTY_CFG.get("bull_growth_markers", []))
-NARRATIVE_BULL_DEFENSIVE_PENALTY: float = float(_NARRATIVE_PENALTY_CFG.get("bull_defensive_penalty", 12.0))
-NARRATIVE_BULL_GROWTH_BONUS: float = float(_NARRATIVE_PENALTY_CFG.get("bull_growth_bonus", 5.0))
-NARRATIVE_BEAR_DEFENSIVE_BONUS: float = float(_NARRATIVE_PENALTY_CFG.get("bear_defensive_bonus", 8.0))
-NARRATIVE_BEAR_GROWTH_PENALTY: float = float(_NARRATIVE_PENALTY_CFG.get("bear_growth_penalty", 8.0))
-NARRATIVE_MAX_MARKER_HITS: int = int(_NARRATIVE_PENALTY_CFG.get("max_marker_hits", 3))
-
 # ── Factor blend (Phase 3 of factor substrate, 260513 plan) ──────────────────
 # Regime-conditional blend of the 4 factor composites (quality / momentum /
 # value / low_vol — produced by scoring.factor_scoring) into the composite
@@ -141,6 +127,19 @@ FACTOR_BLEND_REGIME_WEIGHTS: dict = {
     "bear": dict(_FACTOR_BLEND_CFG.get("bear", {})),
     "neutral": dict(_FACTOR_BLEND_CFG.get("neutral", {})),
 }
+
+# ── Factor quality floor (Phase 4 of factor substrate, 260513 plan) ──────────
+# Structural floor on within-sector quality_score percentile, applied at the
+# _build_signals_payload buy_candidates construction step. Blocks NEW ENTER
+# signals whose quality_score is below the floor — drops bottom-decile-quality
+# names regardless of agent sentiment. Replaces the dormant Piotroski-lite
+# scanner-side `apply_quality_filter` retired in this PR.
+_FACTOR_QUALITY_FLOOR_CFG: dict = _AGGREGATOR_CFG.get("factor_quality_floor", {})
+FACTOR_QUALITY_FLOOR_ENABLED: bool = bool(_FACTOR_QUALITY_FLOOR_CFG.get("enabled", False))
+FACTOR_QUALITY_FLOOR_MIN_PERCENTILE: float = float(_FACTOR_QUALITY_FLOOR_CFG.get("min_percentile", 10.0))
+FACTOR_QUALITY_FLOOR_EXEMPT_SECTORS: list[str] = list(
+    _FACTOR_QUALITY_FLOOR_CFG.get("exempt_sectors", ["Financial", "Real Estate", "Utilities"])
+)
 
 # ── Scanner ───────────────────────────────────────────────────────────────────
 SCANNER_CFG: dict = _cfg["scanner"]
@@ -161,27 +160,6 @@ DEEP_VALUE_MAX_ATR_PCT: float = SCANNER_CFG.get("deep_value_max_atr_pct", 12.0)
 MAX_DEBT_TO_EQUITY: float = SCANNER_CFG.get("max_debt_to_equity", 3.0)
 MIN_CURRENT_RATIO: float = SCANNER_CFG.get("min_current_ratio", 0.5)
 BALANCE_SHEET_EXEMPT_SECTORS: list[str] = SCANNER_CFG.get("balance_sheet_exempt_sectors", ["Financial", "Real Estate"])
-
-# ── Quality floor (PR D, 2026-05-13) ─────────────────────────────────────────
-# Piotroski-lite: reject names with no profitability signal. Composes with
-# relaxed ATR ceiling (max_atr_pct=25) to admit higher-vol growth without
-# also admitting lottery-ticket junk.
-_QUALITY_FLOOR_CFG: dict = SCANNER_CFG.get("quality_floor", {})
-QUALITY_FLOOR_ENABLED: bool = bool(_QUALITY_FLOOR_CFG.get("enabled", False))
-QUALITY_MIN_PROFIT_MARGIN: float = float(_QUALITY_FLOOR_CFG.get("min_profit_margin", 0.0))
-QUALITY_MIN_ROE: float = float(_QUALITY_FLOOR_CFG.get("min_roe", 0.0))
-QUALITY_REQUIRE_BOTH: bool = bool(_QUALITY_FLOOR_CFG.get("require_both", False))
-QUALITY_EXEMPT_SECTORS: list[str] = list(_QUALITY_FLOOR_CFG.get("exempt_sectors", ["Financial", "Real Estate", "Utilities"]))
-
-# ── Regime-conditional ATR tilt within sector (PR E, 2026-05-13) ─────────────
-# In BULL regimes drop bottom-quartile-by-ATR within each sector (those names
-# aren't contributing risk in a regime that rewards risk). Inverted in BEAR.
-_REGIME_ATR_TILT_CFG: dict = SCANNER_CFG.get("regime_atr_tilt", {})
-REGIME_ATR_TILT_ENABLED: bool = bool(_REGIME_ATR_TILT_CFG.get("enabled", False))
-REGIME_ATR_BULL_DROP: str = str(_REGIME_ATR_TILT_CFG.get("bull_drop", "bottom"))
-REGIME_ATR_BEAR_DROP: str = str(_REGIME_ATR_TILT_CFG.get("bear_drop", "top"))
-REGIME_ATR_QUARTILE_PCT: int = int(_REGIME_ATR_TILT_CFG.get("quartile_pct", 25))
-REGIME_ATR_MIN_SECTOR_SIZE: int = int(_REGIME_ATR_TILT_CFG.get("min_sector_size", 4))
 
 # ── Archive ───────────────────────────────────────────────────────────────────
 ARCHIVE_CFG: dict = _cfg["archive"]
