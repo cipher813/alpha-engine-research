@@ -40,17 +40,12 @@ from config import (
     RATING_SELL_THRESHOLD,
     SECTOR_COHERENCE_GATE_ENABLED,
     SECTOR_COHERENCE_UW_MIN_SCORE,
-    NARRATIVE_PENALTY_ENABLED,
-    NARRATIVE_BULL_DEFENSIVE_MARKERS,
-    NARRATIVE_BULL_GROWTH_MARKERS,
-    NARRATIVE_BULL_DEFENSIVE_PENALTY,
-    NARRATIVE_BULL_GROWTH_BONUS,
-    NARRATIVE_BEAR_DEFENSIVE_BONUS,
-    NARRATIVE_BEAR_GROWTH_PENALTY,
-    NARRATIVE_MAX_MARKER_HITS,
     FACTOR_BLEND_ENABLED,
     FACTOR_BLEND_WEIGHT,
     FACTOR_BLEND_REGIME_WEIGHTS,
+    FACTOR_QUALITY_FLOOR_ENABLED,
+    FACTOR_QUALITY_FLOOR_MIN_PERCENTILE,
+    FACTOR_QUALITY_FLOOR_EXEMPT_SECTORS,
 )
 from agents.sector_teams.team_config import (
     ALL_TEAM_IDS,
@@ -70,7 +65,6 @@ from data.population_selector import (
 from scoring.composite import (
     compute_composite_score,
     compute_factor_subscore,
-    compute_narrative_regime_adjustment,
     normalize_conviction,
     score_to_rating,
 )
@@ -1144,59 +1138,37 @@ def score_aggregator(state: ResearchState) -> dict:
                 factor_weight=FACTOR_BLEND_WEIGHT if FACTOR_BLEND_ENABLED else 0.0,
             )
 
-            # Regime-conditional narrative adjustment (2026-05-13): in BULL,
-            # defensive narratives ("oversold bounce", "dividend yield",
-            # "extreme oversold") get penalized; growth narratives ("AI
-            # capex", "secular growth", "breakout") get bonused. Inverted in
-            # BEAR. NEUTRAL → no adjustment. Pure text-match, deterministic.
-            narrative_adj_pts = 0.0
-            narrative_details: dict = {"reason": "disabled"}
-            if NARRATIVE_PENALTY_ENABLED:
-                narrative_adj_pts, narrative_details = compute_narrative_regime_adjustment(
-                    thesis_text=rec.get("bull_case", ""),
-                    market_regime=market_regime,
-                    bull_defensive_markers=NARRATIVE_BULL_DEFENSIVE_MARKERS,
-                    bull_growth_markers=NARRATIVE_BULL_GROWTH_MARKERS,
-                    bull_defensive_penalty=NARRATIVE_BULL_DEFENSIVE_PENALTY,
-                    bull_growth_bonus=NARRATIVE_BULL_GROWTH_BONUS,
-                    bear_defensive_bonus=NARRATIVE_BEAR_DEFENSIVE_BONUS,
-                    bear_growth_penalty=NARRATIVE_BEAR_GROWTH_PENALTY,
-                    max_marker_hits=NARRATIVE_MAX_MARKER_HITS,
-                )
-            adjusted_final = max(
-                0.0, min(100.0, score_result["final_score"] + narrative_adj_pts)
-            )
-            if narrative_adj_pts != 0.0:
-                logger.info(
-                    "[score_aggregator] narrative regime adj %s: %.1f → %.1f "
-                    "(regime=%s, defensive_hits=%d, growth_hits=%d)",
-                    ticker, score_result["final_score"], adjusted_final,
-                    narrative_details.get("regime"),
-                    narrative_details.get("defensive_hits", 0),
-                    narrative_details.get("growth_hits", 0),
-                )
+            # Per-ticker raw quality_score (within-sector percentile) carried
+            # through to _build_signals_payload's structural quality floor
+            # (Phase 4 of factor substrate, 260513 plan). Replaces the
+            # PR #177 narrative text-match adjustment retired in this PR.
+            factor_quality_pct: float | None = None
+            if FACTOR_BLEND_ENABLED and factor_profiles_by_ticker is not None:
+                _profile = factor_profiles_by_ticker.get(ticker) or {}
+                _qs = _profile.get("quality_score")
+                if _qs is not None:
+                    factor_quality_pct = float(_qs)
 
             investment_theses[ticker] = {
                 "ticker": ticker,
                 "sector": sector,
                 "team_id": team_id,
-                "final_score": adjusted_final,
+                "final_score": score_result["final_score"],
                 "quant_score": rec.get("quant_score"),
                 "qual_score": rec.get("qual_score"),
                 "weighted_base": score_result["weighted_base"],
                 "macro_shift": score_result["macro_shift"],
-                "narrative_regime_adj": narrative_adj_pts,
-                "narrative_regime_details": narrative_details,
                 "factor_subscore": score_result.get("factor_subscore"),
                 "factor_weight_applied": score_result.get("factor_weight_applied", 0.0),
                 "factor_blend_breakdown": factor_breakdown,
+                "factor_quality_score": factor_quality_pct,
                 "bull_case": rec.get("bull_case", ""),
                 "bear_case": rec.get("bear_case", ""),
                 "catalysts": rec.get("catalysts", []),
                 "conviction": normalize_conviction(rec.get("conviction")),
                 "quant_rationale": rec.get("quant_rationale", ""),
                 "rating": score_to_rating(
-                    adjusted_final,
+                    score_result["final_score"],
                     buy_threshold=RATING_BUY_THRESHOLD,
                     sell_threshold=RATING_SELL_THRESHOLD,
                 ),
@@ -2184,6 +2156,7 @@ def _build_signals_payload(state: ResearchState) -> dict:
             "factor_subscore": thesis.get("factor_subscore"),
             "factor_weight_applied": thesis.get("factor_weight_applied", 0.0),
             "factor_blend_breakdown": thesis.get("factor_blend_breakdown"),
+            "factor_quality_score": thesis.get("factor_quality_score"),
             "sub_scores": {
                 "quant": thesis.get("quant_score"),
                 "qual": thesis.get("qual_score"),
@@ -2255,16 +2228,24 @@ def _build_signals_payload(state: ResearchState) -> dict:
             "sector_rating": sr.get("rating", "market_weight"),
             "sector": sector,
             "thesis_summary": sig["thesis_summary"],
+            "factor_quality_score": sig.get("factor_quality_score"),
             "sub_scores": sig.get("sub_scores"),
         })
 
-    # v1-compatible buy_candidates list (ENTER signals with enriched theses)
-    # Macro-sector coherence gate (2026-05-13): block NEW buys in UW sectors
-    # below SECTOR_COHERENCE_UW_MIN_SCORE. Defense-in-depth on macro shift;
-    # forces structural alignment between the macro call and per-pick action.
-    # HOLDs and EXITs are unaffected — only ENTER (new buy) is gated.
+    # v1-compatible buy_candidates list (ENTER signals with enriched theses).
+    #
+    # Two structural gates run in sequence on every ENTER signal — both gate
+    # only NEW buys, never HOLDs / EXITs:
+    #   1. Macro-sector coherence gate (260513): block new buys in UW sectors
+    #      below SECTOR_COHERENCE_UW_MIN_SCORE — forces structural alignment
+    #      between the macro call and per-pick action.
+    #   2. Factor quality floor (Phase 4, 260513 plan): block new buys whose
+    #      within-sector quality_score percentile is below the floor — drops
+    #      bottom-decile-quality names regardless of agent sentiment.
+    #      Replaces the dormant Piotroski-lite scanner-side quality_floor.
     buy_candidates = []
     blocked_by_coherence_gate: list[dict] = []
+    blocked_by_quality_floor: list[dict] = []
     for entry in universe:
         if entry["signal"] != "ENTER":
             continue
@@ -2280,6 +2261,23 @@ def _build_signals_payload(state: ResearchState) -> dict:
                 "uw_min_score": SECTOR_COHERENCE_UW_MIN_SCORE,
             })
             continue
+        # Factor quality floor: skip when the ticker has no factor profile
+        # (graceful degrade — same pattern as the rest of the factor blend)
+        # or its sector is in the exempt list (Financial / Real Estate /
+        # Utilities by default, where the quality factor metrics do not apply).
+        if (
+            FACTOR_QUALITY_FLOOR_ENABLED
+            and entry.get("factor_quality_score") is not None
+            and entry["sector"] not in FACTOR_QUALITY_FLOOR_EXEMPT_SECTORS
+            and entry["factor_quality_score"] < FACTOR_QUALITY_FLOOR_MIN_PERCENTILE
+        ):
+            blocked_by_quality_floor.append({
+                "ticker": entry["ticker"],
+                "sector": entry["sector"],
+                "quality_pct": entry["factor_quality_score"],
+                "floor": FACTOR_QUALITY_FLOOR_MIN_PERCENTILE,
+            })
+            continue
         candidate = dict(entry)
         et = entry_theses.get(entry["ticker"], {})
         if et:
@@ -2293,6 +2291,14 @@ def _build_signals_payload(state: ResearchState) -> dict:
             len(blocked_by_coherence_gate),
             SECTOR_COHERENCE_UW_MIN_SCORE,
             [f"{b['ticker']}({b['sector']},{b['score']:.1f})" for b in blocked_by_coherence_gate],
+        )
+    if blocked_by_quality_floor:
+        logger.info(
+            "factor_quality_floor blocked %d ENTER signal(s) "
+            "with quality_score below %.1f-percentile: %s",
+            len(blocked_by_quality_floor),
+            FACTOR_QUALITY_FLOOR_MIN_PERCENTILE,
+            [f"{b['ticker']}({b['sector']},quality={b['quality_pct']:.1f})" for b in blocked_by_quality_floor],
         )
 
     return {
