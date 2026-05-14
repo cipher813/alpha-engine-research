@@ -50,23 +50,28 @@ def _force_real_module(module_name: str):
 
 
 def _make_am_with_s3_responses(responses: dict[str, bytes | None]):
-    """Build an ArchiveManager with patched _s3_get returning per-key
-    bytes (or None for missing keys). Avoids importing the real class
-    constructor (which boots boto3 + side effects)."""
+    """Build an ArchiveManager with an in-memory S3 client.
+
+    The real ArchiveManager.load_regime_substrate now delegates to
+    alpha_engine_lib.eval_artifacts.load_latest_eval_artifact, which
+    uses self.s3.get_object directly (boto3-like interface). So we
+    install a stub on self.s3 that handles get_object."""
+    import io
     from archive.manager import ArchiveManager
 
     am = ArchiveManager.__new__(ArchiveManager)
-    am.s3 = MagicMock()
     am.bucket = "test-bucket"
     am.db_conn = None
 
-    def _s3_get(key: str):
-        raw = responses.get(key)
-        if raw is None:
-            return None
-        return raw.decode("utf-8") if isinstance(raw, bytes) else raw
+    class _StubS3:
+        def get_object(self, *, Bucket: str, Key: str):
+            raw = responses.get(Key)
+            if raw is None:
+                raise KeyError(f"no object at {Bucket}/{Key}")
+            body_bytes = raw if isinstance(raw, bytes) else raw.encode("utf-8")
+            return {"Body": io.BytesIO(body_bytes)}
 
-    am._s3_get = _s3_get  # type: ignore[method-assign]
+    am.s3 = _StubS3()
     return am
 
 
