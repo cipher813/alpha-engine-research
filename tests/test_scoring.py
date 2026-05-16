@@ -27,11 +27,16 @@ class TestRSIScoring:
         score = _score_rsi(50, "neutral")
         assert 45 <= score <= 55  # roughly in middle
 
-    def test_bull_regime_raises_overbought_threshold(self):
-        # RSI=75 should not be overbought in bull regime
-        bull_score = _score_rsi(75, "bull")
-        neutral_score = _score_rsi(75, "neutral")
-        assert bull_score > neutral_score
+    def test_bull_overbought_matches_neutral_post_revert(self):
+        # ROADMAP L1695 — the asymmetric bull-regime overbought relaxation
+        # (overbought=80 vs neutral=70) was reverted 2026-05-15 because the
+        # regime label driving it is unvalidated. Post-revert invariant: the
+        # bull RSI curve is identical to neutral (no asymmetric relaxation).
+        for rsi in (65, 70, 72, 75, 80, 85):
+            assert _score_rsi(rsi, "bull") == _score_rsi(rsi, "neutral"), (
+                f"bull/neutral RSI score diverged at rsi={rsi} — the bull "
+                f"asymmetry was supposed to be reverted (L1695)"
+            )
 
     def test_bear_regime_raises_oversold_threshold(self):
         # RSI=35 should not be as bullish in bear regime

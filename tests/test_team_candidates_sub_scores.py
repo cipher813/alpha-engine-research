@@ -117,19 +117,25 @@ class TestComputeTechnicalSubScores:
             assert 0.0 <= v <= 100.0, f"{k}={v} out of range"
 
     def test_regime_affects_rsi_only(self):
-        """Bull regime raises overbought threshold for RSI; other
-        sub-scores are regime-independent."""
+        """Regime conditioning affects the RSI sub-score only; other
+        sub-scores are regime-independent. Contrast uses bear-vs-neutral:
+        post-L1695-revert (2026-05-15) bull no longer differs from neutral
+        on RSI (the asymmetric bull relaxation was removed), but the bear
+        oversold cap is a separate, retained regime effect — so bear-vs-
+        neutral is the surviving valid probe of "regime affects rsi only"."""
         indicators = {
-            "rsi_14": 75.0, "macd_cross": 0.0, "macd_above_zero": True,
+            # rsi_14=35: neutral interpolates (oversold=30), bear hits its
+            # oversold cap (oversold=40, max_oversold_score=85) -> differ.
+            "rsi_14": 35.0, "macd_cross": 0.0, "macd_above_zero": True,
             "price_vs_ma50": 0.0, "price_vs_ma200": 0.0,
             "momentum_20d": 0.0,
         }
-        bull = compute_technical_sub_scores(indicators, market_regime="bull")
+        bear = compute_technical_sub_scores(indicators, market_regime="bear")
         neutral = compute_technical_sub_scores(indicators, market_regime="neutral")
-        assert bull["rsi"] != neutral["rsi"]
+        assert bear["rsi"] != neutral["rsi"]
         # Other sub-scores identical
         for k in ("macd", "ma50", "ma200", "momentum"):
-            assert bull[k] == neutral[k]
+            assert bear[k] == neutral[k]
 
     def test_consistent_with_compute_technical_score(self):
         """Regression: the new sub-score helper must produce the same
