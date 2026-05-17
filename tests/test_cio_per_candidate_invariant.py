@@ -181,3 +181,138 @@ class TestCIOPerCandidateInvariant:
         # Empty case has its own message — distinct from the
         # per-candidate count message. Grep-friendly distinction.
         assert "empty decisions list" in str(exc_info.value).lower()
+
+
+def _raw(pairs: list[tuple[str, str]]):
+    """Build a ``CIORawOutput`` from explicit (ticker, decision) pairs —
+    lets a test reproduce duplicate / extraneous / out-of-order shapes
+    the count-only helper can't express."""
+    from graph.state_schemas import CIORawDecision, CIORawOutput
+
+    return CIORawOutput(decisions=[
+        CIORawDecision(
+            ticker=t, decision=d, rank=None, conviction=50,
+            rationale="synthetic",
+        )
+        for t, d in pairs
+    ])
+
+
+def _run(monkeypatch, candidates, raw):
+    from agents.investment_committee.ic_cio import run_cio
+
+    _patch_llm(monkeypatch, raw)
+    return run_cio(
+        candidates=candidates,
+        macro_context={"market_regime": "neutral"},
+        sector_ratings={},
+        current_population=[],
+        open_slots=2,
+        exits=[],
+        run_date="2026-05-17",
+        max_new_entrants=10,
+        min_new_entrants=2,
+    )
+
+
+class TestCIODecisionSetReconciliation:
+    """The 2026-05-17 Saturday SF failure class: Sonnet's structured
+    output returned 19 decisions for 18 candidates (one stray extra /
+    duplicate object). The old raw count check turned this benign LLM
+    artifact into a hard strict-mode failure of the whole weekly run.
+    Reconciling against the candidate ticker SET self-heals it while
+    staying strictly stronger than the count check."""
+
+    def test_exact_2026_05_17_shape_self_heals(self, monkeypatch):
+        """19 decisions for 18 candidates where the 19th is a duplicate
+        of an existing candidate → NO raise; reconciled to 18, one per
+        candidate; downstream post-processing runs."""
+        candidates = [_candidate(f"X{i}") for i in range(18)]
+        pairs = [(f"X{i}", "REJECT") for i in range(18)]
+        pairs.append(("X0", "REJECT"))  # the stray 19th
+        result = _run(monkeypatch, candidates, _raw(pairs))
+        assert len(result["decisions"]) == 18
+        assert {d["ticker"] for d in result["decisions"]} == {
+            f"X{i}" for i in range(18)
+        }
+
+    def test_extraneous_hallucinated_ticker_dropped(self, monkeypatch):
+        """19 decisions for 18 candidates where the 19th is a ticker not
+        in the candidate set → dropped, no raise, all 18 covered."""
+        candidates = [_candidate(f"X{i}") for i in range(18)]
+        pairs = [(f"X{i}", "REJECT") for i in range(18)]
+        pairs.append(("ZZZZ", "ADVANCE"))  # hallucinated
+        result = _run(monkeypatch, candidates, _raw(pairs))
+        assert "ZZZZ" not in {d["ticker"] for d in result["decisions"]}
+        assert len(result["decisions"]) == 18
+
+    def test_duplicate_conservative_wins_never_upgrades(self):
+        """A duplicate decision can never *upgrade* a candidate into
+        advancement: ADVANCE then REJECT for the same ticker collapses
+        to REJECT. Asserted directly on ``_reconcile_cio_decisions`` —
+        the reconciled decision, not the post-processed one, since
+        ``_post_process_cio_decisions`` floor-enforcement may legitimately
+        re-promote a REJECT to ADVANCE_FORCED (a separate concern)."""
+        from agents.investment_committee.ic_cio import (
+            _reconcile_cio_decisions,
+        )
+
+        candidates = [_candidate(f"X{i}") for i in range(3)]
+        decisions = [
+            {"ticker": "X0", "decision": "ADVANCE"},
+            {"ticker": "X1", "decision": "REJECT"},
+            {"ticker": "X2", "decision": "REJECT"},
+            {"ticker": "X0", "decision": "REJECT"},  # dup — conservative
+        ]
+        reconciled, recon = _reconcile_cio_decisions(decisions, candidates)
+        assert recon["duplicate"] == ["X0"]
+        assert recon["missing"] == []
+        assert recon["extraneous"] == []
+        x0 = next(d for d in reconciled if d["ticker"] == "X0")
+        assert x0["decision"] == "REJECT"
+        # Order is candidate order, exactly one per candidate.
+        assert [d["ticker"] for d in reconciled] == ["X0", "X1", "X2"]
+
+    def test_reconcile_first_wins_on_equal_conservatism(self):
+        """Two ADVANCE duplicates (equal conservatism) → first wins;
+        the duplicate is still recorded for the audit log."""
+        from agents.investment_committee.ic_cio import (
+            _reconcile_cio_decisions,
+        )
+
+        candidates = [_candidate("AAA")]
+        decisions = [
+            {"ticker": "AAA", "decision": "ADVANCE", "rationale": "first"},
+            {"ticker": "AAA", "decision": "ADVANCE", "rationale": "second"},
+        ]
+        reconciled, recon = _reconcile_cio_decisions(decisions, candidates)
+        assert len(reconciled) == 1
+        assert reconciled[0]["rationale"] == "first"
+        assert recon["duplicate"] == ["AAA"]
+
+    def test_casing_whitespace_normalised_not_dropped(self, monkeypatch):
+        """LLM altering ticker casing/whitespace must not orphan a
+        candidate — normalised match, canonical spelling restored."""
+        candidates = [_candidate("AAPL"), _candidate("MSFT")]
+        result = _run(monkeypatch, candidates,
+                      _raw([(" aapl ", "REJECT"), ("msft", "REJECT")]))
+        assert {d["ticker"] for d in result["decisions"]} == {"AAPL", "MSFT"}
+
+    def test_count_equal_but_candidate_missing_now_raises(self, monkeypatch):
+        """Strictly STRONGER than the old check: 18 decisions for 18
+        candidates but X0 is duplicated and X17 absent. The old
+        ``len == len`` check PASSED this (real candidate silently
+        dropped); set reconciliation correctly hard-fails in strict
+        mode, naming the missing ticker. Message keeps the
+        ``N decisions``/``M candidates`` substrings for log/grep
+        continuity."""
+        candidates = [_candidate(f"X{i}") for i in range(18)]
+        pairs = [(f"X{i}", "REJECT") for i in range(17)]  # X0..X16
+        pairs.append(("X0", "REJECT"))  # dup → count is 18, X17 missing
+        with pytest.raises(RuntimeError) as exc_info:
+            _run(monkeypatch, candidates, _raw(pairs))
+        msg = str(exc_info.value)
+        assert "18 decisions" in msg
+        assert "18 candidates" in msg
+        assert "missing" in msg.lower()
+        assert "X17" in msg

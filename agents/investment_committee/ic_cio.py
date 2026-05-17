@@ -175,23 +175,53 @@ def run_cio(
                     "CIO structured response had empty decisions list"
                 )
             return _fallback_selection(candidates, floor)
-        # Per-candidate invariant: every input candidate must receive a
-        # decision (ADVANCE / REJECT / NO_ADVANCE_DEADLOCK). Caught
-        # 2026-05-02 — PR B's strip of the inline JSON example in
-        # ic_cio_evaluation.txt let Sonnet emit a partial decisions
-        # list. Prompt fix (config #21) + schema min_length=1 close the
-        # empty-list edge; this assertion closes the partial-list edge.
-        if len(decisions_dicts) != len(candidates):
+        # Per-candidate invariant: every input candidate must appear
+        # exactly once in the decisions list (ADVANCE / REJECT /
+        # NO_ADVANCE_DEADLOCK). Reconcile the LLM's decisions against
+        # the candidate ticker SET rather than asserting a raw count.
+        #
+        # Why set reconciliation, not `len(decisions) == len(candidates)`:
+        # the count check (added 2026-05-02 for the partial-list edge —
+        # PR B stripped the inline JSON example and Sonnet emitted a
+        # SHORT list) is brittle in both directions. 2026-05-17 Saturday
+        # SF: Sonnet's structured-output batch returned 19 decisions for
+        # 18 candidates (one stray extra/duplicate decision object) — a
+        # benign LLM artifact the raw count check turned into a hard
+        # strict-mode failure of the entire weekly run. The count check
+        # is also too WEAK: 18 decisions for 18 candidates with one
+        # ticker duplicated (so one real candidate silently missing)
+        # passed it. Reconciling against the ticker set is strictly
+        # stronger — it self-heals extraneous/duplicate noise and still
+        # hard-fails the genuine partial-list regression the original
+        # assertion protected against.
+        decisions_dicts, recon = _reconcile_cio_decisions(
+            decisions_dicts, candidates,
+        )
+        if recon["extraneous"] or recon["duplicate"]:
+            log.warning(
+                "[cio] reconciled CIO decisions vs candidate set: dropped "
+                "%d extraneous %s, collapsed %d duplicated ticker(s) %s "
+                "(conservative non-ADVANCE-wins); %d candidate decisions "
+                "retained",
+                len(recon["extraneous"]), recon["extraneous"],
+                len(recon["duplicate"]), recon["duplicate"],
+                len(decisions_dicts),
+            )
+        if recon["missing"]:
             msg = (
-                f"CIO returned {len(decisions_dicts)} decisions for "
-                f"{len(candidates)} candidates — every candidate must "
-                f"appear exactly once in the decisions list."
+                f"CIO returned {recon['raw_count']} decisions for "
+                f"{len(candidates)} candidates — {len(recon['missing'])} "
+                f"candidate(s) missing a decision after reconciliation "
+                f"(dropped {len(recon['extraneous'])} extraneous, "
+                f"{len(recon['duplicate'])} duplicate): "
+                f"missing={recon['missing']}. Every candidate must appear "
+                f"exactly once in the decisions list."
             )
             log.warning("[cio] %s", msg)
             if is_strict_validation_enabled():
                 raise RuntimeError(msg)
-            # Lax mode: fall through to post-process, which tolerates a
-            # partial list by treating missing tickers as REJECT.
+            # Lax mode: fall through to post-process, which tolerates the
+            # still-missing tickers by treating them as REJECT.
         return _post_process_cio_decisions(decisions_dicts, candidates, floor, cap)
     except Exception as e:
         log.error("[cio] evaluation failed: %s", e)
@@ -285,6 +315,89 @@ def _combined_score(c: dict) -> float:
     qs = c.get("quant_score") or 0
     qls = c.get("qual_score") or 0
     return (qs + qls) / 2 if qls else qs
+
+
+def _reconcile_cio_decisions(
+    decisions: list[dict], candidates: list[dict],
+) -> tuple[list[dict], dict]:
+    """Reconcile the LLM's raw decisions against the candidate ticker SET.
+
+    Replaces the prior brittle ``len(decisions) == len(candidates)``
+    assertion. Sonnet's structured-output batch occasionally emits a
+    stray extra decision object (2026-05-17 SF: 19 decisions for 18
+    candidates) or a hallucinated ticker not in the candidate set; the
+    raw count check turned either benign artifact into a hard failure of
+    the whole weekly run, while *missing* a duplicate that left a real
+    candidate uncovered at an equal count.
+
+    Reconciliation rules:
+
+    * **Extraneous** — a decision whose ticker is not in the candidate
+      set is dropped (the CIO can only rule on what it was given).
+    * **Duplicate** — multiple decisions for the same candidate are
+      collapsed to one with *conservative-wins* precedence: a
+      non-ADVANCE decision beats an ADVANCE one, so a stray duplicate
+      can never *upgrade* a candidate into advancement. Ties keep the
+      first occurrence (the LLM's primary ordered judgment).
+    * **Missing** — a candidate with no surviving decision is reported;
+      the caller hard-fails in strict mode (this is the genuine
+      partial-list regression the original assertion guarded).
+
+    The returned decisions are emitted in candidate order with each
+    decision's ``ticker`` normalised to the candidate's canonical
+    spelling, so ``_post_process_cio_decisions`` exact-ticker matching
+    stays deterministic even if the LLM altered casing/whitespace.
+
+    Returns ``(reconciled_decisions, diagnostics)`` where diagnostics
+    has keys ``raw_count``, ``extraneous``, ``duplicate``, ``missing``.
+    """
+
+    def _norm(t) -> str:
+        return str(t or "").strip().upper()
+
+    # Conservative-wins ranking: higher == more conservative (kept on a
+    # duplicate clash). Unknown/HOLD treated as mid (never upgrades).
+    _conservatism = {"ADVANCE": 0, "NO_ADVANCE_DEADLOCK": 1, "REJECT": 2}
+
+    def _rank(dec: dict) -> int:
+        return _conservatism.get(str(dec.get("decision") or "").upper(), 1)
+
+    canonical: dict[str, str] = {}
+    for c in candidates:
+        nt = _norm(c.get("ticker"))
+        if nt and nt not in canonical:
+            canonical[nt] = c.get("ticker")
+
+    chosen: dict[str, dict] = {}
+    extraneous: list[str] = []
+    duplicate: list[str] = []
+    for d in decisions:
+        nt = _norm(d.get("ticker"))
+        if nt not in canonical:
+            extraneous.append(d.get("ticker"))
+            continue
+        d = dict(d)
+        d["ticker"] = canonical[nt]  # normalise to canonical spelling
+        if nt not in chosen:
+            chosen[nt] = d
+        else:
+            if nt not in duplicate:
+                duplicate.append(nt)
+            # Keep the more conservative of the two; tie → keep first.
+            if _rank(d) > _rank(chosen[nt]):
+                chosen[nt] = d
+
+    reconciled = [chosen[_norm(c.get("ticker"))]
+                  for c in candidates if _norm(c.get("ticker")) in chosen]
+    missing = [c.get("ticker") for c in candidates
+               if _norm(c.get("ticker")) not in chosen]
+
+    return reconciled, {
+        "raw_count": len(decisions),
+        "extraneous": extraneous,
+        "duplicate": duplicate,
+        "missing": missing,
+    }
 
 
 def _post_process_cio_decisions(
