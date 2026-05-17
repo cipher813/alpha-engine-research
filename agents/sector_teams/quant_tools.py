@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from typing import Any
 
 from langchain_core.tools import tool
@@ -18,6 +19,67 @@ from scoring.factor_scoring import read_factor_profiles_from_s3
 from scoring.focus_list import _assign_stance
 
 log = logging.getLogger(__name__)
+
+
+def read_fundamentals_from_s3(
+    run_date: str | None = None,
+    bucket: str | None = None,
+) -> dict[str, dict] | None:
+    """Read the weekly Finnhub fundamentals snapshot from S3.
+
+    Produced by alpha-engine-data's ``collectors/fundamentals.py`` (weekly
+    DataPhase1) and written to ``archive/fundamentals/{date}.json``. The
+    predictor's ``inference/stages/fetch_alt_data.py`` already reads the
+    same key — this mirrors its read + date-resolution pattern: try the
+    given/today's date first, then fall back to scanning the prefix for
+    the most-recent snapshot (the snapshot is a slow-moving weekly signal,
+    so a stale-by-days fallback is acceptable and matches predictor
+    behavior).
+
+    Returns ``{ticker: {pe_ratio, pb_ratio, debt_to_equity,
+    revenue_growth_yoy, fcf_yield, gross_margin, roe, current_ratio}}``
+    (the data-module's normalized/clipped schema — NOT raw Finnhub keys).
+    Returns ``None`` on any read failure; the caller graceful-degrades per
+    its existing ``{"error": ...}`` contract (must not raise —
+    all-agents-strict).
+    """
+    import boto3
+    from botocore.exceptions import ClientError
+
+    bucket = bucket or os.environ.get(
+        "RESEARCH_BUCKET",
+        os.environ.get("S3_BUCKET", "alpha-engine-research"),
+    )
+    try:
+        s3 = boto3.client("s3")
+        if run_date:
+            try:
+                obj = s3.get_object(
+                    Bucket=bucket, Key=f"archive/fundamentals/{run_date}.json"
+                )
+                return json.loads(obj["Body"].read())
+            except ClientError:
+                pass
+        # Scan for the most-recent snapshot (mirrors predictor's fallback).
+        resp = s3.list_objects_v2(
+            Bucket=bucket, Prefix="archive/fundamentals/", MaxKeys=100
+        )
+        keys = sorted(
+            (
+                c["Key"]
+                for c in resp.get("Contents", [])
+                if c["Key"].endswith(".json")
+            ),
+            reverse=True,
+        )
+        if not keys:
+            return None
+        obj = s3.get_object(Bucket=bucket, Key=keys[0])
+        log.info("get_balance_sheet: using fundamentals snapshot %s", keys[0])
+        return json.loads(obj["Body"].read())
+    except Exception as e:
+        log.warning("Fundamentals S3 read failed: %s", e)
+        return None
 
 
 def create_quant_tools(context: dict) -> list:
@@ -46,6 +108,14 @@ def create_quant_tools(context: dict) -> list:
     factor_profiles: dict[str, dict] | None = context.get("factor_profiles")
     if factor_profiles is None:
         factor_profiles = read_factor_profiles_from_s3() or {}
+    # Fundamentals snapshot for get_balance_sheet. Cached once at
+    # tool-creation time (one S3 read per sector team per Saturday SF run,
+    # same pattern as factor_profiles) so the ReAct loop never re-reads S3.
+    # Read from alpha-engine-data's weekly archive/fundamentals/{date}.json
+    # (yfinance .info removed — yfinance-centralization arc, 2026-05-16).
+    fundamentals_data: dict[str, dict] | None = context.get("fundamentals_data")
+    if fundamentals_data is None:
+        fundamentals_data = read_fundamentals_from_s3() or {}
     market_regime: str = context.get("market_regime", "neutral")
     factor_blend_regime_weights: dict | None = context.get(
         "factor_blend_regime_weights"
@@ -160,25 +230,39 @@ def create_quant_tools(context: dict) -> list:
     @tool
     def get_balance_sheet(tickers: list[str]) -> str:
         """Get balance sheet metrics: debt/equity, current ratio, PE, revenue growth, gross margins."""
-        import yfinance as yf
-
+        # Reads alpha-engine-data's weekly Finnhub fundamentals snapshot
+        # (closed over at tool-creation time) instead of yfinance .info
+        # (yfinance-centralization arc, 2026-05-16). The data-module schema
+        # is normalized/clipped (not raw Finnhub keys) — the quant agent
+        # consumes these as soft directional context, not a hard gate, so
+        # the trailing-vs-TTM / scale delta is tolerable. D/E is already a
+        # ratio in the snapshot — NO yfinance %/100 scaling is applied.
+        # forward_pe + market_cap are not persisted by the collector, so
+        # they are reported as None per the existing optional-field contract.
+        # Graceful-degrade to {"error": ...} on missing ticker/snapshot —
+        # never raises (all-agents-strict).
         valid, errors = _validate_tickers(tickers, "get_balance_sheet")
         results: dict = dict(errors)
         for t in valid[:20]:
-            try:
-                info = yf.Ticker(t).info
+            f = fundamentals_data.get(t)
+            if not f:
                 results[t] = {
-                    "debt_to_equity": info.get("debtToEquity"),
-                    "current_ratio": info.get("currentRatio"),
-                    "market_cap": info.get("marketCap"),
-                    "pe_ratio": info.get("trailingPE"),
-                    "forward_pe": info.get("forwardPE"),
-                    "price_to_book": info.get("priceToBook"),
-                    "revenue_growth": info.get("revenueGrowth"),
-                    "gross_margins": info.get("grossMargins"),
+                    "error": (
+                        "no fundamentals snapshot for this ticker "
+                        "(archive/fundamentals/{date}.json)"
+                    )
                 }
-            except Exception as e:
-                results[t] = {"error": str(e)}
+                continue
+            results[t] = {
+                "debt_to_equity": f.get("debt_to_equity"),
+                "current_ratio": f.get("current_ratio"),
+                "market_cap": None,
+                "pe_ratio": f.get("pe_ratio"),
+                "forward_pe": None,
+                "price_to_book": f.get("pb_ratio"),
+                "revenue_growth": f.get("revenue_growth_yoy"),
+                "gross_margins": f.get("gross_margin"),
+            }
         return json.dumps(results)
 
     @tool
