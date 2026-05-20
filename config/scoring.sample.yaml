@@ -92,6 +92,24 @@ aggregator:
     quant: 0.50
     qual: 0.50
 
+  # ── Pillar emit (Phase 2 of attractiveness-pillars-260520 arc) ─────────
+  # Additive observability gate — when enabled, the qual ReAct agent loads
+  # the pillar-rubric prompt variant and runs a SECOND structured-output
+  # extraction call that produces a per-ticker QualitativePillarAssessment
+  # (6-pillar decomposition: Quality / Value / Momentum / Growth /
+  # Stewardship / Defensiveness, plus a structured MoatAssessment on the
+  # Quality pillar and a catalyst horizon modulation field). The pillar
+  # emission attaches to the run_qual_analyst result dict as
+  # ``pillar_assessments`` (keyed by ticker); downstream consumers treat
+  # it as additive metadata at Phase 2 — the legacy composite is unchanged.
+  #
+  # Phase 4 of the arc (composite scoring refactor) will consume the
+  # pillar assessments into a new CompositeBreakdown; Phase 2 just ships
+  # the substrate behind this flag so the soak observation period can
+  # start. Default OFF (consumer-driven flip).
+  pillar_emit:
+    enabled: false
+
   consistency_check:
     bullish_terms:
       - strong buy

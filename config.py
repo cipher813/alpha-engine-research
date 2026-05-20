@@ -141,6 +141,30 @@ FACTOR_QUALITY_FLOOR_EXEMPT_SECTORS: list[str] = list(
     _FACTOR_QUALITY_FLOOR_CFG.get("exempt_sectors", ["Financial", "Real Estate", "Utilities"])
 )
 
+# ── Pillar emit (Phase 2 of attractiveness-pillars-260520 arc) ───────────────
+# Additive observability flag — when enabled, the qual analyst runs a SECOND
+# structured-output extraction call after its existing QualAnalystOutput
+# extraction, producing a per-ticker ``QualitativePillarAssessment`` (6-pillar
+# decomposition: Quality / Value / Momentum / Growth / Stewardship /
+# Defensiveness, plus a structured ``MoatAssessment`` on the Quality pillar
+# and a catalyst horizon modulation field). The pillar emission is attached
+# to the run_qual_analyst result dict as ``pillar_assessments`` (dict keyed
+# by ticker); downstream consumers (score_aggregator, archive writers) treat
+# it as additive metadata only — the legacy composite is unchanged.
+#
+# Default OFF. When OFF, the legacy ``qual_analyst_system`` prompt and the
+# single-extraction code path run unchanged (zero behavior change). When ON,
+# the alternative ``qual_analyst_system_pillars`` prompt loads in place
+# (lives in alpha-engine-config research/prompts/) and the second extraction
+# fires after the legacy one. Strict-mode parse failure raises; lax-mode
+# falls back to ``pillar_assessments={}`` and logs a warning.
+#
+# Promotion path: Phase 4 (composite scoring refactor) consumes the pillar
+# assessments into the new ``CompositeBreakdown``; this Phase 2 PR ships
+# the substrate behind the flag, observability only.
+_PILLAR_EMIT_CFG: dict = _AGGREGATOR_CFG.get("pillar_emit", {})
+PILLAR_EMIT_ENABLED: bool = bool(_PILLAR_EMIT_CFG.get("enabled", False))
+
 # ── Focus list gating (PR 4 of scanner-placement arc, 260514 plan) ───────────
 # When enabled, the quant analyst's user prompt receives the regime-blended
 # focus list (top-N per team from the Phase 1c factor composites) as its

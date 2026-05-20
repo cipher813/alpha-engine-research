@@ -12,16 +12,56 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
+from alpha_engine_lib.pillars import QualitativePillarAssessment
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage
 from langgraph.errors import GraphRecursionError
 from langgraph.prebuilt import create_react_agent
+from pydantic import BaseModel, ConfigDict, Field
 
-from config import ANTHROPIC_API_KEY, MAX_TOKENS_STRATEGIC, PER_STOCK_MODEL, QUAL_MAX_ITERATIONS
+from config import (
+    ANTHROPIC_API_KEY,
+    MAX_TOKENS_STRATEGIC,
+    PER_STOCK_MODEL,
+    PILLAR_EMIT_ENABLED,
+    QUAL_MAX_ITERATIONS,
+)
 from agents.prompt_loader import load_prompt
 from agents.sector_teams.qual_tools import create_qual_tools
 from graph.llm_cost_tracker import get_cost_telemetry_callback
 from strict_mode import is_strict_validation_enabled
+
+
+class _QualPillarItem(BaseModel):
+    """One ticker's pillar assessment — wraps the lib's
+    QualitativePillarAssessment with a ticker key for batch emission.
+
+    Research-internal transient shape used only as the wrapper for the
+    second structured-output extraction call when PILLAR_EMIT_ENABLED is
+    on. Not part of the lib schema surface — the lib emits
+    QualitativePillarAssessment per-stock; this wrapper just keys by
+    ticker for batch transport.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    ticker: str
+    pillar_assessment: QualitativePillarAssessment
+
+
+class _QualPillarBatch(BaseModel):
+    """Wrapper for the qual analyst's per-ticker pillar emission batch
+    (Phase 2 of attractiveness-pillars-260520 arc).
+
+    The qual ReAct loop reviews ~5 picks; this batch holds one
+    ``_QualPillarItem`` per ticker. Empty list is permitted (e.g., the
+    agent's reasoning didn't yield a clean pillar decomposition for any
+    ticker — lax-mode degrades to empty rather than crashing).
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    items: list[_QualPillarItem] = Field(default_factory=list)
 
 log = logging.getLogger(__name__)
 
@@ -109,8 +149,15 @@ def run_qual_analyst(
     )
     # System prompt's metadata anchors LangSmith trace attribution; the
     # user prompt's version + hash piggyback so a future drift in either
-    # half of the prompt-pair is independently grep-able.
-    system_prompt_loaded = load_prompt("qual_analyst_system")
+    # half of the prompt-pair is independently grep-able. Under
+    # PILLAR_EMIT_ENABLED the system prompt loaded is
+    # ``qual_analyst_system_pillars`` so metadata names IT, not the
+    # legacy template (matches the prompt actually fed to the ReAct loop).
+    _system_prompt_name = (
+        "qual_analyst_system_pillars" if PILLAR_EMIT_ENABLED
+        else "qual_analyst_system"
+    )
+    system_prompt_loaded = load_prompt(_system_prompt_name)
     _ls_metadata = {
         **system_prompt_loaded.langsmith_metadata(),
         "user_prompt_version": user_prompt.version,
@@ -186,8 +233,27 @@ def run_qual_analyst(
             else None
         )
 
-        log.info("[qual:%s] completed — %d assessments, %d tool calls",
-                 team_id, len(assessments), len(tool_calls))
+        # ── Pillar-assessment emission (Phase 2 of pillars arc, gated) ──
+        # When PILLAR_EMIT_ENABLED, a SECOND structured-output extraction
+        # runs against the same final_text and produces a per-ticker
+        # ``QualitativePillarAssessment`` (6-pillar decomposition). The
+        # legacy QualAnalystOutput extraction above is untouched — pillar
+        # emission is purely additive observability at this phase. Phase
+        # 4 (composite scoring refactor) will consume it; Phase 2 just
+        # ships the substrate behind the flag.
+        pillar_assessments: dict[str, dict] = {}
+        if PILLAR_EMIT_ENABLED:
+            pillar_assessments = _extract_pillar_assessments(
+                llm=llm,
+                final_text=final_text,
+                team_id=team_id,
+                ls_metadata=_ls_metadata,
+            )
+
+        log.info(
+            "[qual:%s] completed — %d assessments, %d tool calls, %d pillar",
+            team_id, len(assessments), len(tool_calls), len(pillar_assessments),
+        )
 
         return {
             "team_id": team_id,
@@ -197,6 +263,7 @@ def run_qual_analyst(
             "iterations": len(tool_calls),
             "error": None,
             "partial": False,
+            "pillar_assessments": pillar_assessments,
         }
 
     except GraphRecursionError as e:
@@ -218,6 +285,7 @@ def run_qual_analyst(
             "error": None,
             "partial": True,
             "partial_reason": "recursion_limit_exhausted",
+            "pillar_assessments": {},
         }
 
     except Exception as e:
@@ -234,15 +302,93 @@ def run_qual_analyst(
             "iterations": 0,
             "error": f"{type(e).__name__}: {e}",
             "partial": False,
+            "pillar_assessments": {},
         }
 
 
 def _build_system_prompt(team_id: str, market_regime: str, n_picks: int) -> str:
-    return load_prompt("qual_analyst_system").format(
+    """Load the qual analyst's system prompt — pillar-rubric variant when
+    ``PILLAR_EMIT_ENABLED``, legacy otherwise.
+
+    Both prompts accept the same ``{team_title}`` / ``{n_picks}`` /
+    ``{market_regime}`` placeholders so the format() call is uniform.
+    The pillar-rubric variant adds 6-pillar decomposition guidance +
+    moat-archetype taxonomy so the agent's reasoning surfaces the
+    decomposed signal cleanly for the second extraction call.
+    """
+    prompt_name = (
+        "qual_analyst_system_pillars" if PILLAR_EMIT_ENABLED
+        else "qual_analyst_system"
+    )
+    return load_prompt(prompt_name).format(
         team_title=team_id.title(),
         n_picks=n_picks,
         market_regime=market_regime,
     )
+
+
+def _extract_pillar_assessments(
+    llm,
+    final_text: str,
+    team_id: str,
+    ls_metadata: dict,
+) -> dict[str, dict]:
+    """Run the second structured-output extraction for per-ticker pillar
+    assessments (Phase 2 of attractiveness-pillars-260520).
+
+    Mirrors the legacy ``QualAnalystOutput`` extraction pattern: bound at
+    the API boundary via ``with_structured_output(include_raw=True)``,
+    strict-mode raises on parse failure, lax-mode logs + returns an empty
+    dict. The lib's ``QualitativePillarAssessment`` schema is used directly
+    inside a thin research-internal wrapper that keys by ticker.
+
+    Returns: ``{ticker: pillar_assessment_dict}`` where each value is the
+    model_dump() of a QualitativePillarAssessment (per-pillar subscores +
+    moat assessment + catalyst horizon modulation). Empty dict on lax-mode
+    parse failure or when the agent's reasoning yields no clean pillar
+    decomposition. Strict-mode raises ``RuntimeError`` on parse failure.
+    """
+    structured_llm = llm.with_structured_output(
+        _QualPillarBatch, include_raw=True,
+    )
+    extract_msg = HumanMessage(content=(
+        "Extract a per-ticker pillar decomposition from this analyst's "
+        "answer. For EACH ticker the analyst assessed, produce a "
+        "QualitativePillarAssessment with subscores on the 6 pillars "
+        "(quality, value, momentum, growth, stewardship, defensiveness), "
+        "a structured MoatAssessment for the Quality pillar, and a "
+        "catalyst_horizon_modulation ∈ [-20, 20] for any near-term "
+        "catalyst effect. Use ONLY what's in the text — do not invent "
+        "pillar evidence the analyst did not surface. If the analyst's "
+        "reasoning doesn't support a pillar score, score it 50 (neutral) "
+        "with confidence 'low' and an evidence list explaining the "
+        "absence. If no tickers were assessed, return an empty items "
+        "list.\n\n"
+        f"--- ANALYST ANSWER ---\n{final_text}"
+    ))
+    extract_resp = invoke_with_rate_limit_retry(
+        lambda: structured_llm.invoke(
+            [extract_msg],
+            config={"metadata": ls_metadata},
+        ),
+        label=f"qual:{team_id}:extract-pillars",
+    )
+    parsed: _QualPillarBatch | None = extract_resp.get("parsed")
+    parsing_error = extract_resp.get("parsing_error")
+    if parsing_error is not None:
+        msg = (
+            f"[qual:{team_id}] pillar-assessment parse failed: "
+            f"{type(parsing_error).__name__}: {parsing_error}"
+        )
+        if is_strict_validation_enabled():
+            raise RuntimeError(msg)
+        log.warning("%s — falling back to empty pillar dict (lax mode)", msg)
+        return {}
+    assert parsed is not None
+    return {
+        item.ticker: item.pillar_assessment.model_dump()
+        for item in parsed.items
+    }
 
 
 from agents.langchain_utils import (
