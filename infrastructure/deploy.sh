@@ -355,6 +355,16 @@ else:
   if [ "$CANARY_STATUS" != "OK" ] && [ "$CANARY_STATUS" != "SKIPPED" ]; then
     echo "  ERROR: Canary returned status '$CANARY_STATUS' — auto-rolling back!"
     bash "$(dirname "$0")/rollback.sh"
+    # Independent-channel surveillance per ROADMAP L221 — the 2-day
+    # silent rollback chain (alpha-engine-data #274 retrospective)
+    # showed the GitHub Actions red-icon is not load-bearing. Best-
+    # effort; ``|| true`` never overrides this script's ``exit 1``.
+    # Lib alerts CLI exits 0 if any channel (SNS or Telegram) succeeded.
+    python3 -m alpha_engine_lib.alerts publish \
+      --severity error \
+      --source "alpha-engine-research/infrastructure/deploy.sh" \
+      --message "Canary rolled back: ${FUNCTION_MAIN} canary returned status='${CANARY_STATUS}' — live alias reverted to prior version. See GitHub Actions log for full canary payload." \
+      || true
     exit 1
   fi
   echo "  Canary passed (status=$CANARY_STATUS)"
