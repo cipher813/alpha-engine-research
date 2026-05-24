@@ -136,12 +136,41 @@ def create_quant_tools(context: dict) -> list:
     override_tickers: list = context.get("override_tickers", [])
 
     # Set of valid tickers the LLM can reference. Used to reject
-    # hallucinated tickers before they hit external APIs. Observed
-    # 2026-04-11: a quant ReAct agent called get_balance_sheet(
-    # tickers=["CARRIER"]) instead of ["CARR"] and yfinance returned
-    # 404 on Carrier Global. Validating here returns a clear error
-    # to the LLM so it can retry with the correct symbol.
-    _valid_tickers = set(price_data.keys()) if price_data else set()
+    # hallucinated tickers (e.g. 2026-04-11 "CARRIER" instead of "CARR")
+    # before they hit external APIs.
+    #
+    # Closes 5/23-SF P0 sweep (q) — the pre-fix `set(price_data.keys())`
+    # was the NARROW set: `research_graph._fetch_team_data` excludes
+    # feature-store-covered tickers from the raw-OHLCV fetch unless they
+    # also live in `population_tickers`, so `price_data` ended up with
+    # only ~25-30 population tickers + a few uncovered ones. The sector
+    # team's actual scope is ~50 tickers (scanner-universe slice), and
+    # `technical_scores` covers the full scope (feature-store + raw-OHLCV
+    # union). The 2026-05-24 audit on the trading-day-fix recovery's
+    # research Lambda CW Logs saw dozens of `unknown ticker — rejecting`
+    # WARNINGs across SBUX/NKE/AAPL/MSFT/NVDA-class S&P names — all of
+    # them in feature_store + technical_scores, but missing from
+    # price_data because they weren't in population. That mass rejection
+    # is the most likely root cause of the Technology + Consumer team
+    # 0-picks-across-2-attempts retry exhaustion ((r) in the same sweep).
+    #
+    # Post-fix: take the UNION of every ticker-source threaded into the
+    # tool context. Anything the agent's prompt names is in scope; only
+    # genuinely hallucinated tickers (CARRIER, etc.) fall through.
+    # focus_list_tickers is the team's tactical focus; factor_profiles
+    # + fundamentals_data are pre-loaded ticker→record dicts; price_data
+    # + technical_scores cover the raw-OHLCV and feature-store paths.
+    _valid_tickers: set[str] = set()
+    if price_data:
+        _valid_tickers |= set(price_data.keys())
+    if technical_scores:
+        _valid_tickers |= set(technical_scores.keys())
+    if factor_profiles:
+        _valid_tickers |= set(factor_profiles.keys())
+    if fundamentals_data:
+        _valid_tickers |= set(fundamentals_data.keys())
+    if focus_list_tickers:
+        _valid_tickers |= focus_list_tickers
 
     def _validate_tickers(tickers: list[str], tool_name: str) -> tuple[list[str], dict[str, str]]:
         """Split incoming tickers into (valid, errors_dict).
