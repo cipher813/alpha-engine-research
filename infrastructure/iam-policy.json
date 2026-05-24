@@ -35,13 +35,13 @@
       "Resource": "arn:aws:logs:*:*:*"
     },
     {
-      "Sid": "CloudWatchMetricsEvalJudge",
+      "Sid": "CloudWatchMetricsAlphaEngine",
       "Effect": "Allow",
       "Action": "cloudwatch:PutMetricData",
       "Resource": "*",
       "Condition": {
         "StringLike": {
-          "cloudwatch:namespace": "AlphaEngine/Eval*"
+          "cloudwatch:namespace": "AlphaEngine/*"
         }
       }
     },
