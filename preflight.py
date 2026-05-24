@@ -85,11 +85,20 @@ class ResearchPreflight(BasePreflight):
         ``macro`` library (benchmarks/sector ETFs/macro series live there; the
         ``universe`` library holds the ~910 S&P 500+400 constituents). Its
         last-row date is the cleanest proxy for "DataPhase1 has run recently."
-        Tolerates short staleness (up to 7 calendar days) because the Saturday
-        research pipeline nominally runs after Friday's close — tighter
-        freshness is enforced by the predictor's daily inference, not the
-        weekly research batch.
+
+        Trading-day-aware via ``alpha_engine_lib.dates.is_fresh_in_trading_days``
+        (lib v0.27.0). max_stale=5 trading days tolerates a research-only
+        Saturday run after a holiday-shortened week without false-failing —
+        tighter freshness is enforced by the predictor's daily inference,
+        not the weekly research batch. Replaces the 7-calendar-day threshold
+        that double-counted weekends/holidays as staleness.
         """
+        from datetime import datetime, timezone
+        from alpha_engine_lib.dates import (
+            expected_last_close,
+            is_fresh_in_trading_days,
+            trading_days_stale,
+        )
         import arcticdb as adb
 
         region = os.environ.get("AWS_REGION", "us-east-1")
@@ -115,18 +124,20 @@ class ResearchPreflight(BasePreflight):
                 "ArcticDB macro.SPY has no rows — DataPhase1 has never written."
             )
 
-        last_date = pd.Timestamp(df.index.max()).normalize()
-        today = pd.Timestamp.utcnow().normalize().tz_localize(None)
-        stale_days = (today - last_date).days
-        if stale_days > 7:
+        last_date = pd.Timestamp(df.index.max()).normalize().date()
+        today_iso = datetime.now(timezone.utc).date().isoformat()
+        if not is_fresh_in_trading_days(last_date, today_iso, max_stale=5):
+            stale = trading_days_stale(last_date, today_iso)
+            expected = expected_last_close(today_iso)
             raise RuntimeError(
-                f"ArcticDB macro.SPY last_date={last_date.date()} is "
-                f"{stale_days}d stale (>7d threshold) — DataPhase1 has not "
-                f"refreshed recently."
+                f"ArcticDB macro.SPY last_date={last_date} is "
+                f"{stale} trading-day(s) behind the expected last close "
+                f"{expected} as of {today_iso} (>5 trading-day(s) threshold) — "
+                f"DataPhase1 has not refreshed recently."
             )
         log.info(
-            "preflight: ArcticDB macro.SPY last_date=%s (%dd old)",
-            last_date.date(), stale_days,
+            "preflight: ArcticDB macro.SPY last_date=%s (within 5 trading-day(s) of today)",
+            last_date,
         )
 
     def run(self) -> None:
