@@ -53,11 +53,15 @@ def extract_memories(db_conn: sqlite3.Connection, api_key: str | None = None) ->
     from langchain_anthropic import ChatAnthropic
     from langchain_core.messages import HumanMessage
     from config import ANTHROPIC_API_KEY, PER_STOCK_MODEL
+    from graph.llm_cost_tracker import get_cost_telemetry_callback
 
+    # Wire to cost-telemetry stream — see memory/semantic.py for the
+    # rationale (Phase 0.2 of the cost-optimization workstream).
     llm = ChatAnthropic(
         model=PER_STOCK_MODEL,
         anthropic_api_key=api_key or ANTHROPIC_API_KEY,
         max_tokens=256,
+        callbacks=[get_cost_telemetry_callback()],
     )
 
     n_created = 0
