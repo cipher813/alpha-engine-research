@@ -14,7 +14,7 @@ from typing import Optional
 
 from alpha_engine_lib.pillars import QualitativePillarAssessment
 from langchain_anthropic import ChatAnthropic
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.errors import GraphRecursionError
 from langgraph.prebuilt import create_react_agent
 from pydantic import BaseModel, ConfigDict, Field
@@ -116,7 +116,18 @@ def run_qual_analyst(
         "semantic_memories": semantic_memories or {},
     })
 
-    system_prompt = _build_system_prompt(team_id, market_regime, len(quant_top5))
+    # Wrap the system prompt in a SystemMessage with content-block
+    # cache_control so the (tools + system) prefix caches across the
+    # ~50 qual ReAct calls per weekly run (and across the inner ReAct
+    # loop iterations for one ticker). Cache hit/miss surfaces in
+    # ``graph.llm_cost_tracker`` telemetry — see quant_analyst.py for
+    # the full rationale and the 4096-token Haiku-4-5 minimum check.
+    system_prompt_text = _build_system_prompt(team_id, market_regime, len(quant_top5))
+    system_prompt = SystemMessage(content=[{
+        "type": "text",
+        "text": system_prompt_text,
+        "cache_control": {"type": "ephemeral"},
+    }])
 
     # ReAct loop only (no response_format). Structured-output extraction
     # is decoupled and runs as ``with_structured_output(include_raw=True)``
