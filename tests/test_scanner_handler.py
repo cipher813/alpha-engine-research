@@ -1,0 +1,189 @@
+"""Unit tests for the scanner Lambda handler (ROADMAP L1995 Phase 1)."""
+
+from __future__ import annotations
+
+import importlib.util
+import sys
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_HANDLER_PATH = _REPO_ROOT / "lambda" / "scanner_handler.py"
+
+
+def _load_handler_module():
+    """Import lambda/scanner_handler.py without using ``lambda`` as a
+    package name (Python keyword)."""
+    module_name = "lambda_scanner_handler"
+    spec = importlib.util.spec_from_file_location(module_name, _HANDLER_PATH)
+    mod = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
+    sys.modules[module_name] = mod
+    spec.loader.exec_module(mod)  # type: ignore[union-attr]
+    return mod
+
+
+@pytest.fixture
+def handler_mod():
+    mod = _load_handler_module()
+    mod._init_done = False
+    yield mod
+
+
+def _ok_artifact() -> dict:
+    return {
+        "run_date": "2026-05-30",
+        "scanner_version": "v1.0",
+        "generated_at": "2026-05-30T09:00:00+00:00",
+        "population_tickers": ["AAPL", "GOOG"],
+        "scanner_tickers": ["AMD", "BNY", "SN"],
+        "agent_input_set": ["AAPL", "GOOG", "AMD", "BNY", "SN"],
+        "filters_applied": {"min_avg_volume": 500000},
+        "stats": {
+            "universe_size": 903,
+            "post_scanner": 3,
+            "population_size": 2,
+            "agent_input_size": 5,
+            "feature_store_enriched": 903,
+            "feature_store_missing": 0,
+            "new_vs_prior_cycle": ["BNY", "SN"],
+            "dropped_vs_prior_cycle": ["PSTG"],
+            "prior_run_date": "2026-05-23",
+            "baseline_missing": False,
+        },
+    }
+
+
+class TestHandler:
+    def test_ok_when_orchestrator_succeeds(self, handler_mod):
+        with patch.object(handler_mod, "_ensure_init"), \
+             patch("data.scanner_orchestrator.build_candidates_artifact",
+                   return_value=_ok_artifact()), \
+             patch("data.scanner_orchestrator.write_candidates_artifact",
+                   return_value="candidates/2026-05-30/candidates.json"), \
+             patch("boto3.client", return_value=MagicMock()):
+            result = handler_mod.handler(
+                {"run_date": "2026-05-30"}, context=None,
+            )
+        assert result["status"] == "OK"
+        assert result["date"] == "2026-05-30"
+        # Summary surfaces the operationally interesting counts.
+        assert result["summary"]["scanner_tickers"] == 3
+        assert result["summary"]["population_tickers"] == 2
+        assert result["summary"]["new_vs_prior_cycle"] == 2
+        assert result["summary"]["dropped_vs_prior_cycle"] == 1
+        assert result["summary"]["s3_key"] == "candidates/2026-05-30/candidates.json"
+
+    def test_error_when_orchestrator_precondition_fails(self, handler_mod):
+        from data.scanner_orchestrator import ScannerOrchestratorError
+
+        with patch.object(handler_mod, "_ensure_init"), \
+             patch("data.scanner_orchestrator.build_candidates_artifact",
+                   side_effect=ScannerOrchestratorError(
+                       "feature store empty"
+                   )), \
+             patch("boto3.client", return_value=MagicMock()):
+            result = handler_mod.handler(
+                {"run_date": "2026-05-30"}, context=None,
+            )
+        assert result["status"] == "ERROR"
+        assert "feature store" in result["error"]
+
+    def test_error_when_orchestrator_raises_unexpected(self, handler_mod):
+        with patch.object(handler_mod, "_ensure_init"), \
+             patch("data.scanner_orchestrator.build_candidates_artifact",
+                   side_effect=RuntimeError("S3 unreachable")), \
+             patch("boto3.client", return_value=MagicMock()):
+            result = handler_mod.handler(
+                {"run_date": "2026-05-30"}, context=None,
+            )
+        assert result["status"] == "ERROR"
+        assert "S3 unreachable" in result["error"]
+
+    def test_error_when_s3_write_fails(self, handler_mod):
+        # Build succeeded but the S3 write itself blew up — must surface
+        # as ERROR (the artifact was lost; SF Catch handles).
+        with patch.object(handler_mod, "_ensure_init"), \
+             patch("data.scanner_orchestrator.build_candidates_artifact",
+                   return_value=_ok_artifact()), \
+             patch("data.scanner_orchestrator.write_candidates_artifact",
+                   side_effect=RuntimeError("PutObject denied")), \
+             patch("boto3.client", return_value=MagicMock()):
+            result = handler_mod.handler(
+                {"run_date": "2026-05-30"}, context=None,
+            )
+        assert result["status"] == "ERROR"
+        assert "S3 write failed" in result["error"]
+        assert "PutObject denied" in result["error"]
+
+    def test_error_when_run_date_missing(self, handler_mod):
+        with patch.object(handler_mod, "_ensure_init"):
+            result = handler_mod.handler({}, context=None)
+        assert result["status"] == "ERROR"
+        assert "run_date" in result["error"]
+
+    def test_error_when_run_date_invalid(self, handler_mod):
+        with patch.object(handler_mod, "_ensure_init"):
+            result = handler_mod.handler({"run_date": "bad"}, context=None)
+        assert result["status"] == "ERROR"
+        assert "run_date" in result["error"] or "bad" in result["error"]
+
+    def test_dry_run_short_circuits_before_s3(self, handler_mod):
+        # dry_run_llm shell-run path must NOT touch S3 or call the
+        # orchestrator. Mirrors the rationale_clustering / eval_judge
+        # dry path used by Friday-Preflight shell runs.
+        with patch.object(handler_mod, "_ensure_init"), \
+             patch("data.scanner_orchestrator.build_candidates_artifact") as mock_build, \
+             patch("boto3.client") as mock_boto:
+            result = handler_mod.handler(
+                {"dry_run_llm": True, "run_date": "2026-05-30"},
+                context=None,
+            )
+        assert result["status"] == "OK"
+        assert result["dry_run"] is True
+        mock_build.assert_not_called()
+        mock_boto.assert_not_called()
+
+    def test_run_date_threaded_through_to_orchestrator(self, handler_mod):
+        captured = {}
+
+        def fake_build(**kwargs):
+            captured.update(kwargs)
+            return _ok_artifact()
+
+        with patch.object(handler_mod, "_ensure_init"), \
+             patch("data.scanner_orchestrator.build_candidates_artifact",
+                   side_effect=fake_build), \
+             patch("data.scanner_orchestrator.write_candidates_artifact",
+                   return_value="candidates/2026-05-30/candidates.json"), \
+             patch("boto3.client", return_value=MagicMock()):
+            handler_mod.handler(
+                {"run_date": "2026-05-30"}, context=None,
+            )
+        assert captured["run_date"] == "2026-05-30"
+
+    def test_bucket_and_market_regime_overrides(self, handler_mod):
+        captured = {}
+
+        def fake_build(**kwargs):
+            captured.update(kwargs)
+            return _ok_artifact()
+
+        with patch.object(handler_mod, "_ensure_init"), \
+             patch("data.scanner_orchestrator.build_candidates_artifact",
+                   side_effect=fake_build), \
+             patch("data.scanner_orchestrator.write_candidates_artifact",
+                   return_value="candidates/2026-05-30/candidates.json"), \
+             patch("boto3.client", return_value=MagicMock()):
+            handler_mod.handler(
+                {
+                    "run_date": "2026-05-30",
+                    "bucket": "test-bucket",
+                    "market_regime": "bull",
+                },
+                context=None,
+            )
+        assert captured["bucket"] == "test-bucket"
+        assert captured["market_regime"] == "bull"
