@@ -26,6 +26,7 @@ FUNCTION_EVAL_JUDGE_PROCESS="alpha-engine-research-eval-judge-process"
 FUNCTION_EVAL_ROLLING_MEAN="alpha-engine-research-eval-rolling-mean"
 FUNCTION_RATIONALE_CLUSTERING="alpha-engine-research-rationale-clustering"
 FUNCTION_AGGREGATE_COSTS="alpha-engine-research-aggregate-costs"
+FUNCTION_SCANNER="alpha-engine-research-scanner"
 REGION="${AWS_REGION:-us-east-1}"
 BUCKET="alpha-engine-research"
 BUILD_DIR="lambda/package"
@@ -670,6 +671,15 @@ deploy_aggregate_costs() {
   _deploy_image_shared_lambda "$FUNCTION_AGGREGATE_COSTS" "aggregate_costs_handler" 300 512
 }
 
+# Standalone scanner Lambda — ROADMAP L1995 Phase 1. Shared image with
+# the main runner; CMD override sets the entry point. Timeout 300s
+# (5min) covers feature-store read + ~903-ticker quant filter pass +
+# S3 write — pure compute, no LLM calls. Memory 1024MB matches the
+# main runner's headroom for ArcticDB / pandas working sets.
+deploy_scanner() {
+  _deploy_image_shared_lambda "$FUNCTION_SCANNER" "scanner_handler" 300 1024
+}
+
 # ── Dispatch ─────────────────────────────────────────────────────────────────
 
 case "$TARGET" in
@@ -680,9 +690,10 @@ case "$TARGET" in
   eval_rolling_mean)     deploy_eval_rolling_mean ;;
   rationale_clustering)  deploy_rationale_clustering ;;
   aggregate_costs)       deploy_aggregate_costs ;;
+  scanner)               deploy_scanner ;;
   both)                  build_and_deploy_main; build_and_deploy_alerts ;;
-  all)                   build_and_deploy_main; build_and_deploy_alerts; deploy_eval_judge; deploy_eval_judge_batch; deploy_eval_rolling_mean; deploy_rationale_clustering; deploy_aggregate_costs ;;
-  *)                     echo "Usage: $0 [main|alerts|eval_judge|eval_judge_batch|eval_rolling_mean|rationale_clustering|aggregate_costs|both|all]"; exit 1 ;;
+  all)                   build_and_deploy_main; build_and_deploy_alerts; deploy_eval_judge; deploy_eval_judge_batch; deploy_eval_rolling_mean; deploy_rationale_clustering; deploy_aggregate_costs; deploy_scanner ;;
+  *)                     echo "Usage: $0 [main|alerts|eval_judge|eval_judge_batch|eval_rolling_mean|rationale_clustering|aggregate_costs|scanner|both|all]"; exit 1 ;;
 esac
 
 echo ""

@@ -140,6 +140,21 @@ jobs:
           CONFIG_REPO_DIR: ${{ github.workspace }}/alpha-engine-config
         run: bash infrastructure/deploy.sh aggregate_costs
 
+      # Standalone scanner Lambda — ROADMAP L1995 Phase 1. Same
+      # image-share pattern as the other content-bearing Lambdas, CMD
+      # override sets the entry to scanner_handler.handler. Phase 1
+      # ships the Lambda observe-only — no SF state invokes it yet
+      # (Phase 2 will insert one, gated default-off). Without this
+      # step the image-share Lambda would stay on whichever version
+      # was current at first manual deploy. Scanner logic changes in
+      # data/scanner.py + data/scanner_orchestrator.py propagate
+      # cleanly via this step.
+      - name: Deploy scanner Lambda (alpha-engine-research-scanner)
+        working-directory: alpha-engine-research
+        env:
+          CONFIG_REPO_DIR: ${{ github.workspace }}/alpha-engine-config
+        run: bash infrastructure/deploy.sh scanner
+
       - name: Report deployed version
         run: |
           echo "Triggered by: ${{ github.event_name }}"

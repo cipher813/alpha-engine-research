@@ -100,4 +100,13 @@ COPY lambda/rationale_clustering_handler.py ${LAMBDA_TASK_ROOT}/rationale_cluste
 # aggregator that PR #74 shipped (since 2026-05-01).
 COPY lambda/aggregate_costs_handler.py ${LAMBDA_TASK_ROOT}/aggregate_costs_handler.py
 
+# Standalone scanner Lambda — same image, CMD override to
+# ["scanner_handler.handler"]. Quant-filters S&P 500+400 (~903 tickers)
+# down to ~60 candidates and writes
+# s3://alpha-engine-research/candidates/{run_date}/candidates.json.
+# Per ROADMAP L1995 Phase 1 — observe-only ship; Research Lambda still
+# runs its internal scanner. Phase 5 (later) cuts Research over to read
+# the artifact + retires the internal scanner.
+COPY lambda/scanner_handler.py ${LAMBDA_TASK_ROOT}/scanner_handler.py
+
 CMD ["handler.handler"]
