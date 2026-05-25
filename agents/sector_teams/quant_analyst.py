@@ -12,7 +12,7 @@ import logging
 from typing import Optional
 
 from langchain_anthropic import ChatAnthropic
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.errors import GraphRecursionError
 from langgraph.prebuilt import create_react_agent
 
@@ -191,8 +191,25 @@ def run_quant_analyst(
         "override_tickers": override_tickers if override_tickers is not None else [],
     })
 
-    # Build system prompt
-    system_prompt = _build_system_prompt(team_id, team_params, market_regime, len(sector_tickers))
+    # Build system prompt. Wrapped in a ``SystemMessage`` with a
+    # content-block ``cache_control`` marker so the assembled prefix
+    # (tools + system) caches across the ~3000 quant ReAct calls per
+    # weekly run. The breakpoint is on the system block — caches both
+    # ``tools`` and ``system`` together since the render order is
+    # ``tools → system → messages``. Reuse model: same prefix across
+    # every ticker in the sector, same prefix across all sectors when
+    # market_regime is unchanged (regime is set once at pipeline start).
+    # Requires the assembled prefix to clear Haiku-4-5's 4096-token
+    # cache minimum — verified via scripts/measure_cache_prefixes.py
+    # before merge. On miss, ``cache_creation_input_tokens`` stays 0 in
+    # ``graph.llm_cost_tracker`` telemetry and the rollout is a no-op —
+    # no functional regression.
+    system_prompt_text = _build_system_prompt(team_id, team_params, market_regime, len(sector_tickers))
+    system_prompt = SystemMessage(content=[{
+        "type": "text",
+        "text": system_prompt_text,
+        "cache_control": {"type": "ephemeral"},
+    }])
 
     # Create ReAct agent via LangGraph. The ReAct loop runs until the model
     # produces a final-text answer (no more tool calls). The structured-
