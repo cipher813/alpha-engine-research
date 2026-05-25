@@ -40,10 +40,19 @@ import argparse
 import json
 import sys
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Any
 
-import anthropic
-from langchain_core.utils.function_calling import convert_to_openai_tool
+# Repo root on sys.path so ``from config import ...`` and
+# ``from agents.prompt_loader import ...`` resolve when invoked as
+# ``python scripts/measure_cache_prefixes.py``. Mirrors the pattern in
+# scripts/smoke_eval_judge.py.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+import anthropic  # noqa: E402
+from langchain_core.utils.function_calling import convert_to_openai_tool  # noqa: E402
 
 # ── Model-specific cache minimums (tokens) ────────────────────────────────
 # Per Anthropic prompt-caching docs: any prefix below this silently won't
