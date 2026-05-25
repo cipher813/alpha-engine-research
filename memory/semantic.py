@@ -41,11 +41,20 @@ def extract_semantic_memories(
     from langchain_anthropic import ChatAnthropic
     from langchain_core.messages import HumanMessage
     from config import ANTHROPIC_API_KEY, PER_STOCK_MODEL
+    from graph.llm_cost_tracker import get_cost_telemetry_callback
 
+    # Wire to cost-telemetry stream (Phase 0.2 of the cost-optimization
+    # workstream — previously this site was emitting LLM calls with
+    # zero ``cost_usd`` attribution since the ``ChatAnthropic`` instance
+    # had no telemetry callback). The callback pipes per-call token
+    # counts into whatever ``track_llm_cost`` frame is active on the
+    # research SF context. If no frame is active (e.g. unit-test path
+    # without ``track_llm_cost`` wrap), the callback is a no-op.
     llm = ChatAnthropic(
         model=PER_STOCK_MODEL,
         anthropic_api_key=api_key or ANTHROPIC_API_KEY,
         max_tokens=256,
+        callbacks=[get_cost_telemetry_callback()],
     )
 
     n_created = 0
