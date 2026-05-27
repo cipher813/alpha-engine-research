@@ -45,9 +45,12 @@ _ALLOWLIST: dict[str, set[int]] = {
     # langchain_utils import + an explicit max_retries=
     # SECTOR_TEAM_LLM_MAX_RETRIES kwarg on the critic ChatAnthropic),
     # then 476 → 562 by the drawdown-leg surface (added
-    # _format_drawdown_leg + the continuous-statement reframe).
+    # _format_drawdown_leg + the continuous-statement reframe),
+    # then 562 → 572 by the Phase 2.A.2 scorecard-kwarg arc (added
+    # `prior_cycle_scorecard` to run_macro_agent signature + an inline
+    # comment + kwarg passthrough in the _PROMPT_TEMPLATE.format call).
     # Same intentional 512-literal critic call, just relocated.
-    "agents/macro_agent.py": {562},
+    "agents/macro_agent.py": {572},
 }
 
 
