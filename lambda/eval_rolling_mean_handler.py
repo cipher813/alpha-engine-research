@@ -97,4 +97,35 @@ def handler(event, context):
         summary["combos_skipped_no_data"],
         len(summary["failed"]),
     )
-    return {"status": status, "summary": summary}
+
+    # Judge-calibration κ report (ROADMAP L480). Secondary observability
+    # hung off this weekly eval Lambda — it reads the operator calibration
+    # corpus and writes a κ report to S3 for the backtester evaluator
+    # email to surface. A failure here MUST NOT sink the rolling-mean
+    # metric (the primary deliverable), but per [[feedback_no_silent_fails]]
+    # it is recorded: WARN log + a `calibration` field in the return value.
+    calibration: dict
+    try:
+        from evals.calibration_kappa import emit_calibration_report
+
+        report = emit_calibration_report()
+        calibration = {
+            "status": report["status"],
+            "n_cells": report["n_cells"],
+            "n_cells_sufficient": report["n_cells_sufficient"],
+            "n_paired_reviews": report["n_paired_reviews"],
+        }
+        logger.info(
+            "[eval_rolling_mean_handler] calibration κ status=%s cells=%d sufficient=%d",
+            calibration["status"],
+            calibration["n_cells"],
+            calibration["n_cells_sufficient"],
+        )
+    except Exception as exc:  # noqa: BLE001 — secondary path, see comment above
+        logger.warning(
+            "[eval_rolling_mean_handler] calibration κ report failed (non-fatal): %s",
+            exc,
+        )
+        calibration = {"status": "ERROR", "error": str(exc)}
+
+    return {"status": status, "summary": summary, "calibration": calibration}
