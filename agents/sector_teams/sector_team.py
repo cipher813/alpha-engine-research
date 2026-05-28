@@ -158,10 +158,13 @@ def run_sector_team(team_id: str, ctx: SectorTeamContext) -> dict:
 
     # ── Step 4: Peer review → final 0-3 ──────────────────────────────────────
     # Stage D' Wire 1: peer_review applies a regime-conditional pick
-    # gate after selection. Bear / caution regimes raise the minimum
-    # composite-score bar; teams now allowed to emit 0 picks when no
-    # candidate clears the bar. intensity_z (from regime substrate)
-    # scales the bar — deeper risk-off → higher bar.
+    # gate after selection. Risk-off conditions (negative intensity_z
+    # from the continuous regime substrate) raise the minimum composite-
+    # score bar; teams now allowed to emit 0 picks when no candidate
+    # clears the bar. Deeper risk-off → higher bar. (Pre-v0.42.0 the
+    # docstring named the legacy 3-class projection
+    # "bear/caution raise the bar"; the implementation has always read
+    # the continuous intensity_z.)
     peer_output = run_peer_review(
         team_id=team_id,
         quant_picks=top5,

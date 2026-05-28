@@ -113,8 +113,15 @@ def run_peer_review(
 
     # Stage D' Wire 1: regime-conditional gate — applied after selection.
     # Teams may emit 0 picks if no candidate clears the regime-conditional
-    # composite-score threshold (bear/caution raise the bar; bull/neutral
-    # use base threshold). Off by default until SECTOR_REGIME_PICK_GATE_ENABLED.
+    # composite-score threshold. The formula uses the continuous
+    # regime_intensity_z (positive=risk-on, negative=risk-off): deeper
+    # risk-off raises the threshold; risk-on conditions keep the base.
+    # This is the SOTA continuous form (per
+    # regime-conditioning-260510.md / regime-v3-260514.md); a discrete
+    # 3-class projection (bear raises the bar; bull/neutral use base)
+    # is the legacy framing the docstring previously named — the actual
+    # implementation has always read intensity_z. Off by default until
+    # SECTOR_REGIME_PICK_GATE_ENABLED.
     gated_picks = _apply_regime_pick_gate(
         result["picks"], market_regime, regime_intensity_z, team_id,
     )
