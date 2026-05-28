@@ -53,7 +53,22 @@ def _partial_summary() -> dict:
     return s
 
 
+def _calib_report(status: str = "empty") -> dict:
+    return {
+        "status": status, "n_cells": 0,
+        "n_cells_sufficient": 0, "n_paired_reviews": 0,
+    }
+
+
 class TestHandler:
+    @pytest.fixture(autouse=True)
+    def _stub_calibration(self):
+        """Stub the κ-report side path so the handler tests never touch
+        AWS. The two dedicated tests below override this."""
+        with patch("evals.calibration_kappa.emit_calibration_report",
+                   return_value=_calib_report()):
+            yield
+
     def test_ok_when_no_failures(self, handler_mod):
         with patch.object(handler_mod, "_ensure_init"), \
              patch("evals.rolling_mean.compute_and_emit_4w_mean",
@@ -61,6 +76,29 @@ class TestHandler:
             result = handler_mod.handler({}, context=None)
         assert result["status"] == "OK"
         assert result["summary"]["datapoints_emitted"] == 12
+
+    def test_calibration_report_surfaced_in_result(self, handler_mod):
+        with patch.object(handler_mod, "_ensure_init"), \
+             patch("evals.rolling_mean.compute_and_emit_4w_mean",
+                   return_value=_ok_summary()), \
+             patch("evals.calibration_kappa.emit_calibration_report",
+                   return_value=_calib_report("ok")):
+            result = handler_mod.handler({}, context=None)
+        assert result["status"] == "OK"
+        assert result["calibration"]["status"] == "ok"
+
+    def test_calibration_failure_is_non_fatal(self, handler_mod):
+        # κ side path failing must NOT change the primary rolling-mean
+        # status — it is recorded in the calibration field instead.
+        with patch.object(handler_mod, "_ensure_init"), \
+             patch("evals.rolling_mean.compute_and_emit_4w_mean",
+                   return_value=_ok_summary()), \
+             patch("evals.calibration_kappa.emit_calibration_report",
+                   side_effect=RuntimeError("S3 down")):
+            result = handler_mod.handler({}, context=None)
+        assert result["status"] == "OK"
+        assert result["calibration"]["status"] == "ERROR"
+        assert "S3 down" in result["calibration"]["error"]
 
     def test_partial_when_any_failure(self, handler_mod):
         with patch.object(handler_mod, "_ensure_init"), \
