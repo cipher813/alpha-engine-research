@@ -333,7 +333,7 @@ class TestSectorTeamContextThreading:
     def test_focus_list_default_empty_list(self):
         from agents.sector_teams.sector_team import SectorTeamContext
         ctx = SectorTeamContext(
-            scanner_universe=[], sector_map={}, price_data={},
+            scanner_universe=[], agent_input_set=[], sector_map={}, price_data={},
             technical_scores={}, market_regime="neutral", prior_theses={},
             held_tickers=[], news_data_by_ticker={}, analyst_data_by_ticker={},
             insider_data_by_ticker={}, prior_sector_ratings={},
@@ -346,7 +346,7 @@ class TestSectorTeamContextThreading:
         from agents.sector_teams.sector_team import SectorTeamContext
         sample = [{"ticker": "NVDA", "focus_score": 85.0, "stance": "momentum"}]
         ctx = SectorTeamContext(
-            scanner_universe=[], sector_map={}, price_data={},
+            scanner_universe=[], agent_input_set=[], sector_map={}, price_data={},
             technical_scores={}, market_regime="bull", prior_theses={},
             held_tickers=[], news_data_by_ticker={}, analyst_data_by_ticker={},
             insider_data_by_ticker={}, prior_sector_ratings={},
@@ -360,7 +360,7 @@ class TestSectorTeamContextThreading:
         from agents.sector_teams.sector_team import SectorTeamContext
         shared = []
         ctx = SectorTeamContext(
-            scanner_universe=[], sector_map={}, price_data={},
+            scanner_universe=[], agent_input_set=[], sector_map={}, price_data={},
             technical_scores={}, market_regime="bull", prior_theses={},
             held_tickers=[], news_data_by_ticker={}, analyst_data_by_ticker={},
             insider_data_by_ticker={}, prior_sector_ratings={},
@@ -375,7 +375,7 @@ class TestSectorTeamContextThreading:
         override_tickers all coexist on SectorTeamContext."""
         from agents.sector_teams.sector_team import SectorTeamContext
         ctx = SectorTeamContext(
-            scanner_universe=[], sector_map={}, price_data={},
+            scanner_universe=[], agent_input_set=[], sector_map={}, price_data={},
             technical_scores={}, market_regime="bear", prior_theses={},
             held_tickers=[], news_data_by_ticker={}, analyst_data_by_ticker={},
             insider_data_by_ticker={}, prior_sector_ratings={},

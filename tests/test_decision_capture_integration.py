@@ -77,6 +77,7 @@ def fake_ctx():
     from agents.sector_teams.sector_team import SectorTeamContext
     return SectorTeamContext(
         scanner_universe=["AAPL", "MSFT", "JPM", "JNJ", "XOM"],
+        agent_input_set=["AAPL", "MSFT", "JPM", "JNJ", "XOM"],
         sector_map={
             "AAPL": "Technology", "MSFT": "Technology",
             "JPM": "Financial", "JNJ": "Healthcare", "XOM": "Energy",
