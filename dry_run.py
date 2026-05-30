@@ -194,7 +194,9 @@ def _stub_run_sector_team(team_id, ctx, **kwargs):
     from agents.sector_teams.team_config import get_team_tickers
     from agents.sector_teams.sector_team import _sector_team_inverse
 
-    sector_tickers = get_team_tickers(team_id, ctx.scanner_universe, ctx.sector_map)
+    # L1995 Phase 5 / L4464: mirror prod — screen the pre-filtered
+    # candidate set (agent_input_set), not the full sector slice.
+    sector_tickers = get_team_tickers(team_id, ctx.agent_input_set, ctx.sector_map)
 
     if sector_tickers:
         quant = _stub_run_quant_analyst(
@@ -412,6 +414,13 @@ def install_dry_run_stubs(archive_manager: Any | None = None) -> Callable[[], No
         "ALPHA_ENGINE_DECISION_CAPTURE_ENABLED"
     )
     os.environ["ALPHA_ENGINE_DECISION_CAPTURE_ENABLED"] = "false"
+
+    # L1995 Phase 5 / L4464: signal to fetch_data that this is a stub/dry-run
+    # pass so it tolerates a missing candidates.json (falls back to the full
+    # scanner_universe for wiring validation instead of hard-failing). Prod
+    # never sets this sentinel — there the missing artifact fails loud.
+    saved_env["ALPHA_ENGINE_DRY_RUN_STUB"] = os.environ.get("ALPHA_ENGINE_DRY_RUN_STUB")
+    os.environ["ALPHA_ENGINE_DRY_RUN_STUB"] = "true"
 
     # Suppress LangSmith tracing during stub-pass so synthetic runs do not
     # land in the prod LangSmith project. Restored on exit so the real

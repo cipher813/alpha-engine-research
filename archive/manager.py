@@ -658,6 +658,26 @@ class ArchiveManager:
             log.debug("Failed to load predictions JSON: %s", e)
             return {}
 
+    def load_candidates_json(self, run_date: str) -> Optional[dict]:
+        """Load the standalone Scanner SF state's candidates artifact at
+        ``candidates/{run_date}/candidates.json`` (L1995).
+
+        Returns the parsed artifact dict, or None if absent/unparseable.
+        The caller (``fetch_data``) decides the fail-loud policy: the
+        Saturday SF runs the Scanner state unconditionally upstream of
+        Research (post-#338), so absence is a real upstream failure, not a
+        soft fallback to the raw ~900 universe.
+        """
+        key = f"candidates/{run_date}/candidates.json"
+        try:
+            raw = self._s3_get(key)
+            if not raw:
+                return None
+            return json.loads(raw)
+        except Exception as e:
+            log.warning("Failed to load candidates JSON %s: %s", key, e)
+            return None
+
     def write_predictor_outcome(self, symbol: str, prediction_date: str, outcome: dict) -> None:
         """
         Insert or update a predictor_outcomes row.

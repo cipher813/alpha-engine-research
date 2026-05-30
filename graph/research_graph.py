@@ -301,6 +301,14 @@ class ResearchState(TypedDict, total=False):
     price_data: Annotated[dict[str, Any], take_last]
     technical_scores: Annotated[dict[str, dict], take_last]
     scanner_universe: Annotated[list[str], take_last]
+    # Sector-team screening input (L1995 Phase 5 / L4464): the standalone
+    # Scanner SF state's candidate set (candidates.json::scanner_tickers)
+    # ∪ the held population. Replaces the raw-~900-by-sector handoff that
+    # overran the Lambda recursion budget (each quant ReAct agent hit
+    # recursion_limit on 92-217 tickers → 0 picks → retry storm → 900s
+    # timeout). ``scanner_universe`` stays the FULL universe for the
+    # exit_evaluator constituent whitelist.
+    agent_input_set: Annotated[list[str], take_last]
     sector_map: Annotated[dict[str, str], take_last]
     macro_data: Annotated[dict, take_last]
     current_population: Annotated[list[dict], take_last]
@@ -545,6 +553,63 @@ def _read_institutional_substrate(
 
 # ── Node Functions ────────────────────────────────────────────────────────────
 
+def _resolve_agent_input_set(
+    am: "ArchiveManager",
+    run_date: str,
+    scanner_universe: list[str],
+    population_tickers: list[str],
+) -> list[str]:
+    """Resolve the sector-team screening input (L1995 Phase 5 / L4464).
+
+    The standalone Scanner SF state (run upstream of Research) writes
+    ``candidates/{run_date}/candidates.json`` (903 → ~60 quant-filtered via
+    ``run_quant_filter`` — the same primitive Research used to embed inline).
+    Feed the sector teams that pre-filtered set ∪ the held population instead
+    of the raw ~900-by-sector slice that overran the Lambda recursion budget
+    (each quant ReAct agent hit recursion_limit on 92-217 tickers → 0 picks →
+    retry storm → 900s timeout). ``scanner_universe`` is retained by the
+    caller for the exit_evaluator constituent whitelist.
+
+    The held population is sourced from Research's own state
+    (``population_tickers``), NOT ``candidates.json::population_tickers`` which
+    is cold-start-empty (it depends on the prior signals.json).
+
+    Fail-loud: a missing/empty ``candidates.json`` raises. The Scanner SF
+    state runs unconditionally upstream of Research (L1995 Phase 3, post-#338),
+    so absence is a real upstream failure — NOT a soft fallback to the raw
+    ~900 universe (that path is exactly what overruns the budget, L4464).
+    The ``ALPHA_ENGINE_DRY_RUN_STUB`` sentinel (set only by the stub/offline
+    installers) relaxes this to a full-universe fallback for wiring validation;
+    production never sets it.
+    """
+    import os as _os
+    candidates = am.load_candidates_json(run_date)
+    scanner_tickers = (candidates or {}).get("scanner_tickers") or []
+    if not scanner_tickers:
+        if _os.environ.get("ALPHA_ENGINE_DRY_RUN_STUB", "").lower() == "true":
+            logger.warning(
+                "[fetch_data] dry-run stub: no candidates.json for %s — "
+                "falling back to full scanner_universe for wiring validation "
+                "(NOT a real candidate selection)", run_date,
+            )
+            scanner_tickers = scanner_universe
+        else:
+            raise RuntimeError(
+                f"[fetch_data] candidates.json missing or empty scanner_tickers "
+                f"for run_date={run_date} (key candidates/{run_date}/candidates.json). "
+                f"The standalone Scanner SF state must run + produce candidates "
+                f"upstream of Research (L1995). Refusing to fall back to the raw "
+                f"~900 universe (that path overruns the Lambda budget, L4464)."
+            )
+    agent_input_set = sorted(set(scanner_tickers) | set(population_tickers))
+    logger.info(
+        "[fetch_data] sector-team input set: %d tickers "
+        "(scanner %d ∪ held population %d)",
+        len(agent_input_set), len(scanner_tickers), len(population_tickers),
+    )
+    return agent_input_set
+
+
 def fetch_data(state: ResearchState) -> dict:
     """Load all shared data needed by sector teams, macro, and exit evaluator."""
     from data.fetchers.price_fetcher import (
@@ -584,6 +649,11 @@ def fetch_data(state: ResearchState) -> dict:
         sector_map.setdefault(p["ticker"], p.get("sector", "Unknown"))
 
     all_tickers = list(set(population_tickers + scanner_universe))
+
+    # ── L1995 Phase 5 cutover: sector-team screening input ───────────────────
+    agent_input_set = _resolve_agent_input_set(
+        am, run_date, scanner_universe, population_tickers,
+    )
 
     # ── Feature store first: load pre-computed features for ~900 tickers ─────
     # The predictor's daily inference writes technical + interaction features for
@@ -825,6 +895,7 @@ def fetch_data(state: ResearchState) -> dict:
 
     return {
         "scanner_universe": scanner_universe,
+        "agent_input_set": agent_input_set,
         "sector_map": sector_map,
         "price_data": price_data,
         "technical_scores": technical_scores,
@@ -1036,6 +1107,7 @@ def sector_team_node(state: ResearchState) -> dict:
 
     ctx = SectorTeamContext(
         scanner_universe=state.get("scanner_universe", []),
+        agent_input_set=state.get("agent_input_set", []),
         sector_map=state.get("sector_map", {}),
         price_data=state.get("price_data", {}),
         technical_scores=state.get("technical_scores", {}),
@@ -1078,7 +1150,7 @@ def sector_team_node(state: ResearchState) -> dict:
     # lookups for sector_quant / sector_qual hit the fallback stub today
     # (token counts at 0). A future PR can split the cost-tracker scopes
     # if per-sub-agent cost attribution becomes necessary.
-    team_tickers = get_team_tickers(team_id, ctx.scanner_universe, ctx.sector_map)
+    team_tickers = get_team_tickers(team_id, ctx.agent_input_set, ctx.sector_map)
     quant_output = result.get("quant_output", {}) or {}
     qual_output = result.get("qual_output", {}) or {}
 

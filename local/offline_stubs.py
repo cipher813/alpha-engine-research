@@ -226,6 +226,10 @@ def install_offline_stubs():
             "(would otherwise hit real S3 with synthetic data)."
         )
     _os.environ["ALPHA_ENGINE_DECISION_CAPTURE_ENABLED"] = "false"
+    # L1995 Phase 5 / L4464: tolerate a missing candidates.json in offline
+    # runs (fetch_data falls back to the full scanner_universe for wiring
+    # validation instead of hard-failing). Prod never sets this sentinel.
+    _os.environ["ALPHA_ENGINE_DRY_RUN_STUB"] = "true"
 
     targets = [
         # Data fetchers
@@ -353,6 +357,11 @@ def install_llm_only_stubs():
             "overriding to 'false' for stub-llm run safety."
         )
     _os.environ["ALPHA_ENGINE_DECISION_CAPTURE_ENABLED"] = "false"
+    # L1995 Phase 5 / L4464: tolerate a missing candidates.json (fetch_data
+    # falls back to the full scanner_universe for wiring validation). The
+    # --stub-llm path still hits real S3 for data, so candidates.json MAY be
+    # present; the sentinel just prevents a hard-fail when it isn't.
+    _os.environ["ALPHA_ENGINE_DRY_RUN_STUB"] = "true"
 
     targets = [
         # LLM agents only — leave data fetchers, archive, S3 untouched.

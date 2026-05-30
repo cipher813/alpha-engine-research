@@ -48,6 +48,12 @@ log = logging.getLogger(__name__)
 class SectorTeamContext:
     """Bundled context for a sector team run — avoids 17-parameter function signatures."""
     scanner_universe: list[str]
+    # L1995 Phase 5 / L4464: the pre-filtered sector-team screening input
+    # (standalone scanner candidate set ∪ held population). The quant/qual
+    # ReAct agents screen THIS (~10-15/sector), not the full sector slice
+    # of scanner_universe (92-217/sector) which overran the recursion
+    # budget. scanner_universe is retained for non-screening consumers.
+    agent_input_set: list[str]
     sector_map: dict[str, str]
     price_data: dict[str, Any]
     technical_scores: dict[str, dict]
@@ -104,7 +110,11 @@ def run_sector_team(team_id: str, ctx: SectorTeamContext) -> dict:
              team_id, len(ctx.scanner_universe), len(ctx.held_tickers))
 
     # ── Step 1: Get sector tickers ────────────────────────────────────────────
-    sector_tickers = get_team_tickers(team_id, ctx.scanner_universe, ctx.sector_map)
+    # L1995 Phase 5 / L4464: screen the pre-filtered candidate set ∪ held
+    # population (agent_input_set), NOT the full sector slice of the raw
+    # ~900 universe. ~10-15 tickers/sector converges inside the ReAct
+    # recursion budget; 92-217 did not (recursion_limit → 0 picks → retry).
+    sector_tickers = get_team_tickers(team_id, ctx.agent_input_set, ctx.sector_map)
     log.info("[team:%s] %d tickers in sector", team_id, len(sector_tickers))
 
     if not sector_tickers:
