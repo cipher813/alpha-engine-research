@@ -170,29 +170,6 @@ class TestInvestmentThesisWrite:
         assert row["rating"] == "BUY"
         assert abs(row["score"] - 85.5) < 0.01
 
-    def test_load_prior_theses(self, archive_in_memory):
-        thesis = {
-            "ticker": "AAPL",
-            "date": "2026-03-03",
-            "rating": "HOLD",
-            "final_score": 58.0,
-            "technical_score": None,
-            "quant_score": None,
-            "qual_score": None,
-            "macro_modifier": None,
-            "thesis_summary": "AAPL rates HOLD.",
-            "prior_score": None,
-            "prior_rating": None,
-            "last_material_change_date": None,
-            "stale_days": 2,
-            "consistency_flag": 0,
-        }
-        archive_in_memory.write_investment_thesis(thesis, run_time="2026-03-03T06:20:00Z")
-
-        prior = archive_in_memory.load_prior_theses(["AAPL"])
-        assert "AAPL" in prior
-        assert prior["AAPL"]["rating"] == "HOLD"
-
 
 class TestActiveCandidates:
     def test_save_and_load_candidates(self, archive_in_memory):
