@@ -3080,7 +3080,7 @@ def archive_writer(state: ResearchState) -> dict:
             logger.warning("Failed to save rotation event: %s", e)
 
     # Persist per-ticker investment_thesis rows. This is what feeds
-    # `prior_theses` on the next run via `archive.manager.load_prior_theses`.
+    # `prior_theses` on the next run via `archive.manager.load_latest_theses`.
     # Until this fix the writer existed but had zero callers, so every population
     # member added since 2026-03-16 was an orphan with no thesis. PR #42
     # (2026-04-22) hard-fails downstream when a held ticker's thesis_update
