@@ -133,6 +133,13 @@ for f in universe.yaml scoring.yaml; do
         exit 1
     fi
 done
+# The agents load proprietary prompt templates at import time from
+# research/prompts/*.txt (gitignored from the research repo). Without them the
+# full graph import fails (load_prompt). Stage the whole research config dir.
+if [ ! -d "$CONFIG_DIR/prompts" ]; then
+    echo "ERROR: research prompts dir not found at $CONFIG_DIR/prompts — is alpha-engine-config cloned + pulled?"
+    exit 1
+fi
 
 # ── Cleanup + spot-interruption retry trap (mirrors spot_data_weekly.sh) ─────
 INSTANCE_ID=""
@@ -230,9 +237,9 @@ S3_STAGING="s3://${S3_BUCKET}/${S3_STAGING_PREFIX}"
 echo "==> Waiting for instance to enter running state..."
 aws ec2 wait instance-running --instance-ids "$INSTANCE_ID" --region "$AWS_REGION"
 
-echo "==> Staging research config → ${S3_STAGING}/config/"
-aws s3 cp "$CONFIG_DIR/universe.yaml" "${S3_STAGING}/config/universe.yaml" --region "$AWS_REGION" --quiet
-aws s3 cp "$CONFIG_DIR/scoring.yaml" "${S3_STAGING}/config/scoring.yaml" --region "$AWS_REGION" --quiet
+echo "==> Staging research config (yamls + prompts/) → ${S3_STAGING}/config/"
+aws s3 cp "$CONFIG_DIR/" "${S3_STAGING}/config/" --recursive \
+    --exclude "__pycache__/*" --region "$AWS_REGION" --quiet
 
 # ── Wait for the SSM agent to register ────────────────────────────────────────
 echo "==> Waiting for SSM agent to come Online..."
@@ -320,9 +327,8 @@ echo "Using: \$(\$PYTHON_BIN --version)"
 git clone --depth 1 --branch ${BRANCH} https://github.com/cipher813/alpha-engine-research.git /home/ec2-user/alpha-engine-research
 
 mkdir -p /home/ec2-user/alpha-engine-config/research
-aws s3 cp ${S3_STAGING}/config/universe.yaml /home/ec2-user/alpha-engine-config/research/universe.yaml --region ${AWS_REGION} --quiet
-aws s3 cp ${S3_STAGING}/config/scoring.yaml /home/ec2-user/alpha-engine-config/research/scoring.yaml --region ${AWS_REGION} --quiet
-echo "Bootstrap complete: repo cloned, research config staged."
+aws s3 cp ${S3_STAGING}/config/ /home/ec2-user/alpha-engine-config/research/ --recursive --region ${AWS_REGION} --quiet
+echo "Bootstrap complete: repo cloned, research config (yamls + $(ls /home/ec2-user/alpha-engine-config/research/prompts/*.txt 2>/dev/null | wc -l) prompts) staged."
 BOOTSTRAP
 
 # ── Install python deps ─────────────────────────────────────────────────────
