@@ -112,6 +112,14 @@ def test_load_prior_sector_scores_db_error_is_graceful():
 
 
 # ── prompt rendering (flag-gated path) ───────────────────────────────
+#
+# These mock ``load_prompt`` so they're HERMETIC: the de-blended template
+# (``ic_cio_evaluation_deblended``) lives in the private alpha-engine-config
+# repo, which research CI checks out at MAIN — the v1.5.0 file isn't there
+# until its config PR merges. The candidate-line rendering (the part under
+# test) is built in code BEFORE ``.format()``, so a stub template that echoes
+# ``{candidates_text}`` exercises it fully while also pinning which template
+# name the flag selects.
 
 
 def _prompt_kwargs():
@@ -125,28 +133,55 @@ def _prompt_kwargs():
     )
 
 
-def test_prompt_off_path_has_no_sector_neutral_line():
+class _FakePrompt:
+    """Minimal stand-in for the loaded Prompt — echoes candidates_text and
+    records the template name it was loaded as."""
+
+    def __init__(self, name):
+        self.name = name
+
+    def format(self, **kw):
+        return f"[template:{self.name}]\n{kw['candidates_text']}"
+
+
+@pytest.fixture
+def fake_load_prompt(monkeypatch):
+    names: list[str] = []
+
+    def _fake(name):
+        names.append(name)
+        return _FakePrompt(name)
+
+    monkeypatch.setattr(
+        "agents.investment_committee.ic_cio.load_prompt", _fake,
+    )
+    return names
+
+
+def test_prompt_off_path_has_no_sector_neutral_line(fake_load_prompt):
     candidates = [_candidate("AAA", "Tech")]
     out = _build_cio_prompt(candidates, **_prompt_kwargs(), deblended=False)
     assert "Sector-Neutral Quality" not in out
     assert "AAA [Tech]" in out
+    assert fake_load_prompt == ["ic_cio_evaluation"]  # legacy template selected
 
 
-def test_prompt_deblended_renders_rank_and_loads_v15_template():
+def test_prompt_deblended_renders_rank_and_loads_v15_template(fake_load_prompt):
     candidates = [_candidate("AAA", "Tech"), _candidate("BBB", "Tech")]
     snq = {"AAA": 2.5, "BBB": -1.0}  # AAA strongly above sector, BBB below
     out = _build_cio_prompt(
         candidates, **_prompt_kwargs(),
         deblended=True, sector_neutral_quality=snq,
     )
-    # The v1.5.0 template framing + per-candidate rank are present.
+    # The de-blended template is selected and the per-candidate rank renders.
+    assert fake_load_prompt == ["ic_cio_evaluation_deblended"]
     assert "Sector-Neutral Quality:" in out
     assert "100/100" in out  # AAA is top of the 2-name pool → pct rank 1.0
     # AAA's rank line precedes BBB's (AAA is the stronger neutral quality).
     assert out.index("AAA [Tech]") < out.index("BBB [Tech]")
 
 
-def test_prompt_deblended_handles_missing_quality():
+def test_prompt_deblended_handles_missing_quality(fake_load_prompt):
     # A candidate absent from the map renders "n/a", never raises.
     candidates = [_candidate("AAA", "Tech"), _candidate("ZZZ", "Tech")]
     out = _build_cio_prompt(
