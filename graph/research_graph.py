@@ -60,6 +60,7 @@ from config import (
     CIO_MIN_NEW_ENTRANTS,
     CIO_FORCE_FILL_CONVICTION_FLOOR,
     CIO_NEW_ENTRANT_ALERT_FLOOR,
+    CIO_DEBLENDED_ORCHESTRATION,
     POPULATION_CFG,
     RATING_BUY_THRESHOLD,
     RATING_SELL_THRESHOLD,
@@ -87,7 +88,12 @@ from agents.sector_teams.team_config import (
 )
 from agents.sector_teams.sector_team import run_sector_team, SectorTeamContext
 from agents.macro_agent import run_macro_agent_with_reflection
-from agents.investment_committee.ic_cio import run_cio
+from agents.investment_committee.ic_cio import (
+    run_cio,
+    build_sector_neutral_quality_map,
+    _PROMPT_DEFAULT,
+    _PROMPT_DEBLENDED,
+)
 from agents.prompt_loader import load_prompt
 from data.population_selector import (
     compute_exits_and_open_slots,
@@ -2232,13 +2238,36 @@ def cio_node(state: ResearchState) -> dict:
     except Exception as e:
         logger.debug("[cio] prior IC decisions not available: %s", e)
 
+    # De-blended CIO orchestration (L4564): when the flag is ON, compute the
+    # deterministic sector-neutral stock-quality map (the rubric's per-sector
+    # bias stripped via the trailing-sector baseline from research.db) so the
+    # CIO ranks on apples-to-apples quality and weighs the sector tilt as a
+    # SEPARATE lever. Default OFF → run_cio uses the legacy prompt + raw
+    # scores, byte-identical to before (inert merge).
+    _deblended = CIO_DEBLENDED_ORCHESTRATION
+    _sector_neutral_quality = None
+    if _deblended:
+        _am = state.get("archive_manager")
+        _db_conn = getattr(_am, "db_conn", None) if _am else None
+        _sector_neutral_quality = build_sector_neutral_quality_map(
+            candidates,
+            state.get("investment_theses", {}),
+            _db_conn,
+            state.get("run_date", ""),
+        )
+        logger.info(
+            "[cio] de-blend ON — sector-neutral quality computed for %d/%d "
+            "candidates", len(_sector_neutral_quality), len(candidates),
+        )
+    _cio_prompt_name = _PROMPT_DEBLENDED if _deblended else _PROMPT_DEFAULT
+
     # Cost-telemetry scope wraps the single CIO Anthropic call.
     with track_llm_cost(
         agent_id="ic_cio",
         node_name="cio_node",
         run_type="weekly_research",
         run_id=derive_run_id(state),
-        prompt=load_prompt("ic_cio_evaluation"),
+        prompt=load_prompt(_cio_prompt_name),
     ):
         cio_result = run_cio(
             candidates=candidates,
@@ -2260,6 +2289,8 @@ def cio_node(state: ResearchState) -> dict:
             # is off / artifact missing — CIO falls back to pre-Phase-2
             # behavior (no prior-cycle outcome data in its prompt).
             prior_cycle_scorecard=state.get("prior_cycle_scorecard_text"),
+            deblended=_deblended,
+            sector_neutral_quality=_sector_neutral_quality,
         )
 
     # Schema validation on CIO output shapes (strict-by-default).

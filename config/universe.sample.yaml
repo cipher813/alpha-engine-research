@@ -78,6 +78,15 @@ cio:
   # Below this many net-new entrants/week, emit a loud tripwire (WARN + CW
   # metric NewEntrantsBelowFloor). Defaults to min_new_entrants.
   new_entrant_alert_floor: 2
+  # De-blended CIO orchestration (L4564). When true, the CIO ranks on a
+  # deterministic SECTOR-NEUTRAL stock-quality score (the shared rubric's
+  # per-sector bias stripped via a trailing-sector baseline from research.db)
+  # and weighs the sector tilt as a SEPARATE lever — instead of the raw,
+  # sector-biased composite that double-counts with the sector ratings it also
+  # receives. Default false (the merge is inert). The env var
+  # CIO_DEBLENDED_ORCHESTRATION on the Lambda OVERRIDES this, so the soak flips
+  # ON with no redeploy.
+  deblended_orchestration: false
 
 archive:
   retain_history: true

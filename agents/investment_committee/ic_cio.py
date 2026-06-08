@@ -23,6 +23,12 @@ from agents.langchain_utils import (
 
 log = logging.getLogger(__name__)
 
+# Prompt variants — the de-blended path (L4564) selects a distinct v1.5.0
+# template so the flag flip is a clean A/B + instant rollback (flip OFF →
+# the legacy prompt) with no shared-template KeyError risk.
+_PROMPT_DEFAULT = "ic_cio_evaluation"
+_PROMPT_DEBLENDED = "ic_cio_evaluation_deblended"
+
 
 def _compute_advance_bounds(
     n_candidates: int,
@@ -70,6 +76,8 @@ def run_cio(
     min_new_entrants: int = 2,
     force_fill_conviction_floor: float = 60.0,
     prior_cycle_scorecard: Optional[str] = None,
+    deblended: bool = False,
+    sector_neutral_quality: dict[str, float] | None = None,
 ) -> dict:
     """
     Run the CIO evaluation in a single batch Sonnet call.
@@ -138,11 +146,14 @@ def run_cio(
         callbacks=[get_cost_telemetry_callback()],
     )
 
+    prompt_name = _PROMPT_DEBLENDED if deblended else _PROMPT_DEFAULT
     prompt = _build_cio_prompt(
         candidates, macro_context, sector_ratings,
         current_population, cap, exits, run_date,
         prior_decisions=prior_decisions,
         prior_cycle_scorecard=prior_cycle_scorecard,
+        deblended=deblended,
+        sector_neutral_quality=sector_neutral_quality,
     )
 
     # PR 2.3 Step E: flip CIO to with_structured_output. The LLM emits a
@@ -171,7 +182,7 @@ def run_cio(
                 [HumanMessage(content=prompt)],
                 config={
                     "metadata": load_prompt(
-                        "ic_cio_evaluation"
+                        prompt_name
                     ).langsmith_metadata()
                 },
             ),
@@ -270,6 +281,8 @@ def _build_cio_prompt(
     run_date: str,
     prior_decisions: list[dict] | None = None,
     prior_cycle_scorecard: str | None = None,
+    deblended: bool = False,
+    sector_neutral_quality: dict[str, float] | None = None,
 ) -> str:
     """Build the single batch CIO prompt.
 
@@ -281,7 +294,24 @@ def _build_cio_prompt(
     ``str.format`` since the template has no ``{prior_cycle_scorecard}``
     placeholder yet. Mirrors the established
     ``agents/macro_agent.py::regime_substrate_block`` pattern.
+
+    When ``deblended`` (L4564), each candidate line carries a SECTOR-NEUTRAL
+    stock-quality rank (0–100, within this pool, derived from
+    ``sector_neutral_quality``) and the v1.5.0 ``_PROMPT_DEBLENDED`` template
+    is loaded — it ranks PRIMARILY on that neutral quality and weighs the
+    sector tilt once, killing the rubric-bias double-count. OFF → byte-identical
+    to the legacy path.
     """
+
+    # De-blended: render a within-pool 0–100 rank of the sector-neutral quality
+    # (a monotonic transform of the z-scores — Spearman-equivalent to what the
+    # backtester attribution measures, but unifies z + cold-start-fallback onto
+    # one interpretable scale for the LLM).
+    quality_rank = (
+        {t: v * 100.0 for t, v in _pct_rank(sector_neutral_quality).items()}
+        if deblended and sector_neutral_quality
+        else {}
+    )
 
     # Format candidates
     cand_lines = []
@@ -294,8 +324,20 @@ def _build_cio_prompt(
         bear = (c.get("bear_case", "") or "")[:150]
         cats = ", ".join(c.get("catalysts", [])[:3]) if c.get("catalysts") else "none specified"
 
+        if deblended:
+            sq = quality_rank.get(c["ticker"])
+            sq_str = f"{sq:.0f}/100" if sq is not None else "n/a"
+            head = (
+                f"  {i}. {c['ticker']} [{team}] — Sector-Neutral Quality: "
+                f"{sq_str}; Quant: {qs}, Qual: {qls}, Conviction: {conv}"
+            )
+        else:
+            head = (
+                f"  {i}. {c['ticker']} [{team}] — Quant: {qs}, "
+                f"Qual: {qls}, Conviction: {conv}"
+            )
         cand_lines.append(
-            f"  {i}. {c['ticker']} [{team}] — Quant: {qs}, Qual: {qls}, Conviction: {conv}\n"
+            f"{head}\n"
             f"     Bull: {bull}\n"
             f"     Bear: {bear}\n"
             f"     Catalysts: {cats}"
@@ -323,7 +365,7 @@ def _build_cio_prompt(
 
     regime = macro_context.get("market_regime", "neutral")
 
-    return load_prompt("ic_cio_evaluation").format(
+    return load_prompt(_PROMPT_DEBLENDED if deblended else _PROMPT_DEFAULT).format(
         run_date=run_date,
         regime=regime,
         open_slots=open_slots,
@@ -341,6 +383,142 @@ def _combined_score(c: dict) -> float:
     qs = c.get("quant_score") or 0
     qls = c.get("qual_score") or 0
     return (qs + qls) / 2 if qls else qs
+
+
+# ── De-blended CIO orchestration (L4564) ────────────────────────────────────
+# Strip the rubric's persistent per-sector bias from the composite stock score
+# in CODE so the CIO ranks on apples-to-apples quality and weighs the sector
+# tilt SEPARATELY (instead of the raw, sector-biased score double-counting with
+# the sector ratings it also receives). The construction mirrors the backtester
+# instrument `analysis/end_to_end.py::_trailing_sector_neutral` (L4564 Phase A,
+# measured IC +0.086 vs +0.042 pool-wide / -0.016 raw at n=89) so the live
+# signal is exactly what the attribution recomputes — no separate persistence.
+
+
+def _pct_rank(values: dict[str, float]) -> dict[str, float]:
+    """Percentile rank in (0, 1] with pandas ``.rank(pct=True)`` semantics
+    (average rank for ties / n). The cold-start / thin-sector fallback."""
+    items = [(t, v) for t, v in values.items() if v is not None]
+    n = len(items)
+    if n == 0:
+        return {}
+    order = sorted(items, key=lambda kv: kv[1])
+    ranks: dict[str, float] = {}
+    i = 0
+    while i < n:
+        j = i
+        while j + 1 < n and order[j + 1][1] == order[i][1]:
+            j += 1
+        avg_rank = (i + 1 + j + 1) / 2.0  # 1-based ranks i..j averaged
+        for k in range(i, j + 1):
+            ranks[order[k][0]] = avg_rank / n
+        i = j + 1
+    return ranks
+
+
+def compute_sector_neutral_quality(
+    candidate_quality: dict[str, tuple[str, float]],
+    prior_sector_scores: dict[str, list[float]],
+    *,
+    k_min: int = 6,
+) -> dict[str, float]:
+    """Deterministic sector-neutral stock-quality per candidate (L4564).
+
+    ``candidate_quality`` maps ticker → (sector, composite ``weighted_base``).
+    ``prior_sector_scores`` maps sector → that sector's PRIOR-cycle scores from
+    research.db. For each candidate::
+
+        q = (weighted_base − μ_sector) / σ_sector
+
+    where μ/σ are the trailing mean/std of the candidate's sector (the
+    persistent rubric bias estimated from history — the current pool is only
+    ~2–3 names/sector, too thin for a within-cycle within-sector z-score).
+    Sectors with < ``k_min`` prior samples (cold start) fall back to the
+    within-pool percentile rank, so every candidate gets a comparable value.
+    Mirrors the backtester ``_trailing_sector_neutral``.
+
+    Returns ``{ticker: neutral_score}`` (z-scores; fallback rows ∈ (0, 1]).
+    """
+    out: dict[str, float] = {}
+    fallback: list[str] = []
+    for ticker, (sector, q) in candidate_quality.items():
+        prior = prior_sector_scores.get(sector) or []
+        if len(prior) >= k_min:
+            mu = sum(prior) / len(prior)
+            var = sum((x - mu) ** 2 for x in prior) / (len(prior) - 1)
+            sd = var ** 0.5
+            if sd > 1e-9:
+                out[ticker] = (q - mu) / sd
+                continue
+        fallback.append(ticker)
+    if fallback:
+        pool = _pct_rank({t: candidate_quality[t][1] for t in candidate_quality})
+        for t in fallback:
+            out[t] = pool.get(t, 0.5)
+    return out
+
+
+def load_prior_sector_scores(db_conn, run_date: str) -> dict[str, list[float]]:
+    """Trailing per-sector composite scores from research.db (leak-free).
+
+    Joins ``cio_evaluations.combined_score`` (= composite ``weighted_base``) to
+    ``universe_returns.sector`` on (ticker, eval_date) for all eval_dates
+    STRICTLY BEFORE ``run_date`` — the same sector source the backtester
+    instrument uses. Returns ``{sector: [score, ...]}``; empty on any error
+    (caller then ranks every candidate pool-wide, logged — graceful, never
+    silently wrong)."""
+    out: dict[str, list[float]] = {}
+    if db_conn is None or not run_date:
+        return out
+    try:
+        rows = db_conn.execute(
+            "SELECT ur.sector, ce.combined_score "
+            "FROM cio_evaluations ce "
+            "JOIN universe_returns ur "
+            "  ON ce.ticker = ur.ticker AND ce.eval_date = ur.eval_date "
+            "WHERE ce.eval_date < ? AND ce.combined_score IS NOT NULL "
+            "  AND ur.sector IS NOT NULL",
+            (run_date,),
+        ).fetchall()
+    except Exception as e:  # noqa: BLE001 — graceful de-blend degradation, logged
+        log.warning(
+            "[cio] de-blend: prior sector-score load failed (%s) — every "
+            "candidate falls back to pool-wide rank this cycle", e,
+        )
+        return out
+    for sector, score in rows:
+        if sector is not None and score is not None:
+            out.setdefault(sector, []).append(float(score))
+    return out
+
+
+def build_sector_neutral_quality_map(
+    candidates: list[dict],
+    investment_theses: dict,
+    db_conn,
+    run_date: str,
+    *,
+    k_min: int = 6,
+) -> dict[str, float]:
+    """Orchestrate the live sector-neutral quality map for the CIO node.
+
+    Sources each candidate's composite ``weighted_base`` + sector from
+    ``investment_theses`` (computed upstream by ``score_aggregator``), loads the
+    trailing per-sector baseline from research.db, and returns
+    ``{ticker: neutral_score}``. Candidates missing a ``weighted_base``/sector
+    are omitted (the prompt renderer falls back to no-rank for them)."""
+    candidate_quality: dict[str, tuple[str, float]] = {}
+    for c in candidates:
+        ticker = c.get("ticker")
+        thesis = (investment_theses or {}).get(ticker, {})
+        wb = thesis.get("weighted_base")
+        sector = thesis.get("sector") or c.get("sector")
+        if ticker and wb is not None and sector:
+            candidate_quality[ticker] = (sector, float(wb))
+    if not candidate_quality:
+        return {}
+    prior = load_prior_sector_scores(db_conn, run_date)
+    return compute_sector_neutral_quality(candidate_quality, prior, k_min=k_min)
 
 
 def _reconcile_cio_decisions(

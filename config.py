@@ -358,6 +358,18 @@ CIO_FORCE_FILL_CONVICTION_FLOOR: float = float(
 CIO_NEW_ENTRANT_ALERT_FLOOR: int = int(
     _cio_cfg.get("new_entrant_alert_floor", CIO_MIN_NEW_ENTRANTS)
 )
+# De-blended CIO orchestration (L4564): when enabled, the CIO ranks on a
+# deterministic SECTOR-NEUTRAL stock-quality score (rubric's per-sector bias
+# stripped in code) and weighs the sector tilt as a SEPARATE lever — instead
+# of the raw, sector-biased combined_score. Default OFF so the merge is inert;
+# flip for a >=2-3-cycle soak. Env var (set on the Lambda) overrides the YAML
+# so the soak flips with NO redeploy; absent env → the scoring.yaml default.
+_cio_deblended_env = os.environ.get("CIO_DEBLENDED_ORCHESTRATION")
+CIO_DEBLENDED_ORCHESTRATION: bool = (
+    _cio_deblended_env.strip().lower() == "true"
+    if _cio_deblended_env is not None
+    else bool(_cio_cfg.get("deblended_orchestration", False))
+)
 
 # ── LLM ───────────────────────────────────────────────────────────────────────
 LLM_CFG: dict = _cfg["llm"]
