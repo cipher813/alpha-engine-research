@@ -64,6 +64,7 @@ from alpha_engine_lib.decision_capture import DecisionArtifact
 
 from config import ANTHROPIC_API_KEY, MAX_TOKENS_STRATEGIC, S3_BUCKET
 from agents.prompt_loader import LoadedPrompt, load_prompt
+from evals.judge_models import TAG_BY_LOGICAL, request_model_for
 from graph.llm_cost_tracker import get_cost_telemetry_callback, track_llm_cost
 from graph.state_schemas import (
     RubricEvalArtifact,
@@ -79,8 +80,13 @@ logger = logging.getLogger(__name__)
 DEFAULT_JUDGE_MODEL = "claude-haiku-4-5"
 """Default judge model — Haiku for cost on every weekly run.
 
-Sonnet (``claude-sonnet-4-6``) is used for the nuance-tier sampled
-subset."""
+This is the STABLE logical key, not the API request string: the actual
+request is pinned to the dated snapshot via
+``judge_models.request_model_for`` (L4578(a)), while this logical key
+stays constant for the S3 path / CloudWatch dimension / custom_id tag so
+a snapshot pin doesn't reset the rolling-mean time series. Sonnet
+(``claude-sonnet-4-6``) is the nuance-tier judge on the sampled subset.
+See ``evals/judge_models.py`` for the pin + re-anchor protocol."""
 
 DEFAULT_MAX_TOKENS = MAX_TOKENS_STRATEGIC
 """Token cap for the judge response. Routes through the strategic-tier
@@ -170,13 +176,11 @@ def resolve_rubric_for_agent(agent_id: str) -> Optional[str]:
 _CUSTOM_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
 """Anthropic batch custom_id regex (per Message Batches API docs)."""
 
-_JUDGE_MODEL_TAG = {
-    "claude-haiku-4-5": "h45",
-    "claude-sonnet-4-6": "s46",
-}
-"""Compact tags for the two judge models. Keeps custom_id under the
-64-char limit even when judged_agent_id is long
-(e.g. ``thesis_update:technology:AAPL``)."""
+_JUDGE_MODEL_TAG = TAG_BY_LOGICAL
+"""Compact tags for the judge models, keyed by logical key. Sourced from
+``judge_models.TAG_BY_LOGICAL`` so the tag map can't drift from the
+registry. Keeps custom_id under the 64-char limit even when
+judged_agent_id is long (e.g. ``thesis_update:technology:AAPL``)."""
 
 _JUDGE_MODEL_TAG_REVERSE = {v: k for k, v in _JUDGE_MODEL_TAG.items()}
 
@@ -505,9 +509,13 @@ def build_batch_request(
     # ``with_structured_output(...)``'s ``tool_choice`` posture. Without
     # this the model can decide to emit prose, which would fall through
     # every parser in this module.
+    #
+    # ``judge_model`` is the logical key; pin it to the dated snapshot
+    # for the actual API call (L4578(a)). The custom_id (built by the
+    # caller) keeps the logical key so persistence/dimension stay stable.
     return build_batches_request_params(
         custom_id=custom_id,
-        model=judge_model,
+        model=request_model_for(judge_model),
         max_tokens=max_tokens,
         user_content=rendered,
         tools=[tool_spec],
@@ -670,8 +678,11 @@ def evaluate_artifact(
 
     rendered = _render_rubric(artifact, loaded_prompt)
 
+    # ``judge_model`` is the stable logical key (persisted + dimension);
+    # pin it to the dated snapshot for the actual API call (L4578(a)).
+    request_model = request_model_for(judge_model)
     llm = ChatAnthropic(
-        model=judge_model,
+        model=request_model,
         anthropic_api_key=api_key or ANTHROPIC_API_KEY,
         max_tokens=max_tokens,
         callbacks=[get_cost_telemetry_callback()],
@@ -686,6 +697,7 @@ def evaluate_artifact(
 
     llm_output: Optional[RubricEvalLLMOutput] = None
     last_err: Optional[BaseException] = None
+    resolved_model: Optional[str] = None
 
     with track_llm_cost(
         agent_id="eval_judge",
@@ -704,6 +716,16 @@ def evaluate_artifact(
             parsing_error = resp.get("parsing_error")
             if parsed is not None and parsing_error is None:
                 llm_output = parsed
+                # Record what Anthropic RESOLVED the request to (the
+                # response 'model' field) — the re-anchor trigger for
+                # L4578(a). Defensive: response_metadata shape is
+                # provider-controlled, so anything that isn't a dict with
+                # a 'model' key leaves it None rather than crashing the
+                # eval (the field is ``str | None``).
+                raw_meta = getattr(resp.get("raw"), "response_metadata", None)
+                resolved_model = (
+                    raw_meta.get("model") if isinstance(raw_meta, dict) else None
+                )
                 if attempt > 0:
                     logger.info(
                         "[eval_judge] parse succeeded on attempt %d/%d "
@@ -743,6 +765,8 @@ def evaluate_artifact(
         rubric_id=rubric_name,
         rubric_version=loaded_prompt.version,
         judge_model=judge_model,
+        judge_request_model=request_model,
+        judge_resolved_model=resolved_model,
         dimension_scores=llm_output.dimension_scores,
         overall_reasoning=llm_output.overall_reasoning,
     )

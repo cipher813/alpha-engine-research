@@ -139,7 +139,9 @@ class TestBuildBatchRequest:
 
         assert req["custom_id"] == cid
         params = req["params"]
-        assert params["model"] == "claude-haiku-4-5"
+        # The API request is pinned to the dated snapshot (L4578(a)); the
+        # logical key 'claude-haiku-4-5' lives on the custom_id, not here.
+        assert params["model"] == "claude-haiku-4-5-20251001"
         assert "max_tokens" in params
         # Tool use is set up so the LLM is forced to call the rubric
         # tool — same posture as ``with_structured_output`` on the sync

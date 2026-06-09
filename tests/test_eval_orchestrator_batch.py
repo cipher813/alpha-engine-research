@@ -183,9 +183,16 @@ class TestBuildBatchPlan:
             if s.get("stage") == "empty_input_skip"
         ]
         assert len(empty_skips) == 1
-        # All requests target Haiku for the weekly cadence.
+        # All requests target Haiku for the weekly cadence. The API
+        # request is PINNED to the dated snapshot (L4578(a))...
         models = {r["params"]["model"] for r in plan["requests"]}
-        assert models == {"claude-haiku-4-5"}
+        assert models == {"claude-haiku-4-5-20251001"}
+        # ...while the custom_id still carries the STABLE logical key, so
+        # persistence + the CloudWatch dimension don't move on a pin.
+        from evals.judge import decode_custom_id
+
+        logical = {decode_custom_id(r["custom_id"])[2] for r in plan["requests"]}
+        assert logical == {"claude-haiku-4-5"}
 
     def test_first_saturday_path_haiku_plus_sonnet_per_mapped_artifact(
         self, mocked_s3,
@@ -198,10 +205,12 @@ class TestBuildBatchPlan:
             force_sonnet_pass=True,
             s3_client=mocked_s3,
         )
-        # 3 mapped artifacts × 2 tiers = 6 requests.
+        # 3 mapped artifacts × 2 tiers = 6 requests. Haiku is pinned to
+        # its dated snapshot; Sonnet 4.6 has no snapshot to pin to so it
+        # requests the alias (L4578(a)).
         assert len(plan["requests"]) == 6
         models = {r["params"]["model"] for r in plan["requests"]}
-        assert models == {"claude-haiku-4-5", "claude-sonnet-4-6"}
+        assert models == {"claude-haiku-4-5-20251001", "claude-sonnet-4-6"}
 
     def test_judge_only_routes_to_isolated_eval_prefix(self, mocked_s3):
         from evals.orchestrator import (
