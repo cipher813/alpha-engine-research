@@ -1,0 +1,67 @@
+{
+  "ordering_constraints": [
+    [
+      "fetch_data",
+      "sector_team_node"
+    ],
+    [
+      "fetch_data",
+      "macro_economist_node"
+    ],
+    [
+      "fetch_data",
+      "exit_evaluator_node"
+    ],
+    [
+      "sector_team_node",
+      "merge_results"
+    ],
+    [
+      "macro_economist_node",
+      "merge_results"
+    ],
+    [
+      "exit_evaluator_node",
+      "merge_results"
+    ],
+    [
+      "merge_results",
+      "score_aggregator"
+    ],
+    [
+      "score_aggregator",
+      "cio_node"
+    ],
+    [
+      "cio_node",
+      "population_entry_handler"
+    ],
+    [
+      "population_entry_handler",
+      "consolidator_node"
+    ],
+    [
+      "consolidator_node",
+      "archive_writer"
+    ],
+    [
+      "archive_writer",
+      "email_sender_node"
+    ]
+  ],
+  "required_nodes": [
+    "fetch_data",
+    "sector_team_node",
+    "macro_economist_node",
+    "exit_evaluator_node",
+    "merge_results",
+    "score_aggregator",
+    "cio_node",
+    "population_entry_handler",
+    "consolidator_node",
+    "archive_writer",
+    "email_sender_node"
+  ],
+  "schema": 1,
+  "sector_team_count": 6
+}
