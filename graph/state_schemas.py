@@ -435,7 +435,27 @@ class RubricEvalArtifact(BaseModel):
     )
     rubric_id: str = Field(description="Rubric prompt name (e.g. 'eval_rubric_sector_quant').")
     rubric_version: str = Field(description="Rubric prompt version at eval time (semver from prompt frontmatter).")
-    judge_model: str = Field(description="Model name of the judge LLM (e.g. 'claude-haiku-4-5').")
+    judge_model: str = Field(description="STABLE logical key of the judge LLM (e.g. 'claude-haiku-4-5'). Keyed on by the S3 path, the CloudWatch 'judge_model' dimension, and the custom_id tag — held constant across snapshot pins so the rolling-mean time series doesn't reset for a non-change. See evals/judge_models.py.")
+    judge_request_model: str | None = Field(
+        default=None,
+        description=(
+            "Exact model string sent to the Anthropic API (e.g. "
+            "'claude-haiku-4-5-20251001'). Pinned to an immutable dated "
+            "snapshot where Anthropic publishes one, else the alias. None "
+            "on skip-marker artifacts (no LLM call) and on pre-L4578(a) "
+            "records. See evals/judge_models.py."
+        ),
+    )
+    judge_resolved_model: str | None = Field(
+        default=None,
+        description=(
+            "Model string Anthropic RESOLVED the request to (response "
+            "'model' field) — the authoritative record of what actually "
+            "ran and the re-anchor trigger: a change here for a given "
+            "judge_model signals a judge upgrade that breaks score "
+            "comparability. None on skips and pre-L4578(a) records."
+        ),
+    )
     dimension_scores: list[RubricDimensionScore] = Field(
         default_factory=list,
         description=(

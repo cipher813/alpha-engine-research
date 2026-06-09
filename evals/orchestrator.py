@@ -58,6 +58,7 @@ from evals.judge import (
     resolve_rubric_for_agent,
     _make_skip_eval_artifact,
 )
+from evals.judge_models import request_model_for
 from evals.metrics import DEFAULT_NAMESPACE, emit_eval_metric
 from graph.state_schemas import RubricEvalArtifact
 
@@ -927,6 +928,15 @@ def process_batch_results(
                 })
                 continue
 
+            # Resolved model Anthropic actually ran (batch message 'model'
+            # field) — the re-anchor trigger for L4578(a). Defensive .get
+            # so a shape change leaves it None rather than crashing.
+            resolved_model = (
+                message_payload.get("model")
+                if isinstance(message_payload, dict)
+                else getattr(message_payload, "model", None)
+            )
+
             # Look up rubric_version cheaply — load_prompt is cached.
             loaded_prompt = load_prompt(entry["rubric_id"])
             eval_artifact = RubricEvalArtifact(
@@ -938,6 +948,8 @@ def process_batch_results(
                 rubric_id=entry["rubric_id"],
                 rubric_version=loaded_prompt.version,
                 judge_model=entry["judge_model"],
+                judge_request_model=request_model_for(entry["judge_model"]),
+                judge_resolved_model=resolved_model,
                 dimension_scores=llm_output.dimension_scores,
                 overall_reasoning=llm_output.overall_reasoning,
             )

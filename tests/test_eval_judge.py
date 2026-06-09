@@ -307,7 +307,9 @@ class TestEvaluateArtifact:
         fake_llm = MagicMock()
         fake_llm.with_structured_output.return_value = fake_structured
 
-        with patch.object(judge_mod, "ChatAnthropic", return_value=fake_llm):
+        with patch.object(
+            judge_mod, "ChatAnthropic", return_value=fake_llm,
+        ) as mock_anthropic:
             artifact = _make_artifact("sector_quant:technology")
             result = judge_mod.evaluate_artifact(
                 artifact,
@@ -321,7 +323,16 @@ class TestEvaluateArtifact:
         assert result.judged_agent_id == "sector_quant:technology"
         assert result.run_id == artifact.run_id
         assert result.rubric_id == "eval_rubric_sector_quant"
+        # judge_model is the STABLE logical key (persistence/dimension)...
         assert result.judge_model == "claude-haiku-4-5"
+        # ...while the API call is PINNED to the dated snapshot (L4578(a)).
+        assert mock_anthropic.call_args.kwargs["model"] == (
+            "claude-haiku-4-5-20251001"
+        )
+        assert result.judge_request_model == "claude-haiku-4-5-20251001"
+        # MagicMock raw has no dict response_metadata → resolved is None,
+        # not a crash (defensive capture).
+        assert result.judge_resolved_model is None
         assert result.judged_artifact_s3_key.endswith("/r1.json")
         # Rubric version comes from the loaded prompt's frontmatter; we
         # don't pin to a specific semver here so prompt updates don't
@@ -338,6 +349,32 @@ class TestEvaluateArtifact:
         fake_llm.with_structured_output.assert_called_once()
         kwargs = fake_llm.with_structured_output.call_args.kwargs
         assert kwargs.get("include_raw") is True
+
+    def test_records_resolved_model_from_response_metadata(self):
+        """L4578(a): the API-resolved model is captured per-artifact for
+        drift detection / the re-anchor protocol."""
+        from evals import judge as judge_mod
+
+        fake_structured = MagicMock()
+        fake_structured.invoke.return_value = {
+            "parsed": _make_llm_output(),
+            # langchain_anthropic populates response_metadata['model']
+            # with the snapshot Anthropic resolved the request to.
+            "raw": MagicMock(
+                response_metadata={"model": "claude-haiku-4-5-20251001"},
+            ),
+            "parsing_error": None,
+        }
+        fake_llm = MagicMock()
+        fake_llm.with_structured_output.return_value = fake_structured
+
+        with patch.object(judge_mod, "ChatAnthropic", return_value=fake_llm):
+            result = judge_mod.evaluate_artifact(
+                _make_artifact("sector_quant:technology"),
+                judge_model="claude-haiku-4-5",
+                api_key="sk-test",
+            )
+        assert result.judge_resolved_model == "claude-haiku-4-5-20251001"
 
     def test_renders_artifact_payload_into_prompt(self, monkeypatch):
         """Verify the rubric prompt is rendered with the artifact's
