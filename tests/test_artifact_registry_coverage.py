@@ -53,6 +53,11 @@ EXPECTED_PER_FILE_PUT_COUNTS: dict[str, int] = {
     # grandfathered in ARTIFACT_REGISTRY.yaml — operator-gated, consumer
     # graceful-degrades, so not yet a load-bearing freshness SLA.
     "evals/calibration_kappa.py": 4,
+    # Control-band breach entries (L4578(e)) — writes to the SAME
+    # changelog/entries/ corpus as rolling_mean.py (already registered;
+    # observability, not a load-bearing freshness SLA), so no new
+    # ARTIFACT_REGISTRY row, just this per-file PUT pin.
+    "evals/control_bands.py": 1,
     "evals/eval_manifest.py": 1,
     "evals/judge.py": 1,
     "evals/last_week_scorecard.py": 2,
