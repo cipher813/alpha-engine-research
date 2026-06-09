@@ -1,0 +1,141 @@
+{
+  "golden_artifact": {
+    "agent_output": {
+      "ranked_picks": [
+        {
+          "rationale": "stub",
+          "score": 72,
+          "ticker": "AAPL"
+        }
+      ],
+      "summary": "golden output for the eval-regression gate"
+    },
+    "input_data_snapshot": {
+      "marker": "GOLDEN_TRACE_MARKER_AAPL",
+      "quant_metrics": {
+        "pe": 28.4,
+        "rev_growth": 0.08
+      },
+      "regime": "neutral",
+      "sector": "technology",
+      "ticker": "AAPL"
+    },
+    "run_id": "golden-run-001",
+    "timestamp": "2026-05-09T22:30:00.000Z"
+  },
+  "marker": "GOLDEN_TRACE_MARKER_AAPL",
+  "parse_case": {
+    "expected": {
+      "dimension_scores": [
+        {
+          "dimension": "numerical_grounding",
+          "score": 4
+        },
+        {
+          "dimension": "signal_calibration",
+          "score": 3
+        },
+        {
+          "dimension": "ranking_coherence",
+          "score": 4
+        },
+        {
+          "dimension": "regime_awareness",
+          "score": 3
+        },
+        {
+          "dimension": "reasoning_complexity",
+          "score": 2
+        },
+        {
+          "dimension": "output_completeness",
+          "score": 4
+        }
+      ],
+      "overall_reasoning": "Golden parse case; deterministic fixture."
+    },
+    "recorded_response": {
+      "content": [
+        {
+          "input": {
+            "dimension_scores": [
+              {
+                "dimension": "numerical_grounding",
+                "reasoning": "golden reasoning for numerical_grounding",
+                "score": 4
+              },
+              {
+                "dimension": "signal_calibration",
+                "reasoning": "golden reasoning for signal_calibration",
+                "score": 3
+              },
+              {
+                "dimension": "ranking_coherence",
+                "reasoning": "golden reasoning for ranking_coherence",
+                "score": 4
+              },
+              {
+                "dimension": "regime_awareness",
+                "reasoning": "golden reasoning for regime_awareness",
+                "score": 3
+              },
+              {
+                "dimension": "reasoning_complexity",
+                "reasoning": "golden reasoning for reasoning_complexity",
+                "score": 2
+              },
+              {
+                "dimension": "output_completeness",
+                "reasoning": "golden reasoning for output_completeness",
+                "score": 4
+              }
+            ],
+            "overall_reasoning": "Golden parse case; deterministic fixture."
+          },
+          "name": "RubricEvalLLMOutput",
+          "type": "tool_use"
+        }
+      ]
+    },
+    "rubric_id": "eval_rubric_sector_quant"
+  },
+  "rubrics": [
+    {
+      "agent_id": "ic_cio",
+      "prompt_hash": "d90b2a60d2540e438795f03c94a348f615699b2c611d8e029aeade59f456083b",
+      "rubric_id": "eval_rubric_ic_cio",
+      "version": "1.2.0"
+    },
+    {
+      "agent_id": "macro_economist",
+      "prompt_hash": "337306525432f82004a85b566d424fd0dac44e314292c4c7bc867a2d4356c82f",
+      "rubric_id": "eval_rubric_macro_economist",
+      "version": "1.4.0"
+    },
+    {
+      "agent_id": "sector_peer_review:technology",
+      "prompt_hash": "ad5e2c524aeb9405ceed76ee88e199a9834cf2cbd68c067a3f749717bf9a2d2f",
+      "rubric_id": "eval_rubric_sector_peer_review",
+      "version": "1.3.0"
+    },
+    {
+      "agent_id": "sector_qual:technology",
+      "prompt_hash": "c11f70e1405f6ef1cf6a80af6d6d63187c283f6ec9accd1a98fdb65bd88717d5",
+      "rubric_id": "eval_rubric_sector_qual",
+      "version": "1.4.0"
+    },
+    {
+      "agent_id": "sector_quant:technology",
+      "prompt_hash": "625eca023f5d0f9ccf21f9602e9602217101c03f2830d4e35b6e59463e81c62d",
+      "rubric_id": "eval_rubric_sector_quant",
+      "version": "1.4.0"
+    },
+    {
+      "agent_id": "thesis_update:technology:AAPL",
+      "prompt_hash": "0dcc9b7612d45b8e7ba3d8b72dada899d6d11f32e774125056f5c207f9ddfd38",
+      "rubric_id": "eval_rubric_thesis_update",
+      "version": "1.1.0"
+    }
+  ],
+  "schema": 1
+}
