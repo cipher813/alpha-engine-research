@@ -116,6 +116,22 @@ jobs:
           CONFIG_REPO_DIR: ${{ github.workspace }}/alpha-engine-config
         run: bash infrastructure/deploy.sh eval_judge_batch
 
+      # Eval rolling-mean Lambda — the EvalRollingMean Saturday SF state.
+      # Same image-share pattern, CMD override sets the entry to
+      # eval_rolling_mean_handler.handler. THIS STEP WAS MISSING from the
+      # workflow since the function's first manual deploy (2026-05-03):
+      # deploy.sh had the eval_rolling_mean target but nothing invoked it,
+      # so the Lambda silently rotted for 5+ weeks while the repo merged
+      # the >500-combo chunking fix (#201), the regression auto-emit, the
+      # L4578e control-bands emission, and the floor min-N gate (#279) —
+      # the merged-but-not-deployed class (cf. alpha-engine-data L4609).
+      # Found 2026-06-11 investigating the perpetual quality-floor ALARM.
+      - name: Deploy eval rolling-mean Lambda (alpha-engine-research-eval-rolling-mean)
+        working-directory: alpha-engine-research
+        env:
+          CONFIG_REPO_DIR: ${{ github.workspace }}/alpha-engine-config
+        run: bash infrastructure/deploy.sh eval_rolling_mean
+
       # Cross-week rationale clustering Lambda — same image-share as
       # eval-judge, different CMD entrypoint. Created lazily on first
       # deploy; idempotent thereafter. Auto-deployed on every push to
