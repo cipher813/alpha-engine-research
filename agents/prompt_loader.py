@@ -44,6 +44,9 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
+
+# Experiment package id (HARNESS_EXPERIMENT_CLASSIFICATION.md §3)
+_EXPERIMENT_ID = os.environ.get("ALPHA_ENGINE_EXPERIMENT_ID", "reference")
 _VERSION_LINE_RE = re.compile(r"^#\s*version\s*:\s*(\S+)\s*$")
 _DEFAULT_VERSION = "0.0.0"
 
@@ -133,10 +136,15 @@ def _resolve_prompt_path(name: str) -> Path:
     filename = f"{name}.txt"
     ws = os.environ.get("GITHUB_WORKSPACE")
     search = [
+        Path.home() / "alpha-engine-config" / "experiments" / _EXPERIMENT_ID / "research" / "prompts" / filename,
         Path.home() / "alpha-engine-config" / "research" / "prompts" / filename,
+        _REPO_ROOT.parent / "alpha-engine-config" / "experiments" / _EXPERIMENT_ID / "research" / "prompts" / filename,
         _REPO_ROOT.parent / "alpha-engine-config" / "research" / "prompts" / filename,
     ]
     if ws:
+        search.append(
+            Path(ws) / "alpha-engine-config" / "experiments" / _EXPERIMENT_ID / "research" / "prompts" / filename
+        )
         search.append(
             Path(ws) / "alpha-engine-config" / "research" / "prompts" / filename
         )
