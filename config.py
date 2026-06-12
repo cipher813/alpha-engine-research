@@ -32,12 +32,18 @@ def _find_config(filename: str, subdir: str = "research") -> Path:
          stages config repo yaml into this directory, subdir-flattened)
     """
     ws = os.environ.get("GITHUB_WORKSPACE")
-    search = [
-        Path.home() / "alpha-engine-config" / subdir / filename,
-        Path(__file__).parent.parent / "alpha-engine-config" / subdir / filename,
+    # Experiment package (HARNESS_EXPERIMENT_CLASSIFICATION.md §3): beliefs load
+    # from experiments/$ALPHA_ENGINE_EXPERIMENT_ID/<subdir>/ ahead of the legacy
+    # top-level <subdir>/ (kept as fallback through the transition).
+    exp = os.environ.get("ALPHA_ENGINE_EXPERIMENT_ID", "reference")
+    roots = [
+        Path.home() / "alpha-engine-config",
+        Path(__file__).parent.parent / "alpha-engine-config",
     ]
     if ws:
-        search.append(Path(ws) / "alpha-engine-config" / subdir / filename)
+        roots.append(Path(ws) / "alpha-engine-config")
+    search = [r / "experiments" / exp / subdir / filename for r in roots]
+    search += [r / subdir / filename for r in roots]
     # Lambda image: deploy.sh flattens <subdir>/<file> → config/<file>
     search.append(Path(__file__).parent / "config" / filename)
     found = next((p for p in search if p.exists()), None)
