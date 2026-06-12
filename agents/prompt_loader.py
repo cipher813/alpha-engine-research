@@ -145,7 +145,7 @@ def _resolve_prompt_path(name: str) -> Path:
         search.append(
             Path(ws) / "alpha-engine-config" / "experiments" / _EXPERIMENT_ID / "research" / "prompts" / filename
         )
-        candidates.append(
+        search.append(
             Path(ws) / "alpha-engine-config" / "research" / "prompts" / filename
         )
     search.append(_REPO_ROOT / "config" / "prompts" / filename)
